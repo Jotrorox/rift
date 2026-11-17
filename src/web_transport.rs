@@ -17,6 +17,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, watch},
     time::{Instant, Sleep, sleep},
 };
+use tokio_rustls::TlsAcceptor;
 
 const MAX_CONNECTIONS: usize = 64;
 /// A socket that moved fewer than [`WINDOW_BYTES`] in one window is closed:
@@ -32,6 +33,7 @@ pub struct Listener {
     socket: TcpListener,
     slots: Arc<Semaphore>,
     force: watch::Receiver<bool>,
+    tls: Option<watch::Receiver<Option<TlsAcceptor>>>,
 }
 
 impl Listener {
@@ -40,15 +42,42 @@ impl Listener {
             socket,
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             force,
+            tls: None,
         }
+    }
+
+    /// Serve HTTPS while the channel holds a certificate. Each accepted
+    /// connection reads it once, so a reload affects new connections only.
+    pub fn with_tls(mut self, tls: watch::Receiver<Option<TlsAcceptor>>) -> Self {
+        self.tls = Some(tls);
+        self
     }
 }
 
 impl axum::serve::Listener for Listener {
-    type Io = Stream;
+    type Io = Connection;
     type Addr = SocketAddr;
 
-    async fn accept(&mut self) -> (Stream, SocketAddr) {
+    async fn accept(&mut self) -> (Connection, SocketAddr) {
+        let (stream, address) = self.accept_stream().await;
+        let acceptor = self.tls.as_ref().and_then(|tls| tls.borrow().clone());
+        let state = match acceptor {
+            // The handshake runs inside the connection's own task, on its
+            // first read or write, so a slow client never stalls this loop;
+            // its bytes count against the same window and deadlines.
+            Some(acceptor) => State::Handshake(Box::new(acceptor.accept(stream)), address),
+            None => State::Plain(stream),
+        };
+        (Connection { state }, address)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+}
+
+impl Listener {
+    async fn accept_stream(&mut self) -> (Stream, SocketAddr) {
         loop {
             match self.socket.accept().await {
                 Ok((socket, address)) => {
@@ -71,9 +100,108 @@ impl axum::serve::Listener for Listener {
             }
         }
     }
+}
 
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.socket.local_addr()
+/// An accepted HTTP connection: plain, or TLS over the same bounded stream.
+pub struct Connection {
+    state: State,
+}
+
+enum State {
+    Plain(Stream),
+    Handshake(Box<tokio_rustls::Accept<Stream>>, SocketAddr),
+    Tls(Box<tokio_rustls::server::TlsStream<Stream>>),
+    Failed,
+}
+
+impl Connection {
+    /// Drive a pending handshake; `Ready(Ok)` once the stream carries HTTP.
+    fn poll_handshake(&mut self, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let State::Handshake(accept, address) = &mut self.state {
+            match Pin::new(accept.as_mut()).poll(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(stream)) => self.state = State::Tls(Box::new(stream)),
+                Poll::Ready(Err(error)) => {
+                    // Most often plain http:// sent to the https:// port.
+                    log_debug!("web TLS handshake from {address} failed: {error}");
+                    self.state = State::Failed;
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+        if matches!(self.state, State::Failed) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "TLS handshake failed",
+            )));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+macro_rules! connection_io {
+    ($this:ident, $context:ident, |$io:ident| $call:expr) => {{
+        let this = $this.get_mut();
+        match this.poll_handshake($context) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
+        match &mut this.state {
+            State::Plain(stream) => {
+                let $io = Pin::new(stream);
+                $call
+            }
+            State::Tls(stream) => {
+                let $io = Pin::new(stream.as_mut());
+                $call
+            }
+            State::Handshake(..) | State::Failed => unreachable!("handshake finished above"),
+        }
+    }};
+}
+
+impl AsyncRead for Connection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        connection_io!(self, context, |io| io.poll_read(context, buffer))
+    }
+}
+
+impl AsyncWrite for Connection {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        connection_io!(self, context, |io| io.poll_write(context, buffer))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        connection_io!(self, context, |io| io.poll_flush(context))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        connection_io!(self, context, |io| io.poll_shutdown(context))
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        connection_io!(self, context, |io| io.poll_write_vectored(context, buffers))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match &self.state {
+            State::Plain(stream) => stream.is_write_vectored(),
+            State::Tls(stream) => stream.is_write_vectored(),
+            State::Handshake(..) | State::Failed => false,
+        }
     }
 }
 
@@ -380,6 +508,88 @@ mod tests {
             .unwrap();
         next_peer.write_all(b"x").await.unwrap();
         assert_eq!(next.read_u8().await.unwrap(), b'x');
+    }
+
+    #[tokio::test]
+    async fn tls_follows_the_current_certificate_and_refuses_plain_clients() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let der = CertificateDer::from(certificate.cert.der().to_vec());
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![der.clone()],
+                PrivateKeyDer::Pkcs8(certificate.signing_key.serialize_der().into()),
+            )
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let client = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ));
+        let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let (_force, forced) = watch::channel(false);
+        let (tls, certificate) = watch::channel(Some(TlsAcceptor::from(Arc::new(server))));
+        let mut listener = Listener::new(socket, forced).with_tls(certificate);
+
+        // A TLS client talks through the handshake, which the server side
+        // drives from its first read.
+        let connecting = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let tcp = TcpStream::connect(address).await.unwrap();
+                let mut tls = client
+                    .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                    .await
+                    .unwrap();
+                tls.write_all(b"ping").await.unwrap();
+                let mut reply = [0; 4];
+                tls.read_exact(&mut reply).await.unwrap();
+                reply
+            }
+        });
+        let (mut connection, _) = listener.accept().await;
+        let mut request = [0; 4];
+        timeout(Duration::from_secs(5), connection.read_exact(&mut request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&request, b"ping");
+        connection.write_all(b"pong").await.unwrap();
+        connection.flush().await.unwrap();
+        assert_eq!(&connecting.await.unwrap(), b"pong");
+
+        // Plain HTTP on the TLS port fails the handshake, and stays failed.
+        let mut plain = TcpStream::connect(address).await.unwrap();
+        plain
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let (mut connection, _) = listener.accept().await;
+        assert!(
+            timeout(Duration::from_secs(5), connection.read(&mut [0; 16]))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(connection.write(b"x").await.is_err());
+
+        // Without a certificate, new connections are plain again.
+        tls.send_replace(None);
+        let mut plain = TcpStream::connect(address).await.unwrap();
+        plain.write_all(b"GET").await.unwrap();
+        let (mut connection, _) = listener.accept().await;
+        let mut request = [0; 3];
+        connection.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"GET");
     }
 
     #[tokio::test]

@@ -20,7 +20,8 @@ pub use managed::{
 };
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{
-    LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement, valid_node_directory,
+    LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement, default_token_env,
+    valid_node_directory,
 };
 pub use permissions::PermissionsConfig;
 pub use services::{
@@ -470,6 +471,43 @@ pub struct WebConfig {
     pub ui: bool,
     pub operators: BTreeMap<String, WebOperator>,
     pub records_directory: Option<std::path::PathBuf>,
+    /// HTTPS on `listen` itself, so remote nodes need no reverse proxy.
+    pub tls: Option<WebTls>,
+}
+
+/// `web.tls`: where the web service's certificate and key come from. Both are
+/// read again on every reload, so a renewed certificate applies on SIGHUP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebTls {
+    /// `tls = true`: the message bus certificate and key, which node agents
+    /// already trust through their `--ca` file.
+    Messaging,
+    /// `tls = { certificate = "...", private_key = "..." }`, relative to
+    /// Rift's working directory like the messaging files.
+    Files {
+        certificate: std::path::PathBuf,
+        private_key: std::path::PathBuf,
+    },
+}
+
+impl Config {
+    /// The certificate chain and private key files `web.tls` names, if the
+    /// web service is enabled and serves HTTPS.
+    pub fn web_tls_files(&self) -> Option<(&Path, &Path)> {
+        match self.web.as_ref()?.tls.as_ref()? {
+            WebTls::Messaging => {
+                let messaging = self.messaging.as_ref()?;
+                Some((
+                    messaging.certificate.as_deref()?,
+                    messaging.private_key.as_deref()?,
+                ))
+            }
+            WebTls::Files {
+                certificate,
+                private_key,
+            } => Some((certificate, private_key)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +530,7 @@ impl Default for WebConfig {
             ui: true,
             operators: BTreeMap::new(),
             records_directory: None,
+            tls: None,
         }
     }
 }
@@ -1557,6 +1596,16 @@ impl Config {
         }
         // Lists are deliberately flat: fallback targets' own lists are not followed.
         if let Some(web) = &self.web {
+            if web.tls == Some(WebTls::Messaging)
+                && self
+                    .messaging
+                    .as_ref()
+                    .is_none_or(|m| m.certificate.is_none() || m.private_key.is_none())
+            {
+                return Err(invalid(
+                    "web.tls = true uses the messaging certificate; configure messaging.certificate and private_key, or give web.tls = { certificate = ..., private_key = ... }",
+                ));
+            }
             if web.operators.len() > 128 {
                 return Err(invalid("web.operators: at most 128 operators"));
             }
@@ -2013,6 +2062,7 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
             "ui",
             "operators",
             "records_directory",
+            "tls",
         ],
     )?
     else {
@@ -2090,8 +2140,47 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
                 Some(base.join(value))
             }
         },
+        tls: web_tls(&table)?,
     };
     Ok(enabled.then_some(config))
+}
+
+/// `web.tls = true` (the messaging certificate), `false`, or
+/// `{ certificate = "...", private_key = "..." }`.
+fn web_tls(web: &Table) -> Result<Option<WebTls>, String> {
+    match web.raw_get::<Value>("tls").map_err(|e| e.to_string())? {
+        Value::Nil | Value::Boolean(false) => Ok(None),
+        Value::Boolean(true) => Ok(Some(WebTls::Messaging)),
+        Value::Table(files) => {
+            fields(&files, &["certificate", "private_key"], "web.tls")?;
+            let path = |key: &str| -> Result<std::path::PathBuf, String> {
+                let path = format!("web.tls.{key}");
+                match files.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                    Value::Nil => Err(format!(
+                        "{path}: required; or set web.tls = true to use the messaging certificate"
+                    )),
+                    value => {
+                        let value = string(value, &path)?;
+                        if value.trim().is_empty()
+                            || value.len() > 4096
+                            || value.chars().any(char::is_control)
+                        {
+                            return Err(format!("{path}: invalid path"));
+                        }
+                        Ok(value.into())
+                    }
+                }
+            };
+            Ok(Some(WebTls::Files {
+                certificate: path("certificate")?,
+                private_key: path("private_key")?,
+            }))
+        }
+        _ => Err(
+            "web.tls: expected true, false or { certificate = \"...\", private_key = \"...\" }"
+                .into(),
+        ),
+    }
 }
 
 fn routes(value: Value) -> Result<BTreeMap<String, Route>, String> {

@@ -701,6 +701,7 @@ fn http_services_are_independently_optional_and_have_loopback_defaults() {
             token_env: None,
             operators: BTreeMap::new(),
             records_directory: None,
+            tls: None,
         }
     );
     assert_eq!(
@@ -953,6 +954,53 @@ fn services_cannot_collide_with_listeners_each_other_or_backend_targets() {
         let source = with_options("web = {}").replace("127.0.0.1:25566", backend);
         let error = Config::from_lua(&source, "services.lua").unwrap_err();
         assert!(error.to_string().contains("same socket"), "{error}");
+    }
+}
+
+#[test]
+fn web_tls_uses_the_messaging_certificate_or_its_own_files() {
+    let messaging = "messaging = { listen = '127.0.0.1:7443', certificate = 'certs/bus.pem', private_key = 'certs/bus-key.pem', principals = { { name = 'p', token_env = 'RIFT_P_TOKEN', publish = { 'a' }, subscribe = { 'a' } } } }";
+    let config = Config::from_lua(
+        &with_options(&format!("web = {{ tls = true }}, {messaging}")),
+        "services.lua",
+    )
+    .unwrap();
+    assert_eq!(config.web.as_ref().unwrap().tls, Some(WebTls::Messaging));
+    assert_eq!(
+        config.web_tls_files(),
+        Some((Path::new("certs/bus.pem"), Path::new("certs/bus-key.pem")))
+    );
+    let config = Config::from_lua(
+        &with_options("web = { tls = { certificate = 'web.pem', private_key = 'web-key.pem' } }"),
+        "services.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.web_tls_files(),
+        Some((Path::new("web.pem"), Path::new("web-key.pem")))
+    );
+    let config = Config::from_lua(&with_options("web = { tls = false }"), "services.lua").unwrap();
+    assert_eq!(config.web_tls_files(), None);
+    for (options, expected) in [
+        ("web = { tls = true }", "messaging.certificate"),
+        ("web = { tls = 'yes' }", "web.tls: expected true"),
+        (
+            "web = { tls = { certificate = 'web.pem' } }",
+            "web.tls.private_key: required",
+        ),
+        (
+            "web = { tls = { certificate = 'web.pem', private_key = ' ' } }",
+            "web.tls.private_key: invalid path",
+        ),
+        (
+            "web = { tls = { certificate = 'a', private_key = 'b', ca = 'c' } }",
+            "unknown field",
+        ),
+    ] {
+        let error = Config::from_lua(&with_options(options), "services.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
     }
 }
 
