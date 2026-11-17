@@ -17,8 +17,11 @@ pub const STATE_INTERVAL: Duration = Duration::from_secs(2);
 pub const UNREACHABLE_AFTER: Duration = Duration::from_secs(10);
 /// Every command payload, reply and snapshot stays below the bus limit.
 pub const MAX_MESSAGE: usize = 1024 * 1024;
-/// Remote file reads and writes through the bus, before base64 encoding.
-pub const MAX_REMOTE_FILE: usize = 512 * 1024;
+/// One part of a remote file read or write, before base64 encoding. Larger
+/// files cross the bus in several parts.
+pub const FILE_PART: usize = 512 * 1024;
+/// The largest remote file the web console reads or writes, like local files.
+pub const MAX_REMOTE_FILE: usize = 64 * 1024 * 1024;
 pub const STATE_PATTERN: &str = "rift.node.*.state";
 
 pub fn command_subject(node: &str) -> String {
@@ -66,6 +69,10 @@ pub mod feature {
     pub const FORWARDING_SECRET: &str = "forwarding_secret";
     /// `tree`, `read`, `receive` and `discard`, for `rift admin move`.
     pub const MOVE: &str = "move";
+    /// Not a [`Start`] field: [`Files::offset`](super::Files::offset) and
+    /// [`Command::Upload`](super::Command::Upload), for files over
+    /// [`FILE_PART`](super::FILE_PART).
+    pub const FILE_PARTS: &str = "file_parts";
 }
 
 /// Every feature this build's agent applies and its controller may need.
@@ -76,6 +83,7 @@ pub const FEATURES: &[&str] = &[
     feature::MEMORY_LIMIT,
     feature::MOVE,
     feature::FORWARDING_SECRET,
+    feature::FILE_PARTS,
 ];
 
 /// A [`Start`] field that an agent without `feature` would silently drop.
@@ -156,6 +164,8 @@ pub enum Command {
     },
     /// Browse or edit one server directory.
     Files(Files),
+    /// One part of a file write larger than [`FILE_PART`]; see [`Upload`].
+    Upload(Upload),
     /// Sent after every (re)connection: stop processes and delete disposable
     /// instance directories that the controller no longer assigns to this node.
     Reconcile {
@@ -168,7 +178,7 @@ pub enum Command {
         directory: PathBuf,
         offset: u64,
     },
-    /// `rift admin move`, source side: up to [`MAX_REMOTE_FILE`] bytes of one
+    /// `rift admin move`, source side: up to [`FILE_PART`] bytes of one
     /// file of a stopped server, as `{"content": base64, "size": total}`.
     Read {
         server: String,
@@ -546,9 +556,35 @@ pub struct Files {
     /// `PUT` creates a folder instead of writing a file.
     #[serde(default)]
     pub folder: bool,
-    /// Base64 file contents for `PUT`.
+    /// Base64 file contents for `PUT`, at most [`FILE_PART`] bytes; larger
+    /// files use [`Command::Upload`].
     #[serde(default)]
     pub content: Option<String>,
+    /// `GET` of a file: reply with at most [`FILE_PART`] bytes from here,
+    /// plus `size` and `modified`, so the controller can fetch the rest.
+    /// Without it the agent replies with the whole file if it fits one part,
+    /// which is also all an agent from before this field does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// One part of a file write. Parts arrive in order; the agent appends them to
+/// a staging file beside the target and renames it into place after the part
+/// marked `done`, so readers never see a partial file. Agents from before
+/// this command refuse it instead of writing the first part as the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Upload {
+    pub server: String,
+    pub directory: PathBuf,
+    pub path: String,
+    /// 32 random hex digits chosen by the controller for the whole file.
+    pub id: String,
+    /// Bytes sent in earlier parts.
+    pub offset: u64,
+    /// Base64, at most [`FILE_PART`] bytes.
+    pub content: String,
+    #[serde(default)]
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

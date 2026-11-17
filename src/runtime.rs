@@ -2610,6 +2610,7 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
             path: String::new(),
             folder: false,
             content: None,
+            offset: None,
         });
         match nodes.request(&to, &listing, Duration::from_secs(15)).await {
             Ok(_) => {}

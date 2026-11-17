@@ -96,9 +96,11 @@ mod tests {
             let error = open(token, node, &sealed).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
+        // A character inside the nonce: near the end, base64 padding bits
+        // would let some edits decode to the same bytes.
         let mut tampered = sealed.clone().into_bytes();
-        let last = tampered.len() - 3;
-        tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
+        let middle = PREFIX.len() + 8;
+        tampered[middle] = if tampered[middle] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(tampered).unwrap();
         for bad in ["", "fs1.", "fs1.AAAA", "velocity secret", tampered.as_str()] {
             assert!(open(TOKEN, "node1", bad).is_err(), "{bad}");

@@ -2,7 +2,7 @@
 //! to another, through the controller.
 //!
 //! The controller lists the source directory page by page
-//! ([`Command::Tree`]), reads each file in chunks of [`MAX_REMOTE_FILE`] bytes
+//! ([`Command::Tree`]), reads each file in chunks of [`FILE_PART`] bytes
 //! ([`Command::Read`]) and writes them into a staging folder on the target
 //! ([`Command::Receive`]). Agents never talk to each other, so a move needs no
 //! listener on the agents and no credentials beyond their bus sessions. The
@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use super::{
     Nodes,
     protocol::{
-        self, Command, FileEnd, MAX_REMOTE_FILE, MOVE_MARKER, Receive, ReceiveStep, Tree, TreeEntry,
+        self, Command, FILE_PART, FileEnd, MOVE_MARKER, Receive, ReceiveStep, Tree, TreeEntry,
     },
 };
 
@@ -345,8 +345,8 @@ pub(crate) fn read_chunk(base: &Path, path: &str, offset: u64) -> io::Result<Val
         return Err(invalid(format!("{path} shrank during the move")));
     }
     file.seek(SeekFrom::Start(offset))?;
-    let mut buffer = Vec::with_capacity((size - offset).min(MAX_REMOTE_FILE as u64) as usize);
-    file.take(MAX_REMOTE_FILE as u64).read_to_end(&mut buffer)?;
+    let mut buffer = Vec::with_capacity((size - offset).min(FILE_PART as u64) as usize);
+    file.take(FILE_PART as u64).read_to_end(&mut buffer)?;
     Ok(json!({"content": protocol::encode_base64(&buffer), "size": size}))
 }
 
@@ -410,7 +410,7 @@ pub(crate) fn receive_step(
             staged()?;
             let bytes = protocol::decode_base64(content)
                 .ok_or_else(|| invalid("file contents must be base64"))?;
-            if bytes.len() > MAX_REMOTE_FILE {
+            if bytes.len() > FILE_PART {
                 return Err(io::Error::new(
                     io::ErrorKind::FileTooLarge,
                     "a move chunk holds at most 512 KiB",
@@ -701,9 +701,7 @@ mod tests {
         let root = scratch("relay");
         let source = root.join("a/local/services/lobby-1");
         fs::create_dir_all(source.join("world/empty")).unwrap();
-        let big: Vec<u8> = (0..MAX_REMOTE_FILE * 2 + 17)
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let big: Vec<u8> = (0..FILE_PART * 2 + 17).map(|i| (i % 251) as u8).collect();
         fs::write(source.join("world/region.mca"), &big).unwrap();
         fs::write(source.join("blank"), b"").unwrap();
         fs::write(source.join("start.sh"), b"#!/bin/sh\n").unwrap();

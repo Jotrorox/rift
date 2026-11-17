@@ -489,6 +489,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             path: path.into(),
             folder: false,
             content: content.map(protocol::encode_base64),
+            offset: None,
         })
     };
     fixture
@@ -557,6 +558,121 @@ async fn template_server(storage: PathBuf) -> SocketAddr {
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     address
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_larger_than_a_bus_message_move_in_parts() {
+    let fixture = Fixture::new().await;
+    let agent = fixture.agent(None);
+    let connection = fixture.connect(&agent).await;
+    eventually("node online", || fixture.nodes.online("node1")).await;
+    let directory = fixture.root.join("agent/survival");
+    // Three full parts and a partial one, with bytes that differ per part.
+    let contents: Vec<u8> = (0..protocol::FILE_PART * 3 + 1234)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let reply = fixture
+        .nodes
+        .write_file(
+            "node1",
+            "survival",
+            "survival".into(),
+            "world/region/r.0.0.mca".into(),
+            &contents,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply["size"], contents.len());
+    assert_eq!(
+        fs::read(directory.join("world/region/r.0.0.mca")).unwrap(),
+        contents
+    );
+    let staged = fs::read_dir(directory.join("world/region"))
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            name.to_string_lossy().starts_with(".rift-upload-")
+        })
+        .count();
+    assert_eq!(staged, 0, "staging files must not remain");
+    let read = |path: &str| {
+        fixture.nodes.read_file(
+            "node1",
+            protocol::Files {
+                server: "survival".into(),
+                directory: "survival".into(),
+                method: "GET".into(),
+                path: path.into(),
+                folder: false,
+                content: None,
+                offset: None,
+            },
+        )
+    };
+    match read("world/region/r.0.0.mca").await.unwrap() {
+        rift::node::Remote::File(read) => assert!(read == contents, "contents differ"),
+        other => panic!("expected a file, got {other:?}"),
+    }
+    match read("world/region").await.unwrap() {
+        rift::node::Remote::Folder(listing) => {
+            assert_eq!(listing["entries"][0]["name"], "r.0.0.mca")
+        }
+        other => panic!("expected a folder, got {other:?}"),
+    }
+    // A part that does not continue the file abandons the upload.
+    let part = |offset: u64, done: bool| {
+        Command::Upload(protocol::Upload {
+            server: "survival".into(),
+            directory: "survival".into(),
+            path: "big.dat".into(),
+            id: "0123456789abcdef0123456789abcdef".into(),
+            offset,
+            content: protocol::encode_base64(b"part"),
+            done,
+        })
+    };
+    let wait = Duration::from_secs(5);
+    fixture
+        .nodes
+        .request("node1", &part(0, false), wait)
+        .await
+        .unwrap();
+    let error = fixture
+        .nodes
+        .request("node1", &part(9, true), wait)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{error}");
+    let error = fixture
+        .nodes
+        .request("node1", &part(4, true), wait)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+    assert!(!directory.join("big.dat").exists());
+    assert!(
+        !directory
+            .join(".rift-upload-0123456789abcdef0123456789abcdef")
+            .exists()
+    );
+    // Rift's own files stay protected.
+    let error = fixture
+        .nodes
+        .write_file(
+            "node1",
+            "survival",
+            "survival".into(),
+            ".rift-instance.json".into(),
+            &contents,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    connection.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -913,7 +1029,7 @@ async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() 
     let source = fixture.root.join("agent").join(relative);
     let target = fixture.root.join("agent2").join(relative);
     // Several chunks, so the next read overlaps the previous write.
-    let region: Vec<u8> = (0..protocol::MAX_REMOTE_FILE * 3 + 5)
+    let region: Vec<u8> = (0..protocol::FILE_PART * 3 + 5)
         .map(|index| (index * 7 % 256) as u8)
         .collect();
     fs::create_dir_all(source.join("world/region")).unwrap();
