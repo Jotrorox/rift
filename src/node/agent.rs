@@ -442,6 +442,10 @@ impl Agent {
     }
 
     pub async fn state(&self) -> NodeState {
+        let root = self.root.clone();
+        let resources = tokio::task::spawn_blocking(move || super::host::measure(&root))
+            .await
+            .ok();
         let processes = self.processes.lock().await;
         NodeState {
             agent: self.id.clone(),
@@ -462,6 +466,7 @@ impl Agent {
                 .iter()
                 .cloned()
                 .collect(),
+            resources,
         }
     }
 
