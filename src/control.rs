@@ -40,10 +40,23 @@ impl From<io::Error> for Error {
 
 pub enum Operation {
     Reload,
-    Save { source: String, revision: String },
-    Rollback { source: String, revision: String },
-    CreateInstance { group: String },
-    RemoveInstance { name: String },
+    Save {
+        source: String,
+        revision: String,
+    },
+    Rollback {
+        source: String,
+        revision: String,
+    },
+    CreateInstance {
+        group: String,
+    },
+    RemoveInstance {
+        name: String,
+    },
+    /// The commit of `rift admin move`, once the instance is parked and its
+    /// files are staged on the target node (see `crate::moving`).
+    MoveInstance(crate::moving::Commit),
 }
 pub struct Command {
     pub operation: Operation,
@@ -204,7 +217,9 @@ pub fn prepare_with_instances(
             }
             (source, true)
         }
-        Operation::CreateInstance { .. } | Operation::RemoveInstance { .. } => {
+        Operation::CreateInstance { .. }
+        | Operation::RemoveInstance { .. }
+        | Operation::MoveInstance(_) => {
             return Err(Error::invalid(
                 "instance operations do not edit configuration files",
             ));

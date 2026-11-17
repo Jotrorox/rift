@@ -550,6 +550,34 @@ pub(crate) fn remove_on_node(
     Ok(true)
 }
 
+/// Agent side of `discard`: delete the persistent directory of `server`
+/// after it moved to another node. The directory must be named after the
+/// server and, where it has an ownership marker, belong to it.
+pub(crate) fn discard_on_node(server: &str, directory: &Path) -> io::Result<bool> {
+    let directory = checked_path(directory)?;
+    if !exists(&directory)? {
+        return Ok(false);
+    }
+    if directory.file_name() != Some(std::ffi::OsStr::new(server)) {
+        return Err(invalid(
+            "the directory is not named after the server; refusing to delete",
+        ));
+    }
+    if exists(&directory.join(MARKER))?
+        && read_marker(&directory)?.get("name") != Some(&json!(server))
+    {
+        return Err(invalid(
+            "instance ownership marker does not match; refusing to delete",
+        ));
+    }
+    validate_tree(&directory, false)?;
+    fs::remove_dir_all(&directory)?;
+    if let Some(parent) = directory.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(true)
+}
+
 /// The disposable instance a directory belongs to, from its ownership marker.
 pub(crate) fn disposable_owner(directory: &Path) -> Option<String> {
     let marker = read_marker(directory).ok()?;

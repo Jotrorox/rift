@@ -107,6 +107,9 @@ pub struct ManagedServerSnapshot {
     pub restart_exhausted: bool,
     /// The node agent running this server; `None` for this host.
     pub node: Option<String>,
+    /// Held by `rift admin move`: stopped, and refusing every start until
+    /// the move commits or is abandoned.
+    pub moving: bool,
 }
 
 /// Child stdout and stderr, appended in the server's working directory.
@@ -176,6 +179,8 @@ struct State {
     recover: bool,
     last_activity: Instant,
     startup: Option<Arc<Startup>>,
+    /// Parked for a move to another node (see [`ManagedServers::park`]).
+    moving: bool,
 }
 
 /// One worker-owned result, retained for every caller even if a later start
@@ -257,6 +262,51 @@ impl Drop for ManagedLease {
         let mut state = lock(&self.server.state);
         state.reservations -= 1;
         state.last_activity = Instant::now();
+    }
+}
+
+/// A server held for a move by [`ManagedServers::park`]: stopped, and
+/// refusing every start. Dropping it lifts the hold.
+#[derive(Debug)]
+pub struct Parked {
+    managed: ManagedServers,
+    server: Arc<Server>,
+    was_running: bool,
+    automatic: bool,
+}
+
+impl Parked {
+    pub fn name(&self) -> &str {
+        &self.server.name
+    }
+
+    /// Whether the process was running, or may have been on an unreachable
+    /// node, when the move began.
+    pub fn was_running(&self) -> bool {
+        self.was_running
+    }
+
+    /// The administrator intent the server had: `false` after `stop`.
+    pub fn automatic(&self) -> bool {
+        self.automatic
+    }
+
+    /// Lift the hold and start the server again if it was running: on its
+    /// new node after a committed move, on its old one after an abandoned
+    /// move. The start never overrides an administrator stop.
+    pub fn resume(self) {
+        let (managed, name) = (self.managed.clone(), self.server.name.clone());
+        let restart = self.was_running && self.automatic;
+        drop(self);
+        if restart && let Err(error) = managed.request_scale_start(&name) {
+            log_warn!("restart of {name} after its move rejected: {error}");
+        }
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        lock(&self.server.state).moving = false;
     }
 }
 
@@ -447,6 +497,16 @@ impl ManagedServers {
     /// Register a configured backend and give its child process a worker owner.
     /// The registry lock serializes registration against launch and shutdown.
     pub fn add(&self, config: &Config, name: &str) -> io::Result<()> {
+        self.add_with(config, name, true)
+    }
+
+    /// Register the new worker of an instance that moved to another node,
+    /// keeping the administrator intent (`automatic`) of its old worker.
+    pub fn add_moved(&self, config: &Config, name: &str, automatic: bool) -> io::Result<()> {
+        self.add_with(config, name, automatic)
+    }
+
+    fn add_with(&self, config: &Config, name: &str, automatic: bool) -> io::Result<()> {
         protect_secrets(config);
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let mut servers = lock(&self.0.servers);
@@ -494,6 +554,7 @@ impl ManagedServers {
             fresh.set_marker(&plan)?;
         }
         let server = new_server(name, definition.clone(), endpoint, &self.0.states, fresh);
+        lock(&server.state).automatic = automatic;
         launch_worker(
             &runtime,
             &server,
@@ -509,6 +570,17 @@ impl ManagedServers {
     /// Retire only an unoccupied backend. A detached owner completes cleanup
     /// even if the administrator disconnects while its child is terminating.
     pub async fn remove(&self, name: &str) -> io::Result<()> {
+        self.retire(name, false).await
+    }
+
+    /// Retire the parked worker of an instance that moved to another node.
+    /// Its registration stays; [`add_moved`](Self::add_moved) gives it a new
+    /// worker on the new node.
+    pub async fn retire_moved(&self, name: &str) -> io::Result<()> {
+        self.retire(name, true).await
+    }
+
+    async fn retire(&self, name: &str, moved: bool) -> io::Result<()> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let (reply, receive) = oneshot::channel();
         {
@@ -531,7 +603,17 @@ impl ManagedServers {
                     "managed server has connected players or pending connections",
                 ));
             }
-            if let Some(store) = lock(&self.0.instance_store).as_ref() {
+            if state.moving != moved {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    if moved {
+                        "managed server is not parked for a move"
+                    } else {
+                        "managed server is moving to another node; wait for the move to finish"
+                    },
+                ));
+            }
+            if !moved && let Some(store) = lock(&self.0.instance_store).as_ref() {
                 store.begin_removal(name)?;
             }
             state.automatic = false;
@@ -569,6 +651,90 @@ impl ManagedServers {
         receive
             .await
             .map_err(|_| unavailable("managed server removal worker stopped"))
+    }
+
+    /// Hold `name` for a move to another node: refuse every start from now
+    /// on, then stop its process without changing the administrator intent.
+    /// Players must have left first. A server whose node is unreachable is
+    /// not stopped, since its agent cannot be told; that node stops it when
+    /// it reconciles after the move. Dropping the result lifts the hold.
+    pub async fn park(&self, name: &str) -> io::Result<Parked> {
+        let busy = |message: &str| io::Error::new(io::ErrorKind::ResourceBusy, message);
+        let (parked, stopped) = {
+            let servers = lock(&self.0.servers);
+            self.check_running()?;
+            let server = servers
+                .get(name)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?
+                .clone();
+            let mut state = lock(&server.state);
+            if server.shutdown.load(Ordering::Acquire) {
+                return Err(busy("managed server is retiring"));
+            }
+            if state.moving {
+                return Err(busy("managed server is already moving"));
+            }
+            if state.reservations > 0 || self.0.players.count_on_server(name) > 0 {
+                return Err(busy(
+                    "managed server has connected players or pending connections; move them to another server first",
+                ));
+            }
+            if state.pending_stop {
+                return Err(busy(
+                    "managed server is stopping; try again once it has stopped",
+                ));
+            }
+            let reachable = server
+                .config
+                .node
+                .as_ref()
+                .is_none_or(|node| self.0.nodes.online(node));
+            let stopped = if reachable && !matches!(state.phase, Phase::Stopped | Phase::Failed) {
+                let permit = server
+                    .sender
+                    .try_reserve()
+                    .map_err(|e| unavailable(&e.to_string()))?;
+                let (reply, receive) = oneshot::channel();
+                permit.send(Request {
+                    action: Action::Stop,
+                    reply: Some(reply),
+                });
+                state.pending_stop = true;
+                state.recover = false;
+                state.retry_at = None;
+                server.wake.notify_one();
+                Some(receive)
+            } else {
+                None
+            };
+            state.moving = true;
+            let was_running = matches!(
+                state.phase,
+                Phase::Running | Phase::Starting | Phase::Unknown
+            );
+            let automatic = state.automatic;
+            drop(state);
+            let parked = Parked {
+                managed: self.clone(),
+                server,
+                was_running,
+                automatic,
+            };
+            (parked, stopped)
+        };
+        if let Some(stopped) = stopped {
+            stopped
+                .await
+                .map_err(|_| unavailable("managed server worker stopped"))??;
+        }
+        Ok(parked)
+    }
+
+    /// Whether `name` is held by [`park`](Self::park).
+    pub fn is_moving(&self, name: &str) -> bool {
+        lock(&self.0.servers)
+            .get(name)
+            .is_some_and(|server| lock(&server.state).moving)
     }
 
     fn is_retired(&self, name: &str) -> bool {
@@ -766,6 +932,10 @@ impl ManagedServers {
         if server.shutdown.load(Ordering::Acquire) {
             return Err(unavailable("managed server is retiring or shutting down"));
         }
+        // Refused before the durable intent changes, like any rejection.
+        if state.moving && matches!(action, Action::Start { .. }) {
+            return Err(moving());
+        }
         if matches!(action, Action::Console(_))
             && (state.phase != Phase::Running || state.pending_stop)
         {
@@ -861,6 +1031,7 @@ impl ManagedServers {
                     restart_attempts: state.restart_attempts,
                     restart_exhausted: restart_exhausted(server, &state),
                     node: server.config.node.clone(),
+                    moving: state.moving,
                 }
             })
             .collect()
@@ -951,6 +1122,7 @@ fn new_server(
             recover: false,
             last_activity: Instant::now(),
             startup: None,
+            moving: false,
         }),
     })
 }
@@ -1100,6 +1272,10 @@ fn unavailable(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, message)
 }
 
+fn moving() -> io::Error {
+    unavailable("managed server is moving to another node")
+}
+
 fn send_request(server: &Server, request: Request) -> io::Result<()> {
     server
         .sender
@@ -1114,6 +1290,9 @@ fn send_request(server: &Server, request: Request) -> io::Result<()> {
 }
 
 fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
+    if state.moving {
+        return Err(moving());
+    }
     if server.shutdown.load(Ordering::Acquire)
         || state.pending_stop
         || state.phase == Phase::Stopping
@@ -1161,6 +1340,9 @@ fn restart_exhausted(server: &Server, state: &State) -> bool {
 }
 
 fn automatic_start_allowed(server: &Server, state: &State) -> io::Result<()> {
+    if state.moving {
+        return Err(moving());
+    }
     if server.shutdown.load(Ordering::Acquire) || state.pending_stop || !state.automatic {
         return Err(unavailable(
             "managed server is stopped by an administrator or shutting down",
@@ -1480,6 +1662,9 @@ async fn start_process_inner<B: ProcessBackend>(
         let mut state = lock(&server.state);
         if server.shutdown.load(Ordering::Acquire) || state.pending_stop {
             return Err(unavailable("managed server is stopping"));
+        }
+        if state.moving {
+            return Err(moving());
         }
         match mode {
             StartMode::Demand => connect_allowed(server, &state)?,
