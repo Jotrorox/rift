@@ -31,6 +31,7 @@ mod health;
 mod messaging_runtime;
 mod metrics;
 mod network;
+mod node_init;
 mod operator;
 mod runtime;
 mod scaling;
@@ -64,6 +65,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     rift admin perms <command> (the /perms grammar; rift admin perms help lists it)\n\
     rift dev [options] (development proxy for plugin authors; see rift dev --help)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
+    rift node init <name> [--address <host>] (print a node's token, systemd unit and setup checks; see rift node init --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\
@@ -138,6 +140,13 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         return crate::admin::client(&args[1..]).await;
     }
     if args.first().is_some_and(|arg| arg == "node") {
+        if args.get(1).is_some_and(|arg| arg == "init") {
+            if args[2..].iter().any(|arg| arg == "--help" || arg == "-h") {
+                println!("{}", node_init::USAGE);
+                return Ok(());
+            }
+            return node_init::run(&args[2..]);
+        }
         if args
             .get(1)
             .is_some_and(|arg| arg == "--help" || arg == "-h")

@@ -50,12 +50,23 @@ and are listed under **SDKs**.
   `RIFT_FORWARDING_SECRET`; if it is still set and differs, the agent uses the
   controller's secret and logs a warning. It remains a fallback for older
   controllers, and agents advertise the `forwarding_secret` feature.
+- `rift node init <name>` prints everything needed to add a node: its token,
+  `rift.lua` entry, environment file and a systemd unit with
+  `KillMode=control-group` and `Delegate=memory`. It checks offline that the
+  messaging certificate names the address the agent dials and that the web
+  API is reachable over HTTPS, and lists the ports to open.
 - The Files page and `/api/files/servers` read and write files of up to
   64 MiB on node servers, instead of 512 KiB. Larger files cross the message
   bus in 512 KiB parts; uploads are staged beside the target and renamed into
   place after the last part. Uploading files over 512 KiB needs an agent
   that advertises the `file_parts` feature; the controller refuses them for
   older agents with `413`.
+
+### Integration and operations
+
+- `web.tls` serves the dashboard and API over HTTPS on `web.listen`, with the
+  messaging certificate (`tls = true`) or its own files, so remote nodes need
+  no reverse proxy for templates. The certificate is reloaded on SIGHUP.
 - `/api/files/` requests may take two minutes instead of ten seconds.
 
 ### Database

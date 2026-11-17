@@ -58,6 +58,7 @@ enabled empty table uses the defaults above.
 | `status.ui` | The status HTML and assets; a table also [styles them](status-page.md) |
 | `status.metrics` | The status server's Prometheus endpoint. The status JSON stays available whenever the server is enabled |
 | `metrics` | The standalone metrics listener. With `false`, internal traffic counters and authenticated `/api/metrics` remain available |
+| `web.tls` | HTTPS on `web.listen`; see [Serve HTTPS](#serve-https) |
 
 ## Reload the services
 
@@ -79,6 +80,31 @@ never interrupts accepted proxy sessions.
 Turning off or moving the dashboard server may cut your browser connection;
 the save response still finishes. Re-enable it by editing the Lua file and
 sending SIGHUP (Unix) or Ctrl-Break (Windows), or restart Rift.
+
+## Serve HTTPS
+
+`web.tls` makes the web listener itself speak HTTPS:
+
+```lua
+rift.config.web = {
+    listen = "0.0.0.0:8443",
+    token_env = "RIFT_WEB_TOKEN",
+    tls = true, -- the messaging certificate and key
+    -- tls = { certificate = "certs/web.pem", private_key = "certs/web-key.pem" },
+}
+```
+
+`tls = true` reuses `messaging.certificate` and `messaging.private_key`, which
+[node agents](nodes.md) already trust through their `--ca` file, so nodes need
+no reverse proxy for templates. The certificate must name the address clients
+use, as for the bus. A table names other PEM files (an unencrypted key),
+relative to Rift's working directory; a certificate from a public CA suits
+browsers better. Both files are read again on every reload, so after renewing
+a certificate, reload (SIGHUP) instead of restarting; open connections keep the
+old one. A file that cannot be read rejects the reload and keeps the running
+listener, and `rift check --strict` loads them too. The listener serves only
+HTTPS while `tls` is set: a plain `http://` request fails its handshake. The
+status and metrics listeners stay plain HTTP.
 
 ## Authentication and access
 
@@ -200,8 +226,8 @@ rift.config.web = {
 - Requests with mismatched `Origin` headers or cross-site Fetch Metadata are
   rejected, and mutations require JSON. There is no CORS allowance or
   cookie-based login.
-- The built-in listener speaks HTTP. For remote administration, use HTTPS at a
-  trusted reverse proxy or an SSH tunnel; when proxying, preserve the
+- For remote administration, use HTTPS: [built in](#serve-https), at a
+  trusted reverse proxy, or through an SSH tunnel. When proxying, preserve the
   browser's `Host` header and use a token.
 
 The status and metrics servers are unauthenticated; see
