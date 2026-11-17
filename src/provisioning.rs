@@ -350,28 +350,6 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
                 .ok_or_else(|| invalid("unknown server template"))
         })
         .transpose()?;
-    let storage = checked_path(&config.template_storage)?;
-    let relative = |path: &Path| -> io::Result<String> {
-        let path = checked_path(path)?;
-        let inside = path.strip_prefix(&storage).map_err(|_| {
-            invalid(format!(
-                "{} must be inside template_storage ({}) to be used on nodes",
-                path.display(),
-                storage.display()
-            ))
-        })?;
-        let segments: Vec<_> = inside
-            .components()
-            .map(|component| component.as_os_str().to_str().map(str::to_owned))
-            .collect::<Option<_>>()
-            .ok_or_else(|| invalid("template paths used on nodes must be UTF-8"))?;
-        if segments.is_empty() {
-            return Err(invalid(
-                "template_storage itself cannot be a template asset",
-            ));
-        }
-        Ok(segments.join("/"))
-    };
     let mut prepare = crate::node::protocol::Prepare {
         server: name.to_owned(),
         group: instance.group.clone(),
@@ -403,34 +381,78 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
         }
         return Ok(prepare);
     };
-    match &template.software {
-        Some(software) => {
-            prepare.software = Some(software.into());
-            if let Some(forwarding) = &config.forwarding
-                && software.kind.paper_family()
-            {
-                prepare.forwarding = Some(config.authentication.online_mode);
-                // Older agents know only Velocity and ignore this field.
-                prepare.forwarding_mode = (forwarding.mode
-                    != crate::config::ForwardingMode::Velocity)
-                    .then(|| forwarding.mode.as_str().to_owned());
-            }
-        }
-        None => prepare.server_jar = Some(relative(&template.server_jar)?),
+    let assets = remote_template_assets(config, instance.template.as_deref().unwrap_or_default())?;
+    if let Some(software) = &template.software
+        && let Some(forwarding) = &config.forwarding
+        && software.kind.paper_family()
+    {
+        prepare.forwarding = Some(config.authentication.online_mode);
+        // Older agents know only Velocity and ignore this field.
+        prepare.forwarding_mode = (forwarding.mode != crate::config::ForwardingMode::Velocity)
+            .then(|| forwarding.mode.as_str().to_owned());
     }
-    prepare.configs = template
-        .configs
-        .iter()
-        .map(|path| relative(path))
-        .collect::<io::Result<_>>()?;
-    prepare.plugins = template
-        .plugins
-        .iter()
-        .map(|path| relative(path))
-        .collect::<io::Result<_>>()?;
-    prepare.map = template.map.as_deref().map(relative).transpose()?;
+    prepare.software = assets.software;
+    prepare.server_jar = assets.server_jar;
+    prepare.configs = assets.configs;
+    prepare.plugins = assets.plugins;
+    prepare.map = assets.map;
     prepare.accept_eula = template.accept_eula;
     Ok(prepare)
+}
+
+/// What an agent downloads for template `name`: its software, and its local
+/// assets as paths relative to `template_storage`, which agents fetch over
+/// HTTP. Assets elsewhere cannot be used on nodes.
+pub fn remote_template_assets(
+    config: &Config,
+    name: &str,
+) -> io::Result<crate::node::protocol::TemplateAssets> {
+    let template = config
+        .templates
+        .get(name)
+        .ok_or_else(|| invalid("unknown server template"))?;
+    let storage = checked_path(&config.template_storage)?;
+    let relative = |path: &Path| -> io::Result<String> {
+        let path = checked_path(path)?;
+        let inside = path.strip_prefix(&storage).map_err(|_| {
+            invalid(format!(
+                "{} must be inside template_storage ({}) to be used on nodes",
+                path.display(),
+                storage.display()
+            ))
+        })?;
+        let segments: Vec<_> = inside
+            .components()
+            .map(|component| component.as_os_str().to_str().map(str::to_owned))
+            .collect::<Option<_>>()
+            .ok_or_else(|| invalid("template paths used on nodes must be UTF-8"))?;
+        if segments.is_empty() {
+            return Err(invalid(
+                "template_storage itself cannot be a template asset",
+            ));
+        }
+        Ok(segments.join("/"))
+    };
+    let (software, server_jar) = match &template.software {
+        Some(software) => (Some(software.into()), None),
+        None => (None, Some(relative(&template.server_jar)?)),
+    };
+    Ok(crate::node::protocol::TemplateAssets {
+        template: name.to_owned(),
+        software,
+        server_jar,
+        configs: template
+            .configs
+            .iter()
+            .map(|path| relative(path))
+            .collect::<io::Result<_>>()?,
+        plugins: template
+            .plugins
+            .iter()
+            .map(|path| relative(path))
+            .collect::<io::Result<_>>()?,
+        map: template.map.as_deref().map(relative).transpose()?,
+    })
 }
 
 /// Agent side of `prepare`: reuse an owned persistent directory, or build a

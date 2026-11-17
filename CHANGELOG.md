@@ -72,6 +72,10 @@ and are listed under **SDKs**.
   place after the last part. Uploading files over 512 KiB needs an agent
   that advertises the `file_parts` feature; the controller refuses them for
   older agents with `413`.
+- `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
+  have every node download its groups' templates and server software ahead of
+  time, so the first instance on a new or freshly synced node starts without
+  waiting. Agents need the same version as the controller for it.
 
 ### Integration and operations
 

@@ -1243,3 +1243,47 @@ async fn a_players_only_login_messages_and_kicks_with_rich_text_and_is_audited()
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn warming_targets_the_templates_of_node_groups_and_reports_unreachable_nodes() {
+    let config = Config::from_lua(
+        "rift.config.listeners.public='127.0.0.1:0'
+rift.config.backends.lobby='127.0.0.1:25566'
+rift.config.routes.public='lobby'
+rift.config.messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}
+rift.config.nodes.a={address='10.0.0.1',labels={'games'}}
+rift.config.nodes.b={address='10.0.0.2'}
+rift.config.templates.bedwars={software={type='paper',version='1.21.8'}}
+rift.config.templates.skywars={software={type='paper',version='1.21.8'}}
+rift.config.templates.hub={software={type='paper',version='1.21.8'}}
+rift.config.service_groups.bedwars={template='bedwars',storage='disposable',port_range={30000,30009},nodes={labels={'games'}}}
+rift.config.service_groups.skywars={template='skywars',storage='disposable',port_range={30010,30019},nodes={'a','b'}}
+rift.config.service_groups.hub={template='hub',storage='disposable',port_range={25600,25609}}",
+        "warm.lua",
+    )
+    .unwrap();
+    let plan = node_templates(&config, None);
+    assert_eq!(
+        plan.iter()
+            .map(|(node, templates)| (
+                node.as_str(),
+                templates.iter().map(String::as_str).collect()
+            ))
+            .collect::<Vec<(&str, Vec<&str>)>>(),
+        [("a", vec!["bedwars", "skywars"]), ("b", vec!["skywars"])]
+    );
+    assert_eq!(node_templates(&config, Some("bedwars")).len(), 1);
+    let snapshot = Snapshot::new(config, None).unwrap();
+    let error = warm_templates(&snapshot, Some("missing"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("unknown template"), "{error}");
+    // A template that only runs on this host has nothing to warm.
+    let error = warm_templates(&snapshot, Some("hub")).await.unwrap_err();
+    assert!(error.contains("no service group on nodes"), "{error}");
+    // Neither node ever connected: both are reported, nothing is cached.
+    let error = warm_templates(&snapshot, None).await.unwrap_err();
+    assert!(error.contains("(0 cached)"), "{error}");
+    assert!(error.contains("a: node a is unreachable"), "{error}");
+    assert!(error.contains("b: node b is unreachable"), "{error}");
+}

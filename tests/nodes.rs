@@ -866,6 +866,70 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
     let _ = fixture.broker.subscription_count();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn warming_fills_the_template_cache_before_the_first_instance() {
+    let fixture = Fixture::new().await;
+    let storage = fixture.root.join("templates");
+    fs::create_dir_all(storage.join("Global/server")).unwrap();
+    fs::create_dir_all(storage.join("bedwars/map")).unwrap();
+    fs::write(storage.join("Global/server/server.properties"), "motd=x\n").unwrap();
+    fs::write(storage.join("bedwars/server.jar"), b"jar bytes").unwrap();
+    fs::write(storage.join("bedwars/game.jar"), b"plugin").unwrap();
+    fs::write(storage.join("bedwars/map/level.dat"), b"map").unwrap();
+    let web = template_server(storage.clone()).await;
+    let agent = fixture.agent(Some(format!("http://{web}")));
+    let connection = fixture.connect(&agent).await;
+    eventually("node online", || fixture.nodes.online("node1")).await;
+    let bedwars = protocol::TemplateAssets {
+        template: "bedwars".into(),
+        software: None,
+        server_jar: Some("bedwars/server.jar".into()),
+        configs: vec!["Global/server".into()],
+        plugins: vec!["bedwars/game.jar".into()],
+        map: Some("bedwars/map".into()),
+    };
+    let broken = protocol::TemplateAssets {
+        template: "broken".into(),
+        software: None,
+        server_jar: Some("../outside.jar".into()),
+        configs: vec![],
+        plugins: vec![],
+        map: None,
+    };
+    let warm = Command::Warm(protocol::Warm {
+        templates: vec![broken, bedwars.clone()],
+    });
+    let wait = Duration::from_secs(20);
+    let reply = fixture.nodes.request("node1", &warm, wait).await.unwrap();
+    let results = reply["templates"].as_array().unwrap();
+    // One bad template does not stop the others.
+    assert_eq!(results[0]["template"], "broken");
+    assert_eq!(results[0]["ok"], false, "{reply}");
+    assert_eq!(results[1]["ok"], true, "{reply}");
+    assert_eq!(results[1]["files"], 4, "{reply}");
+    assert_eq!(results[1]["downloaded"], 4, "{reply}");
+    assert_eq!(results[1]["bytes"], 9 + 6 + 3 + 7, "{reply}");
+    let cache = fixture.root.join("agent/cache/templates");
+    assert_eq!(fs::read(cache.join("bedwars/game.jar")).unwrap(), b"plugin");
+    assert_eq!(
+        fs::read(cache.join("bedwars/map/level.dat")).unwrap(),
+        b"map"
+    );
+    // A second warm finds everything cached and downloads only changes.
+    fs::write(storage.join("bedwars/game.jar"), b"plugin v2").unwrap();
+    let warm = Command::Warm(protocol::Warm {
+        templates: vec![bedwars],
+    });
+    let reply = fixture.nodes.request("node1", &warm, wait).await.unwrap();
+    assert_eq!(reply["templates"][0]["downloaded"], 1, "{reply}");
+    assert_eq!(reply["templates"][0]["bytes"], 9, "{reply}");
+    assert_eq!(
+        fs::read(cache.join("bedwars/game.jar")).unwrap(),
+        b"plugin v2"
+    );
+    connection.abort();
+}
+
 #[test]
 fn agent_options_require_a_token_and_default_to_java() {
     let args = |extra: &[&str]| -> Vec<String> {

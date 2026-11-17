@@ -72,6 +72,9 @@
     text("source-size", `${$("source").value.split("\n").length.toLocaleString()} lines`);
     $("conflict").classList.toggle("hidden", !state.remoteChanged);
     for (const { button, unavailable } of [...state.serverButtons, ...state.groupButtons]) button.disabled = state.busy || unavailable || !allowed("servers");
+    // Node caches hold every group's templates: unrestricted operators only.
+    $("nodes-warm").hidden = Boolean(state.groups);
+    $("nodes-warm").disabled = state.busy || !allowed("servers") || Boolean(state.groups);
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
@@ -2088,6 +2091,32 @@
       text("template-result", error.message); $("template-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
+
+  // Fill every node's template and software cache ahead of the first instance.
+  async function warmNodes() {
+    if (state.busy) return;
+    state.busy = true; controls();
+    text("nodes-result", "Warming the template caches on the nodes…");
+    $("nodes-result").className = "operation-result";
+    try {
+      const accepted = await request("/api/nodes/warm", { method: "POST", body: "{}" });
+      let operation;
+      for (;;) {
+        operation = await request(accepted.poll);
+        if (operation.status !== "pending") break;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (operation.status !== "succeeded") throw new Error(operation.error || "Warming the template caches failed.");
+      const nodes = operation.result?.nodes || [], warmed = number(operation.result?.warmed);
+      const downloaded = nodes.flatMap((node) => node.templates || []).reduce((sum, template) => sum + number(template.bytes), 0);
+      text("nodes-result", `Cached ${count(warmed)} ${warmed === 1 ? "template" : "templates"} on ${count(nodes.length)} ${nodes.length === 1 ? "node" : "nodes"} (${bytes(downloaded)} downloaded).`);
+      $("nodes-result").className = "operation-result success";
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("nodes-result", error.message); $("nodes-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+  $("nodes-warm").addEventListener("click", () => { if (!$("nodes-warm").disabled) warmNodes(); });
 
   // File browser for template folders and server directories.
   const filePath = (path) => path.split("/").filter(Boolean).map(encodeURIComponent).join("/");

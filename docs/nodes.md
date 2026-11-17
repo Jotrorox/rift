@@ -394,6 +394,32 @@ Templates are not sent over the message bus, because of its 1 MiB payload
 limit. Persistent instances are prepared once; later starts reuse their
 directory and only refresh the port and bind address.
 
+### Warm the node caches
+
+The first instance on a node waits for every download it needs. To fetch them
+ahead of time, for example after adding a node or after
+[`rift admin sync`](templates.md#sync-new-commits), use any of:
+
+- `rift admin warm`, or `rift admin warm bedwars` for one template;
+- `POST /api/nodes/warm` with `{}` or `{"template": "bedwars"}`;
+- the dashboard's **Warm template caches** button in the Nodes panel.
+
+Each node then fetches the templates of the service groups whose `nodes`
+match it, including their server software, exactly as a `prepare` would.
+
+- Nodes work in parallel, one template at a time. Only files whose SHA-256
+  changed are downloaded, so warming a warm node is cheap.
+- The result lists, per node and template, the files in the template, how
+  many were downloaded and how many bytes.
+- The command fails if any node is unreachable or any template fails, after
+  the others have finished. The message names each failure; run it again once
+  the node is back.
+- Agents older than the controller do not know the command and report that
+  they need an upgrade.
+
+Warming does not touch existing instances: like a template edit, it only
+changes what the next new instance copies.
+
 ## Move a persistent instance to another node
 
 A persistent instance keeps its world on its node, so Rift never moves it on
@@ -595,7 +621,7 @@ Agents and the controller exchange JSON over the existing bus:
 
 | Subject | Direction | Purpose |
 | --- | --- | --- |
-| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, and for moves `tree`, `read`, `receive` and `discard` |
+| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, `warm`, and for moves `tree`, `read`, `receive` and `discard` |
 | `rift.node.<n>.state` | agent → controller | Process list and [host resources](#host-resources) every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as

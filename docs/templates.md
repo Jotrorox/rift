@@ -140,7 +140,9 @@ where the contents must not change without a configuration change.
 
 Pull new commits with `rift admin sync network` or
 `POST /api/template-sources/network/sync`. The next instances use them;
-existing instances keep their files. `rift admin templates` and
+existing instances keep their files. With [nodes](nodes.md), follow up with
+`rift admin warm` so the nodes fetch the new files before the next
+instance needs them. `rift admin templates` and
 `GET /api/templates` list each source with its commit and whether it is
 synced.
 

@@ -566,6 +566,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/players/{player}/kick", post(kick_player))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
+            .route("/api/nodes/warm", post(warm_templates))
             .route("/api/plugins", get(plugin_list))
             .route("/api/plugins/{name}", get(plugin_status))
             .route("/api/plugins/{name}/logs", get(plugin_logs))
@@ -881,7 +882,9 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "access"] | ["api"] => "",
                 // A sync replaces a folder in template storage.
                 ["api", "files", ..] | ["api", "template-sources", ..] => "files",
-                ["api", "templates", _, "download"] | ["api", "software", ..] => "servers",
+                ["api", "templates", _, "download"]
+                | ["api", "software", ..]
+                | ["api", "nodes", "warm"] => "servers",
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
@@ -999,6 +1002,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     name.chars().take(128).collect(),
                 )
             }
+            // Node caches hold every group's templates.
+            ["api", "nodes", "warm"] => (access.groups.is_none(), String::new()),
             // Like the template folders a sync writes: shared by every group.
             ["api", "template-sources", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
@@ -1077,6 +1082,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "template-sources", _, "sync"] => "sync_template_source",
+            ["api", "nodes", "warm"] => "warm_templates",
             ["api", "definitions", "templates", _] => "edit_template",
             ["api", "definitions", "service_groups", _] => "edit_group",
             ["api", "definitions", "permission_groups", _] => "edit_permission_group",
@@ -2086,6 +2092,70 @@ async fn sync_template_source(
     )
         .into_response()
 }
+/// Have the nodes cache their groups' templates ahead of the first
+/// instance; poll like instance operations.
+async fn warm_templates(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["template"]) {
+        Ok(value) => value,
+        Err(failure) => return failure.into_response(),
+    };
+    let template = match value.get("template") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(template)) => Some(template.clone()),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "template must be a string"),
+    };
+    let snapshot = app.snapshot();
+    if let Some(name) = &template
+        && !snapshot.config.templates.contains_key(name)
+    {
+        return error(StatusCode::NOT_FOUND, format!("unknown template {name:?}"));
+    }
+    if admin::node_templates(&snapshot.config, template.as_deref()).is_empty() {
+        return error(
+            StatusCode::CONFLICT,
+            match &template {
+                Some(name) => format!("no service group on nodes uses template {name:?}"),
+                None => "no service group with a template runs on nodes".into(),
+            },
+        );
+    }
+    let target = template.clone().unwrap_or_default();
+    let id = match app.operations.reserve(None, "warm_templates", &target) {
+        Ok(id) => id,
+        Err(failure) => return failure.into_response(),
+    };
+    let operation_id = id.clone();
+    tokio::spawn(async move {
+        let reply = admin::warm_templates(&snapshot, template.as_deref())
+            .await
+            .map(|value| value.to_string())
+            .map_err(|message| control::Error {
+                status: 502,
+                message,
+            });
+        let (outcome, code) = match &reply {
+            Ok(_) => ("completed", 200),
+            Err(failure) => ("failed", failure.status),
+        };
+        if let Err(failure) =
+            record_audit(&app, &access, "warm_templates", &target, outcome, code).await
+        {
+            log_error!("warm result audit failed: {failure}");
+        }
+        app.operations.complete(&operation_id, reply, 200);
+    });
+    let location = format!("/api/operations/{id}");
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location.clone())],
+        Json(json!({"operation_id":id,"status":"pending","poll":location})),
+    )
+        .into_response()
+}
 async fn software_versions(Path(kind): Path<String>) -> Response {
     let Some(kind) = rift::software::Kind::parse(&kind) else {
         return error(
@@ -2444,7 +2514,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/warm","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

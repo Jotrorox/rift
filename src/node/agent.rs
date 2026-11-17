@@ -650,6 +650,7 @@ impl Agent {
                 self.upload(base, upload).await
             }
             Command::Reconcile { servers } => self.reconcile(servers).await,
+            Command::Warm(warm) => Ok(self.warm(warm).await),
             Command::Tree {
                 server,
                 directory,
@@ -1007,19 +1008,20 @@ impl Agent {
                 let software = crate::software::Software::try_from(software)?;
                 crate::software::ensure(&self.root.join("cache/versioncache"), &software).await?
             }
-            (None, Some(jar)) => self.fetch(jar).await?,
+            (None, Some(jar)) => self.fetch(jar, &mut Transfer::default()).await?,
             (None, None) => return Err(invalid("template has neither software nor server_jar")),
         };
+        let mut transfer = Transfer::default();
         let mut configs = Vec::new();
         for layer in &prepare.configs {
-            configs.push(self.fetch(layer).await?);
+            configs.push(self.fetch(layer, &mut transfer).await?);
         }
         let mut plugins = Vec::new();
         for plugin in &prepare.plugins {
-            plugins.push(self.fetch(plugin).await?);
+            plugins.push(self.fetch(plugin, &mut transfer).await?);
         }
         let map = match &prepare.map {
-            Some(map) => Some(self.fetch(map).await?),
+            Some(map) => Some(self.fetch(map, &mut transfer).await?),
             None => None,
         };
         let properties = prepare
@@ -1042,6 +1044,71 @@ impl Agent {
             forwarding,
             properties,
         })
+    }
+
+    /// Cache every listed template, one at a time, so a `prepare` waits for
+    /// at most one template's file downloads. A failure is reported per template
+    /// and does not stop the others.
+    async fn warm(&self, warm: protocol::Warm) -> Value {
+        let mut results = Vec::with_capacity(warm.templates.len());
+        for assets in &warm.templates {
+            let started = std::time::Instant::now();
+            let result = self.warm_template(assets).await;
+            results.push(match result {
+                Ok(mut value) => {
+                    value["template"] = json!(assets.template);
+                    value["ok"] = json!(true);
+                    value["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+                    log_info!(
+                        "node cached template {}: {} of {} files downloaded",
+                        assets.template,
+                        value["downloaded"],
+                        value["files"]
+                    );
+                    value
+                }
+                Err(error) => {
+                    log_warn!("caching template {} failed: {error}", assets.template);
+                    json!({"template": assets.template, "ok": false, "error": error.to_string()})
+                }
+            });
+        }
+        json!({"templates": results})
+    }
+
+    async fn warm_template(&self, assets: &protocol::TemplateAssets) -> io::Result<Value> {
+        check_name(&assets.template)?;
+        // The software cache has its own per-entry lock; only template files
+        // share the cache that `prepare` reads, behind the storage lock.
+        let software = match &assets.software {
+            Some(software) => Some(
+                crate::software::download(
+                    &self.root.join("cache/versioncache"),
+                    &crate::software::Software::try_from(software)?,
+                    false,
+                    &crate::software::Endpoints::default(),
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        let mut transfer = Transfer::default();
+        let _storage = self.storage.lock().await;
+        let paths = assets
+            .server_jar
+            .iter()
+            .chain(&assets.configs)
+            .chain(&assets.plugins)
+            .chain(&assets.map);
+        for relative in paths {
+            self.fetch(relative, &mut transfer).await?;
+        }
+        Ok(json!({
+            "software": software,
+            "files": transfer.files,
+            "downloaded": transfer.downloaded,
+            "bytes": transfer.bytes,
+        }))
     }
 
     /// The controller's secret from `prepare`, or for an older controller
@@ -1111,7 +1178,7 @@ impl Agent {
 
     /// Mirror one template file or folder into the local cache, downloading
     /// only files whose SHA-256 differs, and return its cached path.
-    async fn fetch(&self, relative: &str) -> io::Result<PathBuf> {
+    async fn fetch(&self, relative: &str, transfer: &mut Transfer) -> io::Result<PathBuf> {
         let mut manifest_url = self.template_url(relative)?;
         manifest_url.set_query(Some("manifest"));
         let body = self
@@ -1149,6 +1216,7 @@ impl Agent {
                 return Err(io::Error::other("invalid template manifest"));
             }
             wanted.insert(local.clone());
+            transfer.files += 1;
             if self.cached_hash(&local).as_deref() == Some(sha256) {
                 continue;
             }
@@ -1175,6 +1243,8 @@ impl Agent {
             }
             write_cached(&cache, &local, &bytes)?;
             self.cached_hash(&local);
+            transfer.downloaded += 1;
+            transfer.bytes += bytes.len() as u64;
         }
         if !single {
             std::fs::create_dir_all(&target)?;
@@ -1210,6 +1280,14 @@ impl Agent {
         hashes.insert(path.to_owned(), (metadata.len(), modified, hash.clone()));
         Some(hash)
     }
+}
+
+/// Template files seen and downloaded by [`Agent::fetch`].
+#[derive(Default)]
+struct Transfer {
+    files: usize,
+    downloaded: usize,
+    bytes: u64,
 }
 
 /// Atomically replace one cached template file below `cache`.
