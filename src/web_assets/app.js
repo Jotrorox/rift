@@ -206,6 +206,11 @@
       tr.append(td); body.append(tr);
     }
   }
+  function flag(td, label, title) {
+    const tag = document.createElement("span");
+    tag.className = "tag warning trailing"; tag.textContent = label; tag.title = title;
+    td.append(tag);
+  }
   function cell(row, value, className = "") {
     const td = document.createElement("td");
     td.textContent = value ?? "—"; td.className = className; row.append(td);
@@ -347,7 +352,7 @@
     const nodes = status.nodes || [];
     $("nodes-panel").hidden = !nodes.length;
     text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
-    table("nodes", nodes, 7, (tr, node) => {
+    table("nodes", nodes, 10, (tr, node) => {
       cell(tr, node.name);
       const reachability = cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
       // Cordoned or draining (rift admin node …, POST /api/nodes/{name}/…).
@@ -373,6 +378,16 @@
       cell(tr, (node.labels || []).join(", ") || "—");
       cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
       cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
+      // Measured by the agent; absent while the node is not online.
+      const host = node.resources || {};
+      const mib = (value) => bytes(number(value) * 1024 * 1024);
+      const known = (value) => value !== null && value !== undefined;
+      cell(tr, known(host.memory_available_mb) ? `${mib(host.memory_available_mb)} free of ${mib(host.memory_total_mb)}`
+        : known(host.memory_total_mb) ? `${mib(host.memory_total_mb)} total` : "—");
+      const load = cell(tr, known(host.load) ? `${number(host.load).toFixed(2)}${host.cpus ? ` on ${count(host.cpus)} CPUs` : ""}` : "—");
+      if (known(host.load) && host.cpus && number(host.load) > number(host.cpus)) flag(load, "Busy", "More runnable processes than CPUs over the last minute.");
+      const disk = cell(tr, known(host.disk_free_mb) ? `${mib(host.disk_free_mb)} free of ${mib(host.disk_total_mb)}` : "—");
+      if (known(host.disk_free_mb) && number(host.disk_free_mb) < number(node.min_free_disk_mb)) flag(disk, "Full", `Below min_free_disk_mb (${count(node.min_free_disk_mb)} MiB): no new instances are placed here.`);
     }, "No nodes configured.");
     state.managedServers = status.managed_servers || [];
     renderServers();

@@ -29,6 +29,14 @@ and are listed under **SDKs**.
   dashboard's Nodes panel, reported by `GET /api/nodes` (`features`,
   `missing_features`, `version_mismatch`) and checked by
   `rift check --strict` against a running controller.
+- Agents report their host's available memory, CPU count and load, and the
+  free disk below `--root` in every state snapshot. Placement skips a node
+  whose host has less available memory than an instance needs, uses the
+  smaller of unallocated `memory_mb` and real available memory to rank
+  `least_memory`, and skips a node with less free disk than its new
+  `min_free_disk_mb` (default 1024, `0` disables). `/api/nodes`,
+  `rift.control.nodes` and the dashboard's Nodes panel show the measurements,
+  and a failed placement names why each node was skipped.
 - Take a node out of service before maintenance:
   `rift admin node cordon|drain|uncordon <node>` and
   `POST /api/nodes/{name}/cordon|drain|uncordon`. A cordoned node gets no new
