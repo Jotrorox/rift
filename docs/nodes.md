@@ -127,13 +127,22 @@ Rift's web server speaks plain HTTP, so put a TLS-terminating reverse proxy
 public CAs plus the certificates in its `--ca` file, so the proxy may use a
 certificate from the same private CA as the message bus.
 
-### Give each node the forwarding secret
+### The forwarding secret reaches nodes by itself
 
-Agents never receive the forwarding secret (the Velocity secret or BungeeGuard
-token) from the controller. If `forwarding` uses either and nodes run
-Paper-family templates, set the same value on every node, in
-`RIFT_FORWARDING_SECRET` or the variable named by `--forwarding-secret-env`.
-`mode = "bungeecord"` has no secret.
+Nodes need no copy of the forwarding secret (the Velocity secret or BungeeGuard
+token). When a Paper-family instance with `velocity` or `bungeeguard`
+forwarding is created on a node, the controller puts the secret into that
+node's `prepare` command, encrypted with a key derived from the node's token
+(see [Security](#security)). Every node therefore always writes the
+controller's current secret, and a stale copy on one node cannot get players
+rejected.
+
+An agent still reads `RIFT_FORWARDING_SECRET` (or `--forwarding-secret-env`),
+but only as a fallback for a controller older than the agent. If the variable
+is set and differs from the controller's secret, the agent uses the
+controller's and logs a warning; remove the variable from the node. Agents
+that open the controller's secret advertise the `forwarding_secret` feature;
+an older one is flagged as outdated (see below) and writes only its own copy.
 
 ## Run an agent
 
@@ -141,7 +150,7 @@ Copy the `rift` binary to the node and start it as an unprivileged user, for
 example from a systemd unit:
 
 ```sh
-RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
+RIFT_NODE_TOKEN=... rift node \
   --controller 10.0.0.2:7443 --name node1 --root /srv/rift \
   --ca /etc/rift/messaging-ca.pem --web https://rift.internal:8443 \
   --allow-program java
@@ -156,7 +165,7 @@ RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
 | `--token-env` | Variable holding this node's token (default `RIFT_NODE_TOKEN`) |
 | `--server-name` | TLS name of the controller certificate (default: the controller host) |
 | `--web` | The controller's web API, needed for templates; `https://` unless loopback |
-| `--forwarding-secret-env` | Variable holding the Velocity forwarding secret or BungeeGuard token (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `velocity` or `bungeeguard` forwarding |
+| `--forwarding-secret-env` | Variable with a fallback forwarding secret, used only when the controller sends none (a controller older than the agent); default `RIFT_FORWARDING_SECRET`. Naming it explicitly makes the variable required |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
 
 The agent reconnects with backoff when the controller is unreachable. Below
@@ -344,9 +353,12 @@ principal.
 - It has **one session at a time**. A new login closes the previous connection
   (the agent logs `replaced by a newer session of this node`), so a second
   client never receives the node's commands alongside the real agent.
-- A stolen node token lets an attacker impersonate the node and read template
-  files, but not run commands on the node: only the controller can publish
-  node commands.
+- A stolen node token lets an attacker impersonate the node, read template
+  files and, once the controller places a Paper-family instance on the fake
+  node, learn the forwarding secret. It does not let them run commands on the
+  node: only the controller can publish node commands. Keep game-server ports
+  reachable from the proxy only, so the forwarding secret alone cannot be used
+  to log in to them.
 
 **The agent**
 
@@ -362,14 +374,17 @@ principal.
 - The node token only travels over TLS: the QUIC bus, and `--web`, which must
   be `https://` unless it is a loopback address. The agent does not follow
   redirects, so the token cannot be forwarded elsewhere.
-- The forwarding secret never crosses the network. Prepare commands only say
-  whether to enable forwarding and which mode, and each agent writes the secret
-  from its own environment.
-- One secret does cross the bus: a server with a
-  [bus login](bus-logins.md) gets its token in
-  every start command, also after a crash recovery or an agent restart. The
-  token is scoped to that one instance and dies with it; the key that derives
-  tokens stays on the controller.
+- Two secrets cross the bus, both only to the node that needs them and with the
+  same trust model: whoever holds a node's token receives them.
+  - The forwarding secret, in the `prepare` command of a Paper-family instance
+    with `velocity` or `bungeeguard` forwarding. It is sealed with AES-256-GCM
+    under a key derived (HKDF-SHA256) from the node's token and bound to the
+    node name, so command payloads never contain it in plain text and only
+    that node can open it. See `src/node/seal.rs`.
+  - A server with a [bus login](bus-logins.md) gets its token in every start
+    command, also after a crash recovery or an agent restart. The token is
+    scoped to that one instance and dies with it; the key that derives tokens
+    stays on the controller.
 - The start command also carries the bus certificate, which the agent writes
   to `rift-bus.pem` in the server directory.
 - Servers do not inherit the agent's secrets: the variables named by
