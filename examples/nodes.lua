@@ -30,7 +30,7 @@ config.messaging = {
 config.web = { listen = "10.0.0.2:8080", token = "replace-with-a-long-random-secret" }
 
 config.nodes.node1 = { address = "10.0.0.11", memory_mb = 32768, max_instances = 40, labels = { "games" } }
-config.nodes.node2 = { address = "10.0.0.12", memory_mb = 16384, labels = { "games" } }
+config.nodes.node2 = { address = "10.0.0.12", memory_mb = 16384, min_free_disk_mb = 4096, labels = { "games" } }
 
 -- Template folders used on nodes must live in template_storage (local/templates).
 config.templates.lobby = {

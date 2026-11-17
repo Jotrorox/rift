@@ -58,6 +58,7 @@ rift.config.nodes.node1 = {
     address = "10.0.0.11",  -- the proxy connects to <address>:<port>
     memory_mb = 32768,      -- optional; memory available for instances
     max_instances = 40,     -- optional; default 128
+    min_free_disk_mb = 4096, -- optional; default 1024, 0 disables
     labels = { "games" },   -- optional; service groups select nodes by label
     -- token_env = "RIFT_NODE_NODE1_TOKEN", -- the default for node1
 }
@@ -68,6 +69,7 @@ rift.config.nodes.node1 = {
 | `address` | required | IP address or DNS name of the node, without a port |
 | `memory_mb` | no limit | Memory that placement may allocate to instances |
 | `max_instances` | 128 | Instances (and named servers) this node may run |
+| `min_free_disk_mb` | 1024 | Placement skips the node while its agent reports less free disk below `--root`; `0` disables the check |
 | `labels` | none | Names that `service_groups.*.nodes` can select |
 | `token_env` | `RIFT_NODE_<NAME>_TOKEN` | Environment variable with the node's token (32–1024 bytes) |
 
@@ -215,17 +217,32 @@ rift.config.service_groups.bedwars = {
 ```
 
 `nodes` accepts `labels` (a node must have all of them), `names`, both, or a
-plain list of node names. A new instance goes to an online, matching node with
-a free instance slot and enough unallocated memory:
+plain list of node names. A new instance goes to an online, matching node
+with:
+
+- a free instance slot;
+- at least the group's `memory_mb` both unallocated (when the node sets
+  `memory_mb`) and available on the host, as its agent
+  [measures it](#host-resources);
+- at least the node's `min_free_disk_mb` of free disk below the agent's
+  `--root`;
+- an agent that applies every start setting the group requires (see
+  [agents older than the controller](#security)).
+
+Among those, the group's `placement` picks:
 
 | `placement` | Picks |
 | --- | --- |
-| `least_memory` (default) | the node with the most unallocated memory |
+| `least_memory` (default) | the node with the most free memory: the smaller of unallocated `memory_mb` and the host's available memory |
 | `fewest_instances` | the node running the fewest instances |
 
 - Allocated memory is the sum of `memory_mb` of the group instances on a node
   (1024 MiB for groups with an explicit `command`). Named servers count toward
-  `max_instances` but not memory.
+  `max_instances` but not allocated memory; the memory they really use shows
+  up in the host's available memory.
+- When no node qualifies, the scaling error names why each matching node was
+  skipped, for example `node2 has 812 MiB of free disk, below its
+  min_free_disk_mb of 1024`.
 - An instance stays on its node for its lifetime. Its node is stored in the
   instance database and survives restarts.
 - `storage = "ephemeral"` (a fresh copy per run) is available only on the
@@ -241,6 +258,29 @@ local instance. New instances on nodes write `server-ip=<node address>` to
 > Allow these ports from the proxy only. Paper's Velocity forwarding and
 > BungeeGuard reject direct connections, but plain BungeeCord forwarding and
 > other software run offline behind Rift.
+
+### Host resources
+
+Every state snapshot (every 2 s) carries what the agent measured on its host:
+
+| Field | Meaning |
+| --- | --- |
+| `memory_total_mb`, `memory_available_mb` | Physical memory and the memory new processes can use without swapping (`MemAvailable`) |
+| `cpus`, `load` | CPUs available to the agent and the one-minute load average |
+| `disk_total_mb`, `disk_free_mb` | The file system holding `--root`, and the space an unprivileged process may still use on it |
+
+- Available memory and load are measured on Linux. On macOS an agent reports
+  total memory but not available memory; a field the platform cannot measure
+  is `null`, and placement then relies on `memory_mb` alone.
+- The available memory lags behind new servers: a JVM commits its heap
+  gradually, so a freshly started instance looks smaller than it will become.
+  Keep setting `memory_mb` on nodes that run many instances; placement uses
+  whichever leaves less room.
+- An agent older than the controller reports nothing, and placement works as
+  before for its node.
+- The dashboard's Nodes panel shows host memory, load (flagged `Busy` above
+  one runnable process per CPU) and disk (flagged `Full` below
+  `min_free_disk_mb`).
 
 ## Take a node out of service
 
@@ -430,7 +470,7 @@ error.
 
 | Where | What you get |
 | --- | --- |
-| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, agent version (flagged when outdated or different from the proxy), labels, instances and allocated memory, and whether a node is cordoned or draining. |
+| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, agent version (flagged when outdated or different from the proxy), labels, instances, allocated memory, the measured host memory, load and disk, and whether a node is cordoned or draining. |
 | HTTP | `GET /api/nodes`, with each node's `schedule` and `drained`; `POST /api/nodes/{name}/cordon\|drain\|uncordon`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
 | Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). `rift admin node cordon\|drain\|uncordon <node>` [takes a node out of service](#take-a-node-out-of-service). |
 | Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
@@ -442,7 +482,7 @@ Agents and the controller exchange JSON over the existing bus:
 | Subject | Direction | Purpose |
 | --- | --- | --- |
 | `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile` |
-| `rift.node.<n>.state` | agent → controller | Process list every 2 s and on every change; none for 10 s makes the node `unreachable` |
+| `rift.node.<n>.state` | agent → controller | Process list and [host resources](#host-resources) every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as
 local logs, so the logs API and the dashboard work unchanged. See
