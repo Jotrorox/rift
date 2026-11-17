@@ -1,6 +1,6 @@
 //! Bounded, authenticated local control plane. One JSON request/response per TCP connection.
 use crate::{admission::Admission, events, metrics::Metrics, runtime::Snapshot};
-use rift::config::{Admin, Config, GroupState};
+use rift::config::{Admin, Config, GroupState, NodeSchedule};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -83,6 +83,8 @@ pub struct Control {
     draining: Mutex<BTreeMap<String, bool>>,
     /// Operator state of service groups; groups absent here are active.
     groups: Mutex<BTreeMap<String, GroupState>>,
+    /// Cordoned and draining nodes; nodes absent here are active.
+    nodes: Mutex<BTreeMap<String, NodeSchedule>>,
     pub logins: Mutex<Admission>,
     players: Mutex<BTreeMap<u64, Entry>>,
     /// What backends report about themselves, including their own drain.
@@ -111,8 +113,9 @@ impl Control {
     }
 
     /// A backend drains when an operator or the configuration says so, when
-    /// it asked to on `rift.server.state`, or while its service group is
-    /// stopped; `drain off` cannot override a stopped group.
+    /// it asked to on `rift.server.state`, while its service group is
+    /// stopped, or while it is a disposable instance on a draining node;
+    /// `drain off` cannot override the last two.
     pub fn draining(&self, config: &Config, backend: &str) -> bool {
         self.draining
             .lock()
@@ -125,6 +128,61 @@ impl Control {
                 .instances
                 .get(backend)
                 .is_some_and(|instance| self.group(&instance.group).suspended)
+            || self.evacuating(config, backend)
+    }
+
+    pub fn node(&self, name: &str) -> NodeSchedule {
+        self.nodes
+            .lock()
+            .unwrap()
+            .get(name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether `instance` is a disposable instance on a draining node: it
+    /// takes no new players and is retired once empty.
+    pub fn evacuating(&self, config: &Config, instance: &str) -> bool {
+        config.instances.get(instance).is_some_and(|instance| {
+            instance.storage.discards_data()
+                && instance
+                    .node
+                    .as_deref()
+                    .is_some_and(|node| self.node(node) == NodeSchedule::Draining)
+        })
+    }
+
+    /// Replace the whole table, as restored from the instance database.
+    pub fn restore_nodes(&self, nodes: BTreeMap<String, NodeSchedule>) {
+        *self.nodes.lock().unwrap() = nodes;
+    }
+
+    /// Change one node's schedule under the table lock; `persist` runs
+    /// first and can veto it, as in [`Control::update_group`].
+    pub fn update_node(
+        &self,
+        name: &str,
+        schedule: NodeSchedule,
+        persist: impl FnOnce(NodeSchedule) -> io::Result<()>,
+    ) -> io::Result<NodeSchedule> {
+        let mut nodes = self.nodes.lock().unwrap();
+        persist(schedule)?;
+        if schedule == NodeSchedule::Active {
+            nodes.remove(name);
+        } else {
+            nodes.insert(name.to_owned(), schedule);
+        }
+        Ok(schedule)
+    }
+
+    /// Forget nodes that are no longer configured; returns their names.
+    pub fn retain_nodes(&self, keep: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut nodes = self.nodes.lock().unwrap();
+        let removed: Vec<_> = nodes.keys().filter(|name| !keep(name)).cloned().collect();
+        for name in &removed {
+            nodes.remove(name);
+        }
+        removed
     }
 
     pub fn group(&self, name: &str) -> GroupState {
@@ -315,7 +373,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
             "start" | "stop" | "groups" | "group" | "create" | "remove" | "templates" | "download"
-            | "sync" | "warm" | "nodes",
+            | "sync" | "warm" | "nodes" | "node",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -382,7 +440,15 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
 
 /// Node agents with reachability, capacity and allocation; never tokens.
 pub(crate) fn nodes(snapshot: &Snapshot) -> Value {
-    json!({"nodes": snapshot.nodes.describe(&snapshot.config)})
+    let mut nodes = snapshot.nodes.describe(&snapshot.config);
+    for node in nodes.as_array_mut().into_iter().flatten() {
+        let Some(name) = node["name"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        node["schedule"] = json!(snapshot.control.node(&name).as_str());
+        node["drained"] = json!(crate::cordon::drained(snapshot, &name));
+    }
+    json!({"nodes": nodes})
 }
 
 /// Group metadata only: templates contain executable arguments and filesystem paths.
@@ -703,10 +769,14 @@ pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Resu
 /// plugin name, or the command alone.
 pub(crate) fn audited(args: &[String]) -> (String, String) {
     match args {
-        [command, action, rest @ ..] if command == "plugins" || command == "group" => (
-            format!("{command} {action}").chars().take(64).collect(),
-            rest.first().cloned().unwrap_or_default(),
-        ),
+        [command, action, rest @ ..]
+            if command == "plugins" || command == "group" || command == "node" =>
+        {
+            (
+                format!("{command} {action}").chars().take(64).collect(),
+                rest.first().cloned().unwrap_or_default(),
+            )
+        }
         [command, ..] => (command.clone(), String::new()),
         [] => (String::new(), String::new()),
     }
@@ -815,12 +885,15 @@ pub(crate) async fn execute(
         [command, action, group, mode] if command == "group" && action == "mode" => {
             crate::groups::set_mode(&snapshot, group, mode).map_err(|error| error.message)
         }
+        [command, action, node] if command == "node" => {
+            crate::cordon::apply(&snapshot, node, action).map_err(|error| error.message)
+        }
         [command] if command == "reload" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -930,7 +1003,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {

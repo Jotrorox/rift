@@ -19,7 +19,9 @@ pub use managed::{
     InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
 };
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
-pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
+pub use nodes::{
+    LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement, valid_node_directory,
+};
 pub use permissions::PermissionsConfig;
 pub use services::{
     Balance, GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,

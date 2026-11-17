@@ -14,6 +14,11 @@ and are listed under **SDKs**.
 
 ### Nodes
 
+- `rift.config.nodes` changes apply on reload instead of needing a restart.
+  Added nodes may log in at once, removed nodes lose their bus session, and
+  labels, `memory_mb`, `max_instances` and `token_env` change in place. A
+  reload that would remove a node still running servers, or change its
+  address under them, is refused and names the servers.
 - The controller checks which start settings a node agent applies before it
   starts a server there. It refuses servers whose `env`, `inherit_env`, bus
   login, `isolation = "required"` or `required` `memory_limit` the agent would
@@ -24,10 +29,22 @@ and are listed under **SDKs**.
   dashboard's Nodes panel, reported by `GET /api/nodes` (`features`,
   `missing_features`, `version_mismatch`) and checked by
   `rift check --strict` against a running controller.
+- Take a node out of service before maintenance:
+  `rift admin node cordon|drain|uncordon <node>` and
+  `POST /api/nodes/{name}/cordon|drain|uncordon`. A cordoned node gets no new
+  instances. A draining node also stops sending new players to its
+  disposable instances and retires each one once it is empty, while
+  replacements start on other nodes. Persistent instances and named servers
+  stay. `/api/nodes` reports each node's `schedule` and `drained`.
 - `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
   have every node download its groups' templates and server software ahead of
   time, so the first instance on a new or freshly synced node starts without
   waiting. Agents need the same version as the controller for it.
+
+### Database
+
+- New `rift.sqlite3` component: node schedules, schema 1. Older releases
+  ignore it.
 
 ## [0.1.0] - 2026-11-16
 

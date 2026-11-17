@@ -78,6 +78,7 @@ Prefix each command with `rift admin`.
 | `group start <group>`, `group stop <group>` | `servers` | Starts or stops a [whole group](service-groups.md#start-stop-and-dev-mode-for-a-whole-group) |
 | `group mode <group> active\|dev` | `servers` | Sets the group's mode |
 | `nodes` | `servers` | Lists [node agents](nodes.md) |
+| `node cordon <node>`, `node drain <node>`, `node uncordon <node>` | `servers` | [Takes a node out of service](nodes.md#take-a-node-out-of-service) or returns it |
 | `templates` | `servers` | Lists templates and git template sources with their cache and sync state |
 | `download <template> [refresh]` | `servers` | Downloads a template's [server software](templates.md#download-server-software-automatically) ahead of time; `refresh` replaces the cached jar |
 | `sync <template-source>` | `servers` | Pulls new commits of a [git template source](templates.md#template-folders-from-git) |

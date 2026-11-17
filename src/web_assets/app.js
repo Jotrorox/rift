@@ -349,7 +349,17 @@
     text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
     table("nodes", nodes, 7, (tr, node) => {
       cell(tr, node.name);
-      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
+      const reachability = cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
+      // Cordoned or draining (rift admin node …, POST /api/nodes/{name}/…).
+      if (node.schedule && node.schedule !== "active") {
+        const tag = document.createElement("span");
+        tag.className = "tag warning";
+        tag.textContent = node.schedule === "draining" ? (node.drained ? "Drained" : "Draining") : "Cordoned";
+        tag.title = node.schedule === "draining"
+          ? "No new instances. Disposable instances take no new players and are retired once empty; persistent ones stay."
+          : "No new instances. Everything already on the node keeps running.";
+        reachability.append(" ", tag);
+      }
       cell(tr, node.address, "address");
       // Servers that need a missing feature are refused on this node.
       const agent = cell(tr, node.version || "—", "address"), missing = node.missing_features || [];

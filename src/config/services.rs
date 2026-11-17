@@ -751,7 +751,12 @@ pub(super) fn restore_instances(config: &mut Config, previous: &Config) -> Resul
             group,
             instance.node.as_deref(),
         );
-        let address = instance_address(config, instance)?;
+        let address = instance_address(config, instance).map_err(|_| {
+            format!(
+                "instances.{name}: runs on node {:?}, which is not configured; remove the instance before removing its node",
+                instance.node.as_deref().unwrap_or_default()
+            )
+        })?;
         config.backends.insert(
             name.clone(),
             Backend::parse(&address).map_err(|error| error.to_string())?,
