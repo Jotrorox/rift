@@ -346,6 +346,35 @@ impl Snapshot {
         })
     }
 
+    /// Change a node's schedule, recording it in the instance database
+    /// first when there is one.
+    pub fn update_node(
+        &self,
+        name: &str,
+        schedule: rift::config::NodeSchedule,
+    ) -> io::Result<rift::config::NodeSchedule> {
+        self.control.update_node(name, schedule, |schedule| {
+            self.instance_store
+                .as_ref()
+                .map_or(Ok(()), |store| store.set_node_schedule(name, schedule))
+        })
+    }
+
+    /// Drop the schedule of nodes that are no longer configured, so a node
+    /// configured again later starts active.
+    pub fn prune_nodes(&self) {
+        for name in self
+            .control
+            .retain_nodes(|name| self.config.nodes.contains_key(name))
+        {
+            if let Some(store) = &self.instance_store
+                && let Err(error) = store.set_node_schedule(&name, Default::default())
+            {
+                log_error!("schedule of removed node {name} not cleared: {error}");
+            }
+        }
+    }
+
     /// Drop the state of groups this configuration no longer defines, so a
     /// group defined again later starts active.
     pub fn prune_groups(&self) {
@@ -2306,7 +2335,8 @@ async fn create_remote_instance(
     snapshot: &Arc<Snapshot>,
 ) -> InstanceResult {
     use crate::control::Error;
-    let node = crate::scaling::place(&config, &group, &snapshot.nodes).map_err(Error::conflict)?;
+    let node = crate::scaling::place(&config, &group, &snapshot.nodes, &snapshot.control)
+        .map_err(Error::conflict)?;
     let definition = &config.service_groups[&group];
     let mut reserved = snapshot
         .instance_store
@@ -2758,9 +2788,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
         initial.control.restore_groups(store.group_states()?);
+        initial.control.restore_nodes(store.node_schedules()?);
         initial.instance_store = Some(store);
     }
     initial.prune_groups();
+    initial.prune_nodes();
     let admin_secret = initial
         .config
         .admin
