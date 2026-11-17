@@ -670,6 +670,7 @@ rift.config.messaging={{listen='0.0.0.0:7443',certificate={cert:?},private_key={
         let fixture = fixture(
             &["10.0.0.2"],
             "rift.config.web={listen='0.0.0.0:8443',token='0123456789abcdef',tls=true}
+rift.config.authentication={online_mode=true}
 rift.config.forwarding={mode='velocity',secret_env='RIFT_FORWARDING_SECRET'}
 rift.config.nodes.node1={address='10.0.0.11',labels={'games'}}
 rift.config.service_groups.bedwars={command={'java'},port_range={30000,30099},nodes={labels={'games'}}}",
