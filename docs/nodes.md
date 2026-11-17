@@ -74,8 +74,41 @@ rift.config.nodes.node1 = {
 - In the default variable name the node name is upper-cased and `-` becomes
   `_`, so `eu-2` reads `RIFT_NODE_EU_2_TOKEN`.
 - The name `local` is reserved for servers on the controller itself.
-- Adding, removing or changing nodes requires a restart, like other messaging
-  changes.
+- Nodes can be added, removed and changed with a reload; see
+  [change nodes while Rift runs](#change-nodes-while-rift-runs).
+
+### Change nodes while Rift runs
+
+A [reload](operations.md#reload-the-configuration) applies changes to
+`rift.config.nodes` without dropping players. Only the nodes that changed are
+touched; the other agents keep their sessions.
+
+| Change | What happens |
+| --- | --- |
+| Add a node | Its agent may log in from now on and receives work once it reports. Its token variable must already be in Rift's environment (see below) |
+| Change `labels`, `memory_mb` or `max_instances` | Placement uses the new values for new instances. Running instances stay where they are, also when their node no longer matches their group |
+| Change `token_env` | The agent's session closes; it must reconnect with the token from the new variable |
+| Change `address` | Only while no server runs on the node: backend addresses of its servers are built from it |
+| Remove a node | Only while no server runs on it. Its session closes and its agent can no longer log in |
+
+The reload is refused as a whole, and nothing changes, when a token variable
+is unset or too short, when a node to remove still runs servers, or when a
+node's address would change under its servers. The error names the servers.
+
+To take a node out of service:
+
+1. Remove its labels (or its name from `service_groups.*.nodes`) and reload,
+   so no new instances are placed there.
+2. Remove its instances (`rift admin remove <instance>` or `DELETE
+   /api/instances/<name>`), and move or delete named servers that use it.
+3. Remove the node and reload.
+
+> [!IMPORTANT]
+> Rift reads node tokens from its own environment, which is fixed when the
+> process starts. To add a node later, start Rift with the token variable
+> already set: either the node's default `RIFT_NODE_<NAME>_TOKEN`, or spare
+> variables such as `RIFT_NODE_SPARE1_TOKEN` that a new node names with
+> `token_env`. A token variable set only after startup needs a restart.
 
 ### Serve templates to the nodes
 
