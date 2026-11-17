@@ -860,6 +860,39 @@ impl Config {
         *self = candidate;
         Ok(())
     }
+
+    /// Re-register an instance on another node and port, keeping everything
+    /// captured at its creation (group, template, storage).
+    pub fn move_instance(&mut self, name: &str, node: &str, port: u16) -> io::Result<()> {
+        let mut instance = self
+            .instances
+            .get(name)
+            .cloned()
+            .ok_or_else(|| invalid(format!("unknown service instance {name:?}")))?;
+        let definition = self
+            .service_groups
+            .get(&instance.group)
+            .ok_or_else(|| invalid(format!("unknown service group {:?}", instance.group)))?;
+        if definition.nodes.is_none() {
+            return Err(invalid(format!(
+                "service_groups.{} runs on this host",
+                instance.group
+            )));
+        }
+        instance.node = Some(node.to_owned());
+        instance.port = port;
+        let server = render_group(&instance.group, name, port, definition, Some(node));
+        let address = instance_address(self, &instance).map_err(invalid)?;
+        let mut candidate = self.clone();
+        candidate
+            .backends
+            .insert(name.into(), Backend::parse(&address)?);
+        candidate.managed_servers.insert(name.into(), server);
+        candidate.instances.insert(name.into(), instance);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

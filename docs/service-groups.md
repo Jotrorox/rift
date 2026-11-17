@@ -130,7 +130,9 @@ You can create instances from any of these places:
   (see [messaging from Lua](messaging-lua.md));
 - [automatic scaling](#automatic-scaling).
 
-Rift publishes each committed creation or removal on `rift.events.instances`.
+Rift publishes each committed creation, removal or
+[move](nodes.md#move-a-persistent-instance-to-another-node) on
+`rift.events.instances`.
 
 **Creation**
 

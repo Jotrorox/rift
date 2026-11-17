@@ -6,14 +6,15 @@
 //! proxies or proxy failover are out of scope: the broker and the player
 //! registry both live in the controller process.
 pub mod agent;
+mod files;
 mod host;
 pub mod protocol;
 mod registry;
 pub mod seal;
-mod transfer;
+pub mod transfer;
 
+pub use files::Remote;
 pub use registry::{
     DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities, server_requirements,
     token, usage,
 };
-pub use transfer::Remote;

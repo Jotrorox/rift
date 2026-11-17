@@ -280,8 +280,9 @@ Among those, the group's `placement` picks:
 - When no node qualifies, the scaling error names why each matching node was
   skipped, for example `node2 has 812 MiB of free disk, below its
   min_free_disk_mb of 1024`.
-- An instance stays on its node for its lifetime. Its node is stored in the
-  instance database and survives restarts.
+- An instance stays on its node until an administrator
+  [moves it](#move-a-persistent-instance-to-another-node). Its node is stored
+  in the instance database and survives restarts.
 - `storage = "ephemeral"` (a fresh copy per run) is available only on the
   controller. Groups with `nodes` use `disposable` or `persistent`.
 
@@ -393,13 +394,85 @@ Templates are not sent over the message bus, because of its 1 MiB payload
 limit. Persistent instances are prepared once; later starts reuse their
 directory and only refresh the port and bind address.
 
+## Move a persistent instance to another node
+
+A persistent instance keeps its world on its node, so Rift never moves it on
+its own. Move it yourself, for example to empty a node before retiring it:
+
+```sh
+rift admin move lobby-3 node2
+```
+
+The command needs the `servers` [admin permission](admin.md) and returns when
+the move has finished:
+
+1. Rift checks the move: the instance must be a persistent instance of a
+   service group with `nodes`, and `node2` must match the group's `nodes`, be
+   online, not cordoned or draining, run an agent that can start the group's
+   servers, and have a free instance slot, enough unallocated and available
+   memory, and at least its `min_free_disk_mb` of free disk.
+2. It stops the instance and refuses every start until the move ends. Players
+   must have left first: move them with `rift admin transfer`, or
+   `rift admin drain lobby-3 on` and wait.
+3. It copies the instance folder from the old node to the new one through the
+   proxy, over the message bus, in chunks of 512 KiB. Agents need no extra
+   ports or credentials. The new node checks every file against the SHA-256
+   of the bytes read on the old one, and assembles the copy in a staging
+   folder next to the instance folder.
+4. It puts the copy in place, records the new node in the instance database
+   and gives the instance a new backend address. The port stays the same if it
+   is free on the new node; otherwise the instance gets the first free port of
+   its group's range, and `server.properties` is updated.
+5. It deletes the old folder, and starts the instance again if it was running.
+
+| Option | Effect |
+| --- | --- |
+| `--keep-source` | Keep the old folder on the old node instead of deleting it |
+| `--no-copy` | Copy nothing: the folder is already on the new node |
+
+The reply lists what was copied, the new port and address, and
+`cleanup_error` if the old folder could not be deleted. Delete that folder by
+hand then: it is not used again. Plugins see the move on
+[`rift.events.instances`](messaging-subjects.md#events) with
+`"event":"moved"`.
+
+**If something fails**, the instance stays on its old node with its files
+untouched, and starts again if it was running. A copy that was interrupted,
+also by a controller restart, stays on the new node until the next move of the
+same instance to that node, which replaces it. Rift never replaces a folder it
+did not put there itself.
+
+**While a move runs**, the instance's service group holds still: its scaling
+does not create, start, stop or remove instances. Other groups and reloads are
+not held up. The copy is limited by the bus, so plan for a few minutes per
+gigabyte on a slow link.
+
+### Recover the instances of a dead node
+
+A copy needs the old node online. If it is gone for good, restore each
+instance folder from a backup onto a new node, below the agent's `--root` at
+the same path (`local/services/<instance>`), then:
+
+```sh
+rift admin move lobby-3 node2 --no-copy
+```
+
+Rift checks that the folder exists and records the new node; it deletes
+nothing. Keep the dead node in `rift.config.nodes` until its instances have
+moved, since Rift refuses a configuration that drops a node with instances. If the
+old node comes back, its agent stops any server that no longer belongs to it,
+but leaves the old folder for you to delete.
+
+Named servers in `managed_servers` cannot be moved this way: copy their folder
+yourself and change their `node` and backend in the configuration.
+
 ## Failure behavior
 
 | Situation | What happens |
 | --- | --- |
 | The controller connection drops | The agent **keeps its servers running** and reconnects. On every (re)connection the controller sends its instance list: the agent stops servers no longer assigned to it and deletes unassigned disposable directories. |
 | The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop saved before the restart still wins. Local servers stop, unless they have [`keep_running`](kept-servers.md). |
-| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. Recovery waits for the node instead of spending restart retries. |
+| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. [Move them](#recover-the-instances-of-a-dead-node) yourself if the node does not come back. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
 | The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. |
@@ -490,6 +563,10 @@ controller checks them before it starts a server there:
 | `isolation = "required"` or a `required` `memory_limit` | Refused |
 | `isolation = "landlock"` or a `memory_limit` that is not `required` | Starts without it; Rift logs a warning, as it does locally on a kernel without support |
 
+[Moves](#move-a-persistent-instance-to-another-node) need the `move` feature on
+both agents (only the new one with `--no-copy`); an older agent refuses the
+move before the instance is stopped.
+
 A refused server shows the reason as its last error, and service groups place
 new instances only on nodes whose agent can run them. Agents from 0.1.0 and
 earlier report no settings at all, whatever their version says (release
@@ -518,7 +595,7 @@ Agents and the controller exchange JSON over the existing bus:
 
 | Subject | Direction | Purpose |
 | --- | --- | --- |
-| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile` |
+| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, and for moves `tree`, `read`, `receive` and `discard` |
 | `rift.node.<n>.state` | agent → controller | Process list and [host resources](#host-resources) every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as

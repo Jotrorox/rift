@@ -28,6 +28,11 @@ pub enum Command {
         name: String,
         reply: Reply,
     },
+    /// Commit a move prepared by [`crate::moving::run`].
+    MoveInstance {
+        commit: crate::moving::Commit,
+        reply: Reply,
+    },
     // The handler confirms that the response has been written before shutdown begins.
     /// `kept` also stops local servers with `keep_running` (`shutdown all`).
     Shutdown {
@@ -372,8 +377,8 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let command = args.first().ok_or("missing command")?;
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
-            "start" | "stop" | "groups" | "group" | "create" | "remove" | "templates" | "download"
-            | "sync" | "nodes" | "node",
+            "start" | "stop" | "groups" | "group" | "create" | "remove" | "move" | "templates"
+            | "download" | "sync" | "nodes" | "node",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -428,6 +433,7 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "template": instance.and_then(|instance| instance.template.as_ref()),
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
                 "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
+                "moving": server.moving,
                 "address": address,
                 "port": address
                     .and_then(|address| address.parse::<SocketAddr>().ok())
@@ -657,6 +663,7 @@ pub(crate) fn audited(args: &[String]) -> (String, String) {
                 rest.first().cloned().unwrap_or_default(),
             )
         }
+        [command, instance, ..] if command == "move" => (command.clone(), instance.clone()),
         [command, ..] => (command.clone(), String::new()),
         [] => (String::new(), String::new()),
     }
@@ -706,6 +713,10 @@ pub(crate) async fn execute(
             commands.try_send(Command::RemoveInstance { name: name.clone(), reply })
                 .map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
+        }
+        [command, rest @ ..] if command == "move" => {
+            let request = crate::moving::Request::parse(rest)?;
+            crate::moving::run(snapshot, commands, request).await
         }
         [command, backend] if command == "start" || command == "stop" => {
             managed_backend(&snapshot, backend).map_err(|error| error.to_string())?;
@@ -771,7 +782,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | create <group> | remove <instance> | move <instance> <node> [--no-copy] [--keep-source] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -834,6 +845,9 @@ pub async fn serve(
                                     if matches!(args.first().map(String::as_str), Some("create" | "download" | "sync")) {
                                         deadline += DOWNLOAD_DEADLINE;
                                     }
+                                    if args.first().is_some_and(|command| command == "move") {
+                                        deadline += crate::moving::DEADLINE;
+                                    }
                                     if let [command, name] = args.as_slice()
                                         && command == "remove"
                                         && let Some(server) = snapshot.config.managed_servers.get(name)
@@ -881,7 +895,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|move <instance> <node> [--no-copy] [--keep-source]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -916,7 +930,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "transfer" | "remove" | "create" | "download" | "sync"
+            "transfer" | "remove" | "create" | "move" | "download" | "sync"
         )
     }) {
         Duration::from_secs(24 * 60 * 60 + 45)

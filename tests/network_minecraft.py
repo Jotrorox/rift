@@ -166,7 +166,7 @@ def check(binary, fixture_name):
           network = {{ initial = {{'lobby'}}, hubs = {{'lobby'}} }},
         }}""")
         proxy = stack.enter_context(process([str(binary), "--config", str(config)], directory, "proxy.log"))
-        wait_ready(proxy, lambda: "rift:" in (directory / "proxy.log").read_text(), directory / "proxy.log")
+        wait_ready(proxy, lambda: "rift: listening on" in (directory / "proxy.log").read_text(), directory / "proxy.log")
         name = "RiftNet" + uuid.uuid4().hex[:8]
         with RealClient(ports["proxy"], name, protocol) as client:
             client.deadline = time.monotonic() + 240

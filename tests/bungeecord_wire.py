@@ -139,7 +139,7 @@ def network(binary, backends, enabled=True, omit=False, draining=()):
         log = directory / "proxy.log"
         with process([str(binary), "--config", str(config)], directory, "proxy.log") as proxy:
             try:
-                wait_ready(proxy, lambda: "rift:" in log.read_text(), log)
+                wait_ready(proxy, lambda: "rift: listening on" in log.read_text(), log)
                 yield port
                 assert proxy.poll() is None, log.read_text()
             except Exception:

@@ -30,6 +30,7 @@ mod groups;
 mod health;
 mod messaging_runtime;
 mod metrics;
+mod moving;
 mod network;
 mod node_init;
 mod operator;

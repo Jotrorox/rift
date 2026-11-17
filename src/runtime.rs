@@ -2183,6 +2183,7 @@ async fn change_instance(
     match operation {
         Operation::CreateInstance { group } => create_instance(group, snapshot).await,
         Operation::RemoveInstance { name } => remove_instance(name, snapshot).await,
+        Operation::MoveInstance(commit) => move_instance(commit, snapshot).await,
         _ => Err(Error::invalid("expected an instance operation")),
     }
 }
@@ -2549,6 +2550,240 @@ async fn remove_remote_instance(
     Ok((Arc::new(next), response))
 }
 
+/// Commit a move that `crate::moving::run` prepared: the instance is parked
+/// and, unless `--no-copy`, its folder is staged on the new node. Until the
+/// database records the new node, every failure puts things back as they
+/// were; afterwards only cleanup is left, and its failures are reported.
+async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) -> InstanceResult {
+    use crate::control::Error;
+    use rift::node::{protocol, transfer};
+    let crate::moving::Commit {
+        instance: name,
+        from,
+        to,
+        copy,
+        keep_source,
+    } = commit;
+    // The copy is done; the old node only needs to be reachable to delete
+    // the old folder, which may also fail later.
+    let checked = crate::moving::check(snapshot, &name, &to, false).map_err(Error::conflict)?;
+    if checked.from != from {
+        return Err(Error::conflict(format!(
+            "{name} moved to node {} meanwhile",
+            checked.from
+        )));
+    }
+    if !snapshot.managed.is_moving(&name) {
+        return Err(Error::conflict(format!(
+            "{name} is not stopped for a move; use rift admin move"
+        )));
+    }
+    let directory = checked.directory;
+    let automatic = snapshot
+        .managed
+        .snapshot()
+        .into_iter()
+        .find(|server| server.name == name)
+        .is_none_or(|server| server.automatic_enabled);
+    let port = move_port(snapshot, &name, &to)?;
+    let mut config = snapshot.config.clone();
+    config.move_instance(&name, &to, port)?;
+    let next = instance_snapshot(config, snapshot)?;
+    let nodes = &snapshot.nodes;
+    let unreachable = |message: String| Error {
+        status: 502,
+        message,
+    };
+    if copy {
+        transfer::commit(nodes, &name, &to, &directory)
+            .await
+            .map_err(|error| {
+                unreachable(format!(
+                    "node {to} could not put the folder of {name} in place: {error}"
+                ))
+            })?;
+    } else {
+        let listing = protocol::Command::Files(protocol::Files {
+            server: name.clone(),
+            directory: directory.clone(),
+            method: "GET".into(),
+            path: String::new(),
+            folder: false,
+            content: None,
+            offset: None,
+        });
+        match nodes.request(&to, &listing, Duration::from_secs(15)).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::conflict(format!(
+                    "node {to} has no folder {}; restore the folder of {name} there first, or move without --no-copy",
+                    directory.display()
+                )));
+            }
+            Err(error) => {
+                return Err(unreachable(format!(
+                    "node {to} could not check the folder of {name}: {error}"
+                )));
+            }
+        }
+    }
+    // A folder that is in place but not recorded is removed again.
+    let undo = || async {
+        if copy {
+            transfer::discard_orphan(nodes, &name, &to, &directory).await;
+        }
+    };
+    // The folder keeps its world; only its port and address change.
+    let prepared = match rift::provisioning::remote_prepare(&next.config, &name) {
+        Ok(prepare) => {
+            nodes
+                .request(
+                    &to,
+                    &protocol::Command::Prepare(Box::new(prepare)),
+                    Duration::from_secs(120),
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    match prepared {
+        Ok(result) if result["created"] != true => {}
+        Ok(_) => {
+            return Err(Error::conflict(format!(
+                "the folder of {name} disappeared from node {to} during the move"
+            )));
+        }
+        Err(error) => {
+            undo().await;
+            return Err(unreachable(format!(
+                "node {to} could not update the port of {name}: {error}"
+            )));
+        }
+    }
+    if let Err(error) = snapshot.managed.retire_moved(&name).await {
+        undo().await;
+        return Err(Error::conflict(format!(
+            "the old worker of {name} could not be retired: {error}"
+        )));
+    }
+    let record = |config: Config, from: String| {
+        let (store, name) = (snapshot.instance_store.clone(), name.clone());
+        async move {
+            match store {
+                Some(store) => blocking(move || store.move_instance(&config, &name, &from)).await,
+                None => Ok(()),
+            }
+        }
+    };
+    let registered = match record(next.config.clone(), from.clone()).await {
+        Ok(()) => next
+            .managed
+            .add_moved(&next.config, &name, automatic)
+            .map_err(|error| {
+                (
+                    true,
+                    format!("{name} could not be registered on node {to}: {error}"),
+                )
+            }),
+        Err(error) => Err((false, error.to_string())),
+    };
+    if let Err((recorded, message)) = registered {
+        // Back to the old node, as if the move never started.
+        let reverted = match recorded {
+            true => record(snapshot.config.clone(), to.clone()).await,
+            false => Ok(()),
+        };
+        let restored = snapshot
+            .managed
+            .add_moved(&snapshot.config, &name, automatic);
+        undo().await;
+        return Err(match reverted.and(restored) {
+            Ok(()) => Error::conflict(message),
+            Err(error) => Error::conflict(format!(
+                "{message}; restoring {name} on node {from} failed too, restart the proxy: {error}"
+            )),
+        });
+    }
+    // Recorded: from here on, failures are only reported.
+    let mut cleanup = Vec::new();
+    if copy && let Err(error) = transfer::finish(nodes, &name, &to, &directory).await {
+        cleanup.push(format!(
+            "the move marker in the folder on node {to} was not removed: {error}"
+        ));
+    }
+    let mut source_removed = false;
+    if copy && !keep_source {
+        let discard = protocol::Command::Discard {
+            server: name.clone(),
+            directory: directory.clone(),
+        };
+        match nodes
+            .request(&from, &discard, Duration::from_secs(300))
+            .await
+        {
+            Ok(result) => source_removed = result["removed"] == true,
+            Err(error) => cleanup.push(format!(
+                "the old folder on node {from} was not deleted: {error}"
+            )),
+        }
+    }
+    let instance = &next.config.instances[&name];
+    let response = serde_json::json!({
+        "name": name,
+        "moved": true,
+        "group": instance.group,
+        "from": from,
+        "node": to,
+        "port": instance.port,
+        "address": next.config.backends[&name].address(),
+        "storage": instance.storage.as_str(),
+        "files_copied": copy,
+        "source_removed": source_removed,
+        "cleanup_error": (!cleanup.is_empty()).then(|| cleanup.join("; ")),
+    });
+    Ok((Arc::new(next), response))
+}
+
+/// The port `name` gets on node `to`: its current one if that is free there,
+/// else the first free port of its group's range.
+fn move_port(snapshot: &Snapshot, name: &str, to: &str) -> Result<u16, crate::control::Error> {
+    let config = &snapshot.config;
+    let instance = &config.instances[name];
+    let group = &config.service_groups[&instance.group];
+    let mut reserved = snapshot
+        .instance_store
+        .as_ref()
+        .map(|store| store.reserved_ports_on(Some(to)))
+        .transpose()?
+        .unwrap_or_default();
+    reserved.extend(
+        config
+            .instances
+            .values()
+            .filter(|instance| instance.node.as_deref() == Some(to))
+            .map(|instance| instance.port),
+    );
+    // Named servers on that node listen on their backend's port.
+    reserved.extend(
+        config
+            .managed_servers
+            .iter()
+            .filter(|(name, server)| {
+                server.node.as_deref() == Some(to) && !config.instances.contains_key(*name)
+            })
+            .filter_map(|(name, _)| config.backends.get(name))
+            .filter_map(|backend| backend.address().rsplit_once(':')?.1.parse::<u16>().ok()),
+    );
+    std::iter::once(instance.port)
+        .chain(group.port_start..=group.port_end)
+        .find(|port| !reserved.contains(port))
+        .ok_or_else(|| {
+            crate::control::Error::conflict(format!(
+                "service group port range is exhausted on node {to}"
+            ))
+        })
+}
+
 /// Tell every (re)connected node which servers it still runs for this
 /// controller; it stops and deletes the rest. Runs for the process lifetime.
 async fn reconcile_nodes(current: watch::Receiver<Arc<Snapshot>>) {
@@ -2621,6 +2856,8 @@ fn instance_event(snapshot: &Snapshot, response: &serde_json::Value) {
     let mut event = response.clone();
     event["event"] = serde_json::json!(if response["created"] == true {
         "created"
+    } else if response["moved"] == true {
+        "moved"
     } else {
         "removed"
     });
@@ -3037,6 +3274,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
+                admin::Command::MoveInstance { commit, reply } => (control::Operation::MoveInstance(commit), None, Some(reply), "local-admin".to_owned()),
                 admin::Command::Shutdown { ack, kept } => { stop_kept = kept; let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
@@ -3083,7 +3321,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         };
         if matches!(
             operation,
-            control::Operation::CreateInstance { .. } | control::Operation::RemoveInstance { .. }
+            control::Operation::CreateInstance { .. }
+                | control::Operation::RemoveInstance { .. }
+                | control::Operation::MoveInstance(_)
         ) {
             let active = snapshot.clone();
             instance_change = Some(InstanceChange {
@@ -3211,7 +3451,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         match command {
             admin::Command::Reload(reply)
             | admin::Command::CreateInstance { reply, .. }
-            | admin::Command::RemoveInstance { reply, .. } => {
+            | admin::Command::RemoveInstance { reply, .. }
+            | admin::Command::MoveInstance { reply, .. } => {
                 let _ = reply.send(Err("proxy is shutting down".into()));
             }
             admin::Command::Shutdown { .. } => {}
