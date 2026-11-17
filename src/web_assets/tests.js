@@ -157,6 +157,11 @@ async function testWebAssets(appSource, statusSource) {
     assert(nodes[0].children[3].textContent === "1.0" && !flag(nodes[0]), "A matching agent is flagged");
     assert(flag(nodes[1])?.textContent === "Outdated" && flag(nodes[1]).title.includes("memory_limit"), "An agent without memory limits is not flagged");
     assert(flag(nodes[2])?.textContent === "Mismatch" && flag(nodes[2]).title.includes("1.0"), "A different agent version is not flagged");
+    assert(!nodes[0].children[1].children.length, "Active node shows a schedule badge");
+    h.model.status.nodes[1].schedule = "draining";
+    await h.element("refresh-status").emit("click"); await flush();
+    const badge = h.element("nodes").children[1].children[1].children.find((child) => typeof child === "object");
+    assert(badge && badge.textContent === "Draining", "Draining badge missing");
   });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();

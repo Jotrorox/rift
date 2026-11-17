@@ -528,6 +528,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/groups/{name}/start", post(start_group))
             .route("/api/groups/{name}/stop", post(stop_group))
             .route("/api/groups/{name}/mode", put(group_mode))
+            .route("/api/nodes/{name}/{action}", post(node_schedule))
             .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/operations/{id}", get(instance_result))
             .route("/api/metrics", get(json_metrics))
@@ -805,6 +806,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "players", _, "message" | "kick"] => "console",
                 ["api", "servers", _, _]
                 | ["api", "groups", _, "instances" | "start" | "stop" | "mode"]
+                | ["api", "nodes", _, "cordon" | "drain" | "uncordon"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
                 // Permission data: `perms` (or `config`) reads, `config` writes.
@@ -937,6 +939,18 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     if known { name } else { String::new() },
                 )
             }
+            // A node runs instances of every group: unrestricted operators only.
+            ["api", "nodes", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.groups.is_none(),
+                    if snapshot.config.nodes.contains_key(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
             ["api", "groups", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -973,6 +987,9 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "groups", _, "start"] => "start_group",
             ["api", "groups", _, "stop"] => "stop_group",
             ["api", "groups", _, "mode"] => "group_mode",
+            ["api", "nodes", _, "cordon"] => "cordon_node",
+            ["api", "nodes", _, "drain"] => "drain_node",
+            ["api", "nodes", _, "uncordon"] => "uncordon_node",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "template-sources", _, "sync"] => "sync_template_source",
@@ -2096,6 +2113,20 @@ async fn group_mode(
         crate::groups::set_mode(&app.snapshot(), &name, mode)
     })
 }
+/// Cordon, drain or uncordon a node. The schedule applies at once; the
+/// scaler retires a draining node's disposable instances as they empty.
+async fn node_schedule(
+    State(app): State<App>,
+    Path((name, action)): Path<(String, String)>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if !matches!(action.as_str(), "cordon" | "drain" | "uncordon") {
+        return error(StatusCode::NOT_FOUND, "endpoint not found");
+    }
+    group_operation(body, &[], StatusCode::OK, |_| {
+        crate::cordon::apply(&app.snapshot(), &name, &action)
+    })
+}
 /// Group operations finish synchronously except for the process changes
 /// they request, which `/api/servers` reports as they complete.
 fn group_operation(
@@ -2329,7 +2360,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

@@ -2,7 +2,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     time::{Duration, Instant},
 };
 
@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use super::protocol::{self, Command, NodeState, Requirement};
 use crate::{
     config::{Config, ManagedServer, NodeConfig},
-    messaging::Broker,
+    messaging::{Broker, quic},
 };
 
 /// The controller's own version, which its agents should run too.
@@ -28,14 +28,17 @@ impl std::fmt::Debug for Nodes {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Nodes")
-            .field("config", &self.0.config)
+            .field("config", &*read(&self.0.config))
             .finish_non_exhaustive()
     }
 }
 
 struct Inner {
     broker: Broker,
-    config: BTreeMap<String, NodeConfig>,
+    /// Replaced by [`Nodes::reconfigure`] when a reload changes `nodes`.
+    config: RwLock<BTreeMap<String, NodeConfig>>,
+    /// The agents' bus logins, shared with the QUIC server.
+    logins: quic::NodeLogins,
     unreachable_after: Duration,
     observed: Mutex<BTreeMap<String, Observed>>,
     reconnected: Mutex<BTreeSet<String>>,
@@ -82,6 +85,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|error| error.into_inner())
+}
+
 impl Nodes {
     pub fn new(broker: Broker, config: &Config) -> Self {
         Self::with_timeout(broker, config, protocol::UNREACHABLE_AFTER)
@@ -91,7 +98,8 @@ impl Nodes {
     pub fn with_timeout(broker: Broker, config: &Config, unreachable_after: Duration) -> Self {
         Self(Arc::new(Inner {
             broker,
-            config: config.nodes.clone(),
+            config: RwLock::new(config.nodes.clone()),
+            logins: quic::NodeLogins::default(),
             unreachable_after,
             observed: Mutex::new(BTreeMap::new()),
             reconnected: Mutex::new(BTreeSet::new()),
@@ -100,11 +108,74 @@ impl Nodes {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.config.is_empty()
+        read(&self.0.config).is_empty()
     }
 
-    pub fn config(&self) -> &BTreeMap<String, NodeConfig> {
-        &self.0.config
+    /// The node definitions in effect.
+    pub fn config(&self) -> BTreeMap<String, NodeConfig> {
+        read(&self.0.config).clone()
+    }
+
+    fn configured(&self, node: &str) -> bool {
+        read(&self.0.config).contains_key(node)
+    }
+
+    /// The agents' bus logins, for the QUIC server's
+    /// [`quic::AuthConfig::nodes`].
+    pub fn logins(&self) -> &quic::NodeLogins {
+        &self.0.logins
+    }
+
+    /// Check that a reload could switch to `logins`, before it commits.
+    pub fn check(&self, logins: &[quic::Identity]) -> io::Result<()> {
+        self.0.logins.check(logins).map_err(io::Error::other)
+    }
+
+    /// Switch to the node definitions of a reloaded configuration and their
+    /// `logins` (see [`identities`]). Removed nodes are forgotten and lose
+    /// their bus session, as does a node whose token changed; agents of
+    /// added nodes may log in from now on. The caller refuses to remove a
+    /// node that still runs servers.
+    pub fn reconfigure(
+        &self,
+        nodes: &BTreeMap<String, NodeConfig>,
+        logins: Vec<quic::Identity>,
+    ) -> io::Result<()> {
+        let revoked = self.0.logins.replace(logins).map_err(io::Error::other)?;
+        let previous = std::mem::replace(
+            &mut *self.0.config.write().unwrap_or_else(|e| e.into_inner()),
+            nodes.clone(),
+        );
+        let removed: Vec<&String> = previous
+            .keys()
+            .filter(|name| !nodes.contains_key(*name))
+            .collect();
+        {
+            let mut observed = lock(&self.0.observed);
+            let mut reconnected = lock(&self.0.reconnected);
+            for name in &removed {
+                observed.remove(*name);
+                reconnected.remove(*name);
+            }
+        }
+        for (name, node) in nodes {
+            match previous.get(name) {
+                None => log_info!("node {name} added"),
+                Some(old) if old != node => log_info!("node {name} changed"),
+                Some(_) => {}
+            }
+        }
+        for name in removed {
+            log_info!("node {name} removed");
+        }
+        for principal in revoked {
+            if let Some(name) = principal.strip_prefix("node.")
+                && nodes.contains_key(name)
+            {
+                log_info!("node {name} has a new token; its agent must reconnect with it");
+            }
+        }
+        Ok(())
     }
 
     /// Subscribe before returning, so no snapshot published after startup is
@@ -139,7 +210,7 @@ impl Nodes {
     /// Apply one snapshot. A first snapshot, one after an outage, or one from a
     /// restarted agent marks the node for reconciliation.
     pub fn record(&self, node: &str, payload: &[u8]) -> io::Result<()> {
-        if !self.0.config.contains_key(node) {
+        if !self.configured(node) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "node is not configured",
@@ -304,7 +375,7 @@ impl Nodes {
         command: &Command,
         wait: Duration,
     ) -> io::Result<Value> {
-        if !self.0.config.contains_key(node) {
+        if !self.configured(node) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("unknown node {node:?}"),
@@ -339,10 +410,10 @@ impl Nodes {
     /// Operational state for the HTTP API and control subjects.
     pub fn describe(&self, config: &Config) -> Value {
         let usage = usage(config);
+        let nodes = read(&self.0.config);
         let observed = lock(&self.0.observed);
         Value::Array(
-            self.0
-                .config
+            nodes
                 .iter()
                 .map(|(name, node)| {
                     let seen = observed.get(name);
@@ -377,6 +448,43 @@ impl Nodes {
                 .collect(),
         )
     }
+}
+
+/// The bus login of every node in `nodes`: principal `node.<name>`, the
+/// token from its `token_env`, and the grants of an agent.
+pub fn identities(nodes: &BTreeMap<String, NodeConfig>) -> io::Result<Vec<quic::Identity>> {
+    nodes
+        .iter()
+        .map(|(name, node)| {
+            let (publish, subscribe) = protocol::principal_grants(name);
+            Ok(quic::Identity {
+                name: NodeConfig::principal(name),
+                token: token(name, &node.token_env)?,
+                publish,
+                subscribe,
+                control: false,
+                players: false,
+            })
+        })
+        .collect()
+}
+
+/// A node agent's token from `variable`, shared by its bus login and
+/// template downloads.
+pub fn token(name: &str, variable: &str) -> io::Result<String> {
+    let token = std::env::var(variable).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("nodes.{name}: set {variable} to a secret of at least 32 bytes"),
+        )
+    })?;
+    if !(32..=1024).contains(&token.len()) || token.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("nodes.{name}: token must contain 32..=1024 bytes without control characters"),
+        ));
+    }
+    Ok(token)
 }
 
 fn observed_state(observed: &Mutex<BTreeMap<String, Observed>>, node: &str) -> NodeState {
@@ -557,6 +665,76 @@ rift.config.nodes.node1={address='10.0.0.11'}",
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+    }
+
+    #[tokio::test]
+    async fn reconfigure_adds_removes_and_relabels_nodes() {
+        let nodes = nodes();
+        nodes.record("node1", &state("a", 1, &[])).unwrap();
+        let mut definitions = nodes.config();
+        definitions.get_mut("node1").unwrap().labels = BTreeSet::from(["games".to_owned()]);
+        definitions.insert(
+            "node2".into(),
+            NodeConfig {
+                address: "10.0.0.12".into(),
+                memory_mb: None,
+                max_instances: 8,
+                labels: BTreeSet::new(),
+                token_env: "RIFT_NODE_NODE2_TOKEN".into(),
+            },
+        );
+        let login = |name: &str, token: &str| quic::Identity {
+            name: NodeConfig::principal(name),
+            token: token.into(),
+            publish: vec![],
+            subscribe: vec![],
+            control: false,
+            players: false,
+        };
+        nodes
+            .reconfigure(
+                &definitions,
+                vec![
+                    login("node1", "node1-test-only-long-random-token"),
+                    login("node2", "node2-test-only-long-random-token"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(nodes.logins().names(), ["node.node1", "node.node2"]);
+        // An existing node keeps what it reported; an added one may report.
+        assert!(nodes.online("node1"));
+        nodes.record("node2", &state("b", 1, &[])).unwrap();
+        let described = nodes.describe(&Config::default());
+        assert_eq!(described[0]["labels"], json!(["games"]));
+        assert_eq!(described[1]["name"], "node2");
+        // A removed node is forgotten and its snapshots are refused.
+        definitions.remove("node1");
+        nodes
+            .reconfigure(
+                &definitions,
+                vec![login("node2", "node2-test-only-long-random-token")],
+            )
+            .unwrap();
+        assert_eq!(nodes.reachability("node1"), Reachability::NeverConnected);
+        assert!(nodes.record("node1", &state("a", 2, &[])).is_err());
+        assert_eq!(
+            nodes.describe(&Config::default()).as_array().unwrap().len(),
+            1
+        );
+        // Duplicate tokens are refused without changing anything.
+        definitions.insert("node3".into(), definitions["node2"].clone());
+        assert!(
+            nodes
+                .reconfigure(
+                    &definitions,
+                    vec![
+                        login("node2", "node2-test-only-long-random-token"),
+                        login("node3", "node2-test-only-long-random-token"),
+                    ],
+                )
+                .is_err()
+        );
+        assert_eq!(nodes.config().len(), 1);
     }
 
     #[test]

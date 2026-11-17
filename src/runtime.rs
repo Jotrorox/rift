@@ -79,7 +79,8 @@ pub struct Snapshot {
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
     pub managed: rift::managed::ManagedServers,
-    /// Node agents; fixed at startup because node changes require a restart.
+    /// Node agents, shared by every generation; a reload that changes
+    /// `nodes` updates them through [`rift::node::Nodes::reconfigure`].
     pub nodes: rift::node::Nodes,
     live: Arc<Mutex<Weak<Snapshot>>>,
     instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
@@ -343,6 +344,35 @@ impl Snapshot {
                 .as_ref()
                 .map_or(Ok(()), |store| store.set_group_state(name, state))
         })
+    }
+
+    /// Change a node's schedule, recording it in the instance database
+    /// first when there is one.
+    pub fn update_node(
+        &self,
+        name: &str,
+        schedule: rift::config::NodeSchedule,
+    ) -> io::Result<rift::config::NodeSchedule> {
+        self.control.update_node(name, schedule, |schedule| {
+            self.instance_store
+                .as_ref()
+                .map_or(Ok(()), |store| store.set_node_schedule(name, schedule))
+        })
+    }
+
+    /// Drop the schedule of nodes that are no longer configured, so a node
+    /// configured again later starts active.
+    pub fn prune_nodes(&self) {
+        for name in self
+            .control
+            .retain_nodes(|name| self.config.nodes.contains_key(name))
+        {
+            if let Some(store) = &self.instance_store
+                && let Err(error) = store.set_node_schedule(&name, Default::default())
+            {
+                log_error!("schedule of removed node {name} not cleared: {error}");
+            }
+        }
     }
 
     /// Drop the state of groups this configuration no longer defines, so a
@@ -2042,6 +2072,10 @@ fn health_worker(
     }))
 }
 
+/// The bus logins of changed node definitions, to apply when a reload
+/// commits.
+type NodeChange = Option<Vec<rift::messaging::quic::Identity>>;
+
 /// Every accepted configuration follows the same transaction, regardless of
 /// whether it came from a signal, the website, or an API client.
 async fn reconfigure(
@@ -2049,7 +2083,7 @@ async fn reconfigure(
     app: &crate::web::App,
     snapshot: &Arc<Snapshot>,
     services: &crate::web::Services,
-) -> Result<(Arc<Snapshot>, crate::web::Prepared), crate::control::Error> {
+) -> Result<(Arc<Snapshot>, crate::web::Prepared, NodeChange), crate::control::Error> {
     use crate::control::{self, Error};
     let path = app
         .path
@@ -2068,6 +2102,16 @@ async fn reconfigure(
     .map_err(Error::invalid)??;
     control::live_compatible(&candidate.config, &snapshot.config)
         .and_then(|()| app.record_settings_compatible(&candidate.config))
+        .map_err(Error::invalid)?;
+    // Every token must be readable before anything changes. Removing a node
+    // that still runs servers already failed validation above.
+    let node_change = (candidate.config.nodes != snapshot.config.nodes)
+        .then(|| {
+            let logins = rift::node::identities(&candidate.config.nodes)?;
+            snapshot.nodes.check(&logins)?;
+            io::Result::Ok(logins)
+        })
+        .transpose()
         .map_err(Error::invalid)?;
     let prepared = services.prepare(&candidate.config).await?;
     let mut service_addresses = services.addresses(&candidate.config, &prepared)?;
@@ -2094,7 +2138,7 @@ async fn reconfigure(
         .await
         .map_err(Error::invalid)??;
     }
-    Ok((Arc::new(next), prepared))
+    Ok((Arc::new(next), prepared, node_change))
 }
 
 type InstanceResult = Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error>;
@@ -2291,7 +2335,8 @@ async fn create_remote_instance(
     snapshot: &Arc<Snapshot>,
 ) -> InstanceResult {
     use crate::control::Error;
-    let node = crate::scaling::place(&config, &group, &snapshot.nodes).map_err(Error::conflict)?;
+    let node = crate::scaling::place(&config, &group, &snapshot.nodes, &snapshot.control)
+        .map_err(Error::conflict)?;
     let definition = &config.service_groups[&group];
     let mut reserved = snapshot
         .instance_store
@@ -2743,9 +2788,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
         initial.control.restore_groups(store.group_states()?);
+        initial.control.restore_nodes(store.node_schedules()?);
         initial.instance_store = Some(store);
     }
     initial.prune_groups();
+    initial.prune_nodes();
     let admin_secret = initial
         .config
         .admin
@@ -2846,7 +2893,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
     let mut background = JoinSet::new();
-    if !snapshot.nodes.is_empty() {
+    // With the bus listening, a reload may add nodes later.
+    if messaging_server.is_some() {
         background.spawn(snapshot.nodes.listen()?);
         background.spawn(reconcile_nodes(receiver.clone()));
     }
@@ -3032,7 +3080,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let mut applied_without_plugins = false;
         let response = match result {
-            Ok((next, prepared)) => {
+            Ok((next, prepared, node_change)) => {
                 extension_jobs.shutdown().await;
                 next.extensions.activate();
                 extension_jobs = next.extensions.scheduler();
@@ -3048,6 +3096,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 // Keep subscriptions and queued messages across script reloads.
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
+                }
+                // Before publishing: the new generation may place instances
+                // on an added node. Checked in `reconfigure`, so this only
+                // fails on a bug.
+                if let Some(logins) = node_change
+                    && let Err(error) = next.nodes.reconfigure(&next.config.nodes, logins)
+                {
+                    log_error!("node changes could not be applied: {error}");
                 }
                 // Turning authentication off deserves the startup warning too.
                 let was_online = snapshot.config.authentication.online_mode;
