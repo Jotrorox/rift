@@ -551,7 +551,7 @@ pub struct Files {
     pub content: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeState {
     /// Random per agent process: a new value means the agent restarted.
     pub agent: String,
@@ -565,6 +565,33 @@ pub struct NodeState {
     /// Recent unexpected exits, so the controller can report why.
     #[serde(default)]
     pub exits: Vec<ExitState>,
+    /// What the host has left. Older agents omit it; each field is `None`
+    /// where the agent's platform cannot measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
+}
+
+/// The agent host's real memory, CPU load and disk, measured for every
+/// snapshot. Placement and the dashboard read it next to the configured
+/// `memory_mb`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Resources {
+    #[serde(default)]
+    pub memory_total_mb: Option<u64>,
+    /// Memory new processes can use without swapping (Linux `MemAvailable`).
+    #[serde(default)]
+    pub memory_available_mb: Option<u64>,
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    /// The one-minute load average.
+    #[serde(default)]
+    pub load: Option<f64>,
+    /// The file system holding the agent's `--root`.
+    #[serde(default)]
+    pub disk_total_mb: Option<u64>,
+    /// Space an unprivileged process may still write below `--root`.
+    #[serde(default)]
+    pub disk_free_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -184,6 +184,24 @@ pub(crate) fn check(
             total.saturating_sub(allocated)
         ));
     }
+    // What the agent measures, as placement judges new instances.
+    let host = snapshot.nodes.resources(to).unwrap_or_default();
+    if let Some(disk) = host.disk_free_mb
+        && disk < node.min_free_disk_mb as u64
+    {
+        return Err(format!(
+            "node {to} has {disk} MiB of free disk, below its min_free_disk_mb of {}",
+            node.min_free_disk_mb
+        ));
+    }
+    if let Some(available) = host
+        .memory_available_mb
+        .filter(|&available| available < memory as u64)
+    {
+        return Err(format!(
+            "node {to} has {available} MiB of available memory, but {instance} needs {memory} MiB"
+        ));
+    }
     let directory = config
         .managed_servers
         .get(instance)

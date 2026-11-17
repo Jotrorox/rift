@@ -8,7 +8,7 @@ use std::{
 use rift::{
     config::{Config, GroupMode, Placement, ServiceScaling},
     managed::{ManagedServerSnapshot, Phase},
-    node::{DEFAULT_INSTANCE_MEMORY_MB, Nodes},
+    node::{DEFAULT_INSTANCE_MEMORY_MB, Nodes, protocol::Resources},
 };
 
 use crate::{admin::Control, control::Operation, runtime::Snapshot};
@@ -308,10 +308,15 @@ fn decide(
 }
 
 /// Pick the node for a new instance of `group`: an online node matching the
-/// group's selector with a free instance slot and enough unallocated memory,
-/// chosen by the group's placement policy. Ties go to the first name.
+/// group's selector with a free instance slot, enough memory and enough free
+/// disk, chosen by the group's placement policy. Ties go to the first name.
 /// Nodes whose agent cannot apply a setting the group requires are skipped,
 /// and cordoned and draining nodes take no new instances.
+///
+/// Memory is the smaller of the node's unallocated `memory_mb` and the
+/// available memory its agent reports, so a host whose servers use more than
+/// they were allocated, or whose operator set no limit, is judged by what is
+/// really left. Agents that report nothing are judged by the configuration.
 pub fn place(
     config: &Config,
     group: &str,
@@ -328,6 +333,7 @@ pub fn place(
         group,
         |node| nodes.online(node) && control.node(node).accepts_instances(),
         |node| nodes.lacking(node, &requirements),
+        |node| nodes.resources(node),
     )
 }
 
@@ -336,6 +342,7 @@ fn choose(
     group: &str,
     available: impl Fn(&str) -> bool,
     lacking: impl Fn(&str) -> Vec<&'static str>,
+    resources: impl Fn(&str) -> Option<Resources>,
 ) -> Result<String, String> {
     let definition = config
         .service_groups
@@ -349,45 +356,83 @@ fn choose(
     let memory = definition.memory_mb.unwrap_or(DEFAULT_INSTANCE_MEMORY_MB);
     let usage = rift::node::usage(config);
     let mut matching = 0;
-    let candidates =
-        config
-            .nodes
-            .iter()
-            .filter(|(name, node)| selector.matches(name, node))
-            .inspect(|_| matching += 1)
-            .filter(|(name, _)| available(name))
-            .filter(|(name, _)| {
-                let lacking = lacking(name);
-                if !lacking.is_empty() {
-                    outdated.push(format!("{name} (lacks {})", lacking.join(", ")));
-                }
-                lacking.is_empty()
-            })
-            .filter_map(|(name, node)| {
-                let (instances, allocated) = usage.get(name.as_str()).copied().unwrap_or_default();
-                let free = node.memory_mb.map(|total| total.saturating_sub(allocated));
-                (instances < node.max_instances && free.is_none_or(|free| free >= memory))
-                    .then_some((name, instances, free.unwrap_or(usize::MAX)))
-            });
+    let mut skipped = Vec::new();
+    let candidates: Vec<_> = config
+        .nodes
+        .iter()
+        .filter(|(name, node)| selector.matches(name, node))
+        .inspect(|_| matching += 1)
+        .filter_map(|(name, node)| {
+            if !available(name) {
+                skipped.push(format!("{name} is offline, cordoned or draining"));
+                return None;
+            }
+            let lacking = lacking(name);
+            if !lacking.is_empty() {
+                outdated.push(format!("{name} (lacks {})", lacking.join(", ")));
+                return None;
+            }
+            let (instances, allocated) = usage.get(name.as_str()).copied().unwrap_or_default();
+            if instances >= node.max_instances {
+                skipped.push(format!("{name} has no free instance slot"));
+                return None;
+            }
+            let host = resources(name).unwrap_or_default();
+            if let Some(disk) = host.disk_free_mb
+                && disk < node.min_free_disk_mb as u64
+            {
+                skipped.push(format!(
+                    "{name} has {disk} MiB of free disk, below its min_free_disk_mb of {}",
+                    node.min_free_disk_mb
+                ));
+                return None;
+            }
+            let unallocated = node.memory_mb.map(|total| total.saturating_sub(allocated));
+            if let Some(unallocated) = unallocated.filter(|&free| free < memory) {
+                skipped.push(format!(
+                    "{name} has {unallocated} MiB of unallocated memory"
+                ));
+                return None;
+            }
+            let available = host
+                .memory_available_mb
+                .map(|available| usize::try_from(available).unwrap_or(usize::MAX));
+            if let Some(available) = available.filter(|&free| free < memory) {
+                skipped.push(format!("{name} has {available} MiB of available memory"));
+                return None;
+            }
+            let free = match (unallocated, available) {
+                (Some(unallocated), Some(available)) => unallocated.min(available),
+                (unallocated, available) => unallocated.or(available).unwrap_or(usize::MAX),
+            };
+            Some((name, instances, free))
+        })
+        .collect();
     let chosen = match definition.placement {
-        Placement::LeastMemory => {
-            candidates.min_by_key(|(name, _, free)| (std::cmp::Reverse(*free), (*name).clone()))
-        }
-        Placement::FewestInstances => {
-            candidates.min_by_key(|(name, instances, _)| (*instances, (*name).clone()))
-        }
+        Placement::LeastMemory => candidates
+            .into_iter()
+            .min_by_key(|(name, _, free)| (std::cmp::Reverse(*free), (*name).clone())),
+        Placement::FewestInstances => candidates
+            .into_iter()
+            .min_by_key(|(name, instances, _)| (*instances, (*name).clone())),
     };
     chosen.map(|(name, _, _)| name.clone()).ok_or_else(|| {
         if matching == 0 {
             format!("no configured node matches service_groups.{group}.nodes")
         } else if !outdated.is_empty() {
+            let others = if skipped.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", skipped.join("; "))
+            };
             format!(
-                "no node for {group} is online with a free instance slot, {memory} MiB of unallocated memory and an agent that applies its settings; upgrade rift on {}",
+                "no node for {group} is online with a free instance slot, {memory} MiB of memory, enough free disk and an agent that applies its settings; upgrade rift on {}{others}",
                 outdated.join(", ")
             )
         } else {
             format!(
-                "no node for {group} is online, not cordoned or draining, and has a free instance slot and {memory} MiB of unallocated memory"
+                "no node for {group} is online, not cordoned or draining, and has a free instance slot, {memory} MiB of memory and enough free disk: {}",
+                skipped.join("; ")
             )
         }
     })
@@ -724,6 +769,7 @@ rift.config.service_groups.world={template='t',storage='persistent',port_range={
                 revision: 1,
                 servers: Vec::new(),
                 exits: Vec::new(),
+                resources: None,
             })
             .unwrap()
         };
@@ -762,25 +808,35 @@ rift.config.service_groups.lobby={template='t',port_range={31000,31099},nodes={'
         let mut config = rift::config::Config::from_lua(source, "placement.lua").unwrap();
         let all = |_: &str| true;
         let none = |_: &str| Vec::new();
+        let unmeasured = |_: &str| None;
         // d has no memory limit, so it has the most unallocated memory.
-        assert_eq!(choose(&config, "game", all, none).unwrap(), "d");
-        assert_eq!(choose(&config, "game", |n| n != "d", none).unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none, unmeasured).unwrap(), "d");
+        assert_eq!(
+            choose(&config, "game", |n| n != "d", none, unmeasured).unwrap(),
+            "b"
+        );
         config
             .add_instance_on("game", "game-1", 30000, Some("d"))
             .unwrap();
         // d is full (max_instances = 1); c lacks the label.
-        assert_eq!(choose(&config, "game", all, none).unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none, unmeasured).unwrap(), "b");
         for (name, port) in [("game-2", 30001), ("game-3", 30002), ("game-4", 30003)] {
             config
                 .add_instance_on("game", name, port, Some("b"))
                 .unwrap();
         }
         // b has 2048 MiB left, a has 4096 MiB.
-        assert_eq!(choose(&config, "game", all, none).unwrap(), "a");
+        assert_eq!(choose(&config, "game", all, none, unmeasured).unwrap(), "a");
         // Fewest instances, restricted to the named nodes.
-        assert_eq!(choose(&config, "lobby", all, none).unwrap(), "a");
-        assert_eq!(choose(&config, "lobby", |n| n != "a", none).unwrap(), "b");
-        assert!(choose(&config, "lobby", |_| false, none).is_err());
+        assert_eq!(
+            choose(&config, "lobby", all, none, unmeasured).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            choose(&config, "lobby", |n| n != "a", none, unmeasured).unwrap(),
+            "b"
+        );
+        assert!(choose(&config, "lobby", |_| false, none, unmeasured).is_err());
         // An agent that cannot apply the group's settings gets no instance.
         let outdated = |n: &str| {
             if n == "a" {
@@ -789,8 +845,11 @@ rift.config.service_groups.lobby={template='t',port_range={31000,31099},nodes={'
                 vec![]
             }
         };
-        assert_eq!(choose(&config, "lobby", all, outdated).unwrap(), "b");
-        let error = choose(&config, "lobby", |n| n == "a", outdated).unwrap_err();
+        assert_eq!(
+            choose(&config, "lobby", all, outdated, unmeasured).unwrap(),
+            "b"
+        );
+        let error = choose(&config, "lobby", |n| n == "a", outdated, unmeasured).unwrap_err();
         assert!(
             error.contains("upgrade rift on a (lacks memory_limit)"),
             "{error}"
@@ -801,12 +860,93 @@ rift.config.service_groups.lobby={template='t',port_range={31000,31099},nodes={'
         config
             .add_instance_on("game", "game-6", 30001, Some("a"))
             .unwrap();
-        assert_eq!(choose(&config, "game", all, none).unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none, unmeasured).unwrap(), "b");
         config
             .add_instance_on("game", "game-7", 30004, Some("b"))
             .unwrap();
-        let error = choose(&config, "game", all, none).unwrap_err();
+        let error = choose(&config, "game", all, none, unmeasured).unwrap_err();
         assert!(error.contains("2048 MiB"), "{error}");
+    }
+
+    #[test]
+    fn placement_respects_reported_memory_and_disk() {
+        let source = "rift.config.listeners.public='127.0.0.1:0'
+rift.config.routes.public='game'
+rift.config.messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}
+rift.config.nodes.a={address='10.0.0.1',memory_mb=16384}
+rift.config.nodes.b={address='10.0.0.2'}
+rift.config.nodes.c={address='10.0.0.3',min_free_disk_mb=0}
+rift.config.templates.t={server_jar='paper.jar'}
+rift.config.service_groups.game={template='t',storage='disposable',memory_mb=2048,port_range={30000,30099},nodes={'a','b','c'}}";
+        let config = rift::config::Config::from_lua(source, "placement.lua").unwrap();
+        let all = |_: &str| true;
+        let host = |memory: u64, disk: u64| Resources {
+            memory_available_mb: Some(memory),
+            disk_free_mb: Some(disk),
+            ..Resources::default()
+        };
+        // Without reports, the configured limit decides: b and c have none.
+        assert_eq!(
+            choose(&config, "game", all, |_| Vec::new(), |_| None).unwrap(),
+            "b"
+        );
+        // Reports rank the unlimited nodes by what their hosts have left, and
+        // a's real memory caps its configured 16 GiB.
+        let reports = |node: &str| match node {
+            "a" => Some(host(12000, 50_000)),
+            "b" => Some(host(6000, 50_000)),
+            _ => Some(host(9000, 50_000)),
+        };
+        assert_eq!(
+            choose(&config, "game", all, |_| Vec::new(), reports).unwrap(),
+            "a"
+        );
+        let reports = |node: &str| match node {
+            "a" => Some(host(4000, 50_000)),
+            "b" => Some(host(6000, 50_000)),
+            _ => Some(host(5000, 50_000)),
+        };
+        assert_eq!(
+            choose(&config, "game", all, |_| Vec::new(), reports).unwrap(),
+            "b"
+        );
+        // A nearly full disk takes b out; c disabled the check.
+        let reports = |node: &str| match node {
+            "a" => Some(host(1000, 50_000)),
+            "b" => Some(host(6000, 900)),
+            _ => Some(host(5000, 10)),
+        };
+        assert_eq!(
+            choose(&config, "game", all, |_| Vec::new(), reports).unwrap(),
+            "c"
+        );
+        // Too little real memory everywhere: the error names every reason.
+        let reports = |node: &str| match node {
+            "a" => Some(host(1000, 50_000)),
+            "b" => Some(host(6000, 900)),
+            _ => Some(host(2047, 50_000)),
+        };
+        let error = choose(&config, "game", all, |_| Vec::new(), reports).unwrap_err();
+        for reason in [
+            "a has 1000 MiB of available memory",
+            "b has 900 MiB of free disk, below its min_free_disk_mb of 1024",
+            "c has 2047 MiB of available memory",
+        ] {
+            assert!(error.contains(reason), "{error}");
+        }
+        let chosen = choose(
+            &config,
+            "game",
+            |node| node != "a",
+            |_| Vec::new(),
+            |_| None,
+        );
+        assert_eq!(chosen.unwrap(), "b");
+        let error = choose(&config, "game", |_| false, |_| Vec::new(), |_| None).unwrap_err();
+        assert!(
+            error.contains("a is offline, cordoned or draining"),
+            "{error}"
+        );
     }
 
     #[test]

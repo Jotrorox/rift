@@ -143,7 +143,7 @@ listener is disabled.
 | `rift.control.reload` | `{}` | Reload the selected configuration file | `control` |
 | `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node | `control` |
 | `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling, node selection and instances | `control` |
-| `rift.control.nodes` | `{}` | [Nodes](nodes.md) with reachability, address, labels, instances and allocated memory | `control` |
+| `rift.control.nodes` | `{}` | [Nodes](nodes.md) with reachability, address, labels, instances, allocated memory and measured host resources | `control` |
 | `rift.control.templates` | `{}` | Templates with their server software and download cache state | `control` |
 | `rift.control.create` | `{"group":"lobby"}` | Create an instance from a service group, downloading template software first when needed | `control` |
 | `rift.control.remove` | `{"name":"lobby-1"}` | Remove an unused instance; disposable storage is deleted | `control` |

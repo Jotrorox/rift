@@ -132,7 +132,7 @@ h3:first-child{margin-top:0}
 .tag.good{background:var(--green-soft);color:var(--green)}
 .tag.warning{background:var(--orange-soft);color:var(--orange)}
 .tag.accent{background:var(--accent-soft);color:var(--link)}
-td .tag+.tag{margin-left:6px}
+td .tag+.tag,td .tag.trailing{margin-left:6px}
 .table-wrap{overflow-x:auto;border-top:1px solid var(--separator)}
 .table-wrap.flush{border-top:0}
 table{width:100%;border-collapse:collapse;text-align:left}
