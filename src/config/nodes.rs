@@ -58,6 +58,45 @@ impl NodeSelector {
     }
 }
 
+/// Whether a node takes new work, set by an operator before maintenance. Like
+/// [`GroupState`], it is not part of the Lua configuration: it survives
+/// reloads and, with an instance database, restarts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NodeSchedule {
+    /// New instances may be placed here.
+    #[default]
+    Active,
+    /// No new instances; everything already on the node keeps running.
+    Cordoned,
+    /// Cordoned, and disposable instances take no new players and are
+    /// retired once empty. Persistent instances and named servers stay.
+    Draining,
+}
+
+impl NodeSchedule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Cordoned => "cordoned",
+            Self::Draining => "draining",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "cordoned" => Some(Self::Cordoned),
+            "draining" => Some(Self::Draining),
+            _ => None,
+        }
+    }
+
+    /// Whether placement may put a new instance on the node.
+    pub fn accepts_instances(self) -> bool {
+        self == Self::Active
+    }
+}
+
 /// How a new instance picks one of the eligible nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Placement {

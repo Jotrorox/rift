@@ -11,7 +11,7 @@ use rift::{
     node::{DEFAULT_INSTANCE_MEMORY_MB, Nodes, protocol::Resources},
 };
 
-use crate::{control::Operation, runtime::Snapshot};
+use crate::{admin::Control, control::Operation, runtime::Snapshot};
 
 pub enum Change {
     Instance(Operation),
@@ -26,6 +26,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// How long a rejected stop of a stopped group's member waits before retrying.
 const STOP_RETRY: Duration = Duration::from_secs(5);
 
+/// How long a rejected retirement of an instance on a draining node waits
+/// before retrying, for example after a player joined it meanwhile.
+const RETIRE_RETRY: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 pub struct Scaler {
     last_change: BTreeMap<String, Instant>,
@@ -36,6 +40,8 @@ pub struct Scaler {
     failures: BTreeMap<String, u32>,
     /// When each member of a stopped group was last asked to stop.
     stops: BTreeMap<String, Instant>,
+    /// When each instance on a draining node was last asked to retire.
+    retirements: BTreeMap<String, Instant>,
 }
 
 /// The cooldown after `failures` consecutive changes made around failed
@@ -61,6 +67,11 @@ impl Scaler {
         groups.rotate_left(start);
         self.stops
             .retain(|_, at| now.saturating_duration_since(*at) < STOP_RETRY);
+        self.retirements
+            .retain(|_, at| now.saturating_duration_since(*at) < RETIRE_RETRY);
+        let evacuating = |server: &ManagedServerSnapshot| {
+            snapshot.control.evacuating(&snapshot.config, &server.name)
+        };
         for (name, group) in groups {
             let members: Vec<_> = servers
                 .iter()
@@ -75,6 +86,16 @@ impl Scaler {
             // Operator state outranks the scaling policy: a stopped group
             // only winds down, and a group in dev mode is left as it is.
             let state = snapshot.control.group(name);
+            // A draining node sheds its disposable instances one by one as
+            // they empty, whatever the group's scaling policy; they take no
+            // new players, so they are not capacity worth keeping.
+            if state.mode != GroupMode::Dev
+                && let Some(server) = retire_candidate(&members, evacuating, &self.retirements)
+            {
+                self.retirements.insert(server.clone(), now);
+                self.last_group = Some(name.clone());
+                return Some(Change::Instance(Operation::RemoveInstance { name: server }));
+            }
             if state.suspended {
                 if let Some(server) = stop_candidate(&members, &self.stops) {
                     self.stops.insert(server.clone(), now);
@@ -107,7 +128,7 @@ impl Scaler {
                     .map(|server| queues.get(&server.name).copied().unwrap_or(0))
                     .sum::<usize>();
             let disposable = group.storage.discards_data();
-            let change = decide(name, policy, &members, queued, disposable);
+            let change = decide(name, policy, &members, queued, disposable, &evacuating);
             if change.is_some() {
                 // Failed provisioning and occupied removal races are also
                 // throttled; they must not produce a hot retry loop.
@@ -143,6 +164,24 @@ fn stop_candidate(
         .map(|server| server.name.clone())
 }
 
+/// The next empty instance on a draining node to retire, unless it was
+/// just asked. Occupied ones keep running until their players leave.
+fn retire_candidate(
+    members: &[&ManagedServerSnapshot],
+    evacuating: impl Fn(&ManagedServerSnapshot) -> bool,
+    recent: &BTreeMap<String, Instant>,
+) -> Option<String> {
+    members
+        .iter()
+        .find(|server| {
+            evacuating(server)
+                && server.players == 0
+                && server.reservations == 0
+                && !recent.contains_key(&server.name)
+        })
+        .map(|server| server.name.clone())
+}
+
 fn desired(policy: &ServiceScaling, load: usize, queued: usize) -> usize {
     let target = (policy.capacity_per_instance * policy.target_occupancy_percent).div_ceil(100);
     let queue_demand = if queued >= policy.queue_threshold {
@@ -169,12 +208,17 @@ fn desired(policy: &ServiceScaling, load: usize, queued: usize) -> usize {
 /// are exhausted is also retired to free the slot a disposable group's
 /// replacement needs. The caller throttles these changes with an exponential
 /// backoff.
+///
+/// Instances on a draining node (`evacuating`) take no new players: they are
+/// not capacity, so replacements are created elsewhere, and the caller
+/// retires them once empty. Their players still count as load.
 fn decide(
     group: &str,
     policy: &ServiceScaling,
     members: &[&ManagedServerSnapshot],
     queued: usize,
     disposable: bool,
+    evacuating: &dyn Fn(&ManagedServerSnapshot) -> bool,
 ) -> Option<Change> {
     // A session may be registered while its establishment reservation is still
     // held. Counting the greater value prevents double-counting that overlap.
@@ -187,16 +231,22 @@ fn decide(
     let failed = |server: &&&ManagedServerSnapshot| server.state == Phase::Failed;
     let healthy = members
         .iter()
-        .filter(|server| !failed(server) && !(disposable && unknown(server)))
+        .filter(|server| !failed(server) && !(disposable && unknown(server)) && !evacuating(server))
         .count();
-    if healthy < count && members.len() < policy.max_instances {
+    let full = members.len() >= policy.max_instances;
+    if healthy < count && !full {
         return Some(Change::Instance(Operation::CreateInstance {
             group: group.into(),
         }));
     }
+    // From here on, only instances that stay on their node.
+    let members: Vec<_> = members
+        .iter()
+        .copied()
+        .filter(|server| !evacuating(server))
+        .collect();
     let idle = |server: &&&ManagedServerSnapshot| server.players == 0 && server.reservations == 0;
     let replaced = healthy >= count;
-    let full = members.len() >= policy.max_instances;
     // Retire unreachable capacity once it is replaced, or when it occupies the
     // slots that its replacement needs.
     if disposable
@@ -254,13 +304,19 @@ fn decide(
 /// Pick the node for a new instance of `group`: an online node matching the
 /// group's selector with a free instance slot, enough memory and enough free
 /// disk, chosen by the group's placement policy. Ties go to the first name.
-/// Nodes whose agent cannot apply a setting the group requires are skipped.
+/// Nodes whose agent cannot apply a setting the group requires are skipped,
+/// and cordoned and draining nodes take no new instances.
 ///
 /// Memory is the smaller of the node's unallocated `memory_mb` and the
 /// available memory its agent reports, so a host whose servers use more than
 /// they were allocated, or whose operator set no limit, is judged by what is
 /// really left. Agents that report nothing are judged by the configuration.
-pub fn place(config: &Config, group: &str, nodes: &Nodes) -> Result<String, String> {
+pub fn place(
+    config: &Config,
+    group: &str,
+    nodes: &Nodes,
+    control: &Control,
+) -> Result<String, String> {
     let requirements = config
         .service_groups
         .get(group)
@@ -269,7 +325,7 @@ pub fn place(config: &Config, group: &str, nodes: &Nodes) -> Result<String, Stri
     choose(
         config,
         group,
-        |node| nodes.online(node),
+        |node| nodes.online(node) && control.node(node).accepts_instances(),
         |node| nodes.lacking(node, &requirements),
         |node| nodes.resources(node),
     )
@@ -278,7 +334,7 @@ pub fn place(config: &Config, group: &str, nodes: &Nodes) -> Result<String, Stri
 fn choose(
     config: &Config,
     group: &str,
-    online: impl Fn(&str) -> bool,
+    available: impl Fn(&str) -> bool,
     lacking: impl Fn(&str) -> Vec<&'static str>,
     resources: impl Fn(&str) -> Option<Resources>,
 ) -> Result<String, String> {
@@ -301,8 +357,8 @@ fn choose(
         .filter(|(name, node)| selector.matches(name, node))
         .inspect(|_| matching += 1)
         .filter_map(|(name, node)| {
-            if !online(name) {
-                skipped.push(format!("{name} is not online"));
+            if !available(name) {
+                skipped.push(format!("{name} is offline, cordoned or draining"));
                 return None;
             }
             let lacking = lacking(name);
@@ -369,7 +425,7 @@ fn choose(
             )
         } else {
             format!(
-                "no node for {group} is online with a free instance slot, {memory} MiB of memory and enough free disk: {}",
+                "no node for {group} is online, not cordoned or draining, and has a free instance slot, {memory} MiB of memory and enough free disk: {}",
                 skipped.join("; ")
             )
         }
@@ -380,6 +436,10 @@ fn choose(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn stays(_: &ManagedServerSnapshot) -> bool {
+        false
+    }
 
     fn policy() -> ServiceScaling {
         ServiceScaling {
@@ -441,35 +501,35 @@ mod tests {
         let empty = server("game-4", 0, 0, Phase::Running);
         let members = [&busy, &pending, &starting, &empty];
         let Some(Change::Instance(Operation::RemoveInstance { name })) =
-            decide("game", &policy(), &members, 0, false)
+            decide("game", &policy(), &members, 0, false, &stays)
         else {
             panic!("expected empty excess removal");
         };
         assert_eq!(name, "game-4");
-        assert!(decide("game", &policy(), &members[..3], 0, false).is_none());
+        assert!(decide("game", &policy(), &members[..3], 0, false, &stays).is_none());
     }
 
     #[test]
     fn reservations_are_not_double_counted_and_failures_do_not_evade_retry_bounds() {
         let occupied = server("game-1", 8, 8, Phase::Running);
         let spare = server("game-2", 0, 0, Phase::Running);
-        assert!(decide("game", &policy(), &[&occupied, &spare], 0, false).is_none());
+        assert!(decide("game", &policy(), &[&occupied, &spare], 0, false, &stays).is_none());
         // An instance that gave up restarting is never restarted by the
         // scaler; it is replaced instead (see the crash-loop test).
         let mut failed = server("game-1", 0, 0, Phase::Failed);
         failed.restart_exhausted = true;
         assert!(!matches!(
-            decide("game", &policy(), &[&failed], 0, false),
+            decide("game", &policy(), &[&failed], 0, false, &stays),
             Some(Change::Start(_))
         ));
         let stopped = server("game-1", 0, 0, Phase::Stopped);
         assert!(matches!(
-            decide("game", &policy(), &[&stopped], 0, false),
+            decide("game", &policy(), &[&stopped], 0, false, &stays),
             Some(Change::Start(_))
         ));
         let mut stopped_by_admin = stopped;
         stopped_by_admin.automatic_enabled = false;
-        assert!(decide("game", &policy(), &[&stopped_by_admin], 0, false).is_none());
+        assert!(decide("game", &policy(), &[&stopped_by_admin], 0, false, &stays).is_none());
     }
 
     #[test]
@@ -482,13 +542,18 @@ mod tests {
             // ahead of healthy instances as the surplus.
             let recovering = server("game-1", 0, 0, Phase::Failed);
             assert!(matches!(
-                decide("game", &policy, &[&recovering], 0, disposable),
+                decide("game", &policy, &[&recovering], 0, disposable, &stays),
                 Some(Change::Instance(Operation::CreateInstance { .. }))
             ));
             let replacement = server("game-2", 0, 0, Phase::Running);
-            let Some(Change::Instance(Operation::RemoveInstance { name })) =
-                decide("game", &policy, &[&recovering, &replacement], 0, disposable)
-            else {
+            let Some(Change::Instance(Operation::RemoveInstance { name })) = decide(
+                "game",
+                &policy,
+                &[&recovering, &replacement],
+                0,
+                disposable,
+                &stays,
+            ) else {
                 panic!("expected retirement of the surplus failed instance");
             };
             assert_eq!(name, "game-1");
@@ -496,9 +561,14 @@ mod tests {
             // Out of retries and replaced: retired.
             let mut exhausted = recovering.clone();
             exhausted.restart_exhausted = true;
-            let Some(Change::Instance(Operation::RemoveInstance { name })) =
-                decide("game", &policy, &[&exhausted, &replacement], 0, disposable)
-            else {
+            let Some(Change::Instance(Operation::RemoveInstance { name })) = decide(
+                "game",
+                &policy,
+                &[&exhausted, &replacement],
+                0,
+                disposable,
+                &stays,
+            ) else {
                 panic!("expected retirement of the exhausted instance");
             };
             assert_eq!(name, "game-1");
@@ -506,7 +576,14 @@ mod tests {
             let mut occupied = exhausted.clone();
             occupied.reservations = 1;
             assert!(!matches!(
-                decide("game", &policy, &[&occupied, &replacement], 0, disposable),
+                decide(
+                    "game",
+                    &policy,
+                    &[&occupied, &replacement],
+                    0,
+                    disposable,
+                    &stays
+                ),
                 Some(Change::Instance(Operation::RemoveInstance { .. }))
             ));
         }
@@ -516,10 +593,10 @@ mod tests {
         let mut exhausted = server("game-1", 0, 0, Phase::Failed);
         exhausted.restart_exhausted = true;
         assert!(matches!(
-            decide("game", &policy, &[&exhausted], 0, true),
+            decide("game", &policy, &[&exhausted], 0, true, &stays),
             Some(Change::Instance(Operation::RemoveInstance { .. }))
         ));
-        assert!(decide("game", &policy, &[&exhausted], 0, false).is_none());
+        assert!(decide("game", &policy, &[&exhausted], 0, false, &stays).is_none());
     }
 
     #[test]
@@ -559,12 +636,12 @@ mod tests {
         policy.spare_instances = 0;
         // Disposable: the unreachable instance no longer counts as capacity.
         assert!(matches!(
-            decide("game", &policy, &[&lost, &healthy], 9, true),
+            decide("game", &policy, &[&lost, &healthy], 9, true, &stays),
             Some(Change::Instance(Operation::CreateInstance { .. }))
         ));
         // Once replaced, the empty unreachable instance is retired.
         let Some(Change::Instance(Operation::RemoveInstance { name })) =
-            decide("game", &policy, &[&lost, &healthy], 0, true)
+            decide("game", &policy, &[&lost, &healthy], 0, true, &stays)
         else {
             panic!("expected retirement of unreachable capacity");
         };
@@ -572,19 +649,141 @@ mod tests {
         // Occupied unreachable instances are never retired automatically.
         lost.players = 3;
         assert!(!matches!(
-            decide("game", &policy, &[&lost, &healthy], 0, true),
+            decide("game", &policy, &[&lost, &healthy], 0, true, &stays),
             Some(Change::Instance(Operation::RemoveInstance { name })) if name == "game-1"
         ));
         // Persistent: unreachable worlds keep counting and are never removed.
         lost.players = 0;
-        assert!(decide("game", &policy, &[&lost, &healthy], 9, false).is_none());
-        assert!(decide("game", &policy, &[&healthy, &lost], 0, false).is_none());
+        assert!(decide("game", &policy, &[&lost, &healthy], 9, false, &stays).is_none());
+        assert!(decide("game", &policy, &[&healthy, &lost], 0, false, &stays).is_none());
         // At max_instances, an empty unreachable slot is freed for its replacement.
         policy.max_instances = 2;
         assert!(matches!(
-            decide("game", &policy, &[&lost, &healthy], 9, true),
+            decide("game", &policy, &[&lost, &healthy], 9, true, &stays),
             Some(Change::Instance(Operation::RemoveInstance { .. }))
         ));
+    }
+
+    #[test]
+    fn instances_on_a_draining_node_are_replaced_not_counted_or_restarted() {
+        let mut policy = policy();
+        policy.spare_instances = 0;
+        let mut leaving = server("game-1", 3, 0, Phase::Running);
+        let staying = server("game-2", 0, 0, Phase::Running);
+        let evacuating = |server: &ManagedServerSnapshot| server.name == "game-1";
+        // Its players still count as load, but it is not capacity.
+        assert!(matches!(
+            decide("game", &policy, &[&leaving], 0, true, &evacuating),
+            Some(Change::Instance(Operation::CreateInstance { .. }))
+        ));
+        // Once replaced, the staying instance is not retired as surplus
+        // while the leaving one still holds players.
+        assert!(decide("game", &policy, &[&leaving, &staying], 0, true, &evacuating).is_none());
+        // A stopped instance on a draining node is never started again.
+        leaving.players = 0;
+        leaving.state = Phase::Stopped;
+        assert!(
+            decide("game", &policy, &[&leaving], 0, true, &evacuating)
+                .is_none_or(|change| !matches!(change, Change::Start(name) if name == "game-1"))
+        );
+    }
+
+    fn drain_snapshot() -> Snapshot {
+        let source = "rift.config.listeners.public='127.0.0.1:0'
+rift.config.routes.public='game'
+rift.config.messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}
+rift.config.nodes.a={address='10.0.0.1'}
+rift.config.nodes.b={address='10.0.0.2'}
+rift.config.templates.t={server_jar='paper.jar'}
+rift.config.service_groups.game={template='t',storage='disposable',port_range={30000,30099},nodes={'a','b'}}
+rift.config.service_groups.world={template='t',storage='persistent',port_range={31000,31099},nodes={'a','b'}}";
+        let mut config = rift::config::Config::from_lua(source, "drain.lua").unwrap();
+        for (group, name, port, node) in [
+            ("game", "game-1", 30000, "a"),
+            ("world", "world-1", 31000, "a"),
+            ("game", "game-2", 30000, "b"),
+        ] {
+            config
+                .add_instance_on(group, name, port, Some(node))
+                .unwrap();
+        }
+        Snapshot::new(config, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn draining_a_node_retires_its_empty_disposable_instances() {
+        // The group has no scaling policy: draining is an operator request,
+        // not a scaling decision.
+        let snapshot = drain_snapshot();
+        let mut scaler = Scaler::default();
+        let now = Instant::now();
+        assert!(scaler.next(&snapshot, now).is_none());
+        snapshot
+            .update_node("a", rift::config::NodeSchedule::Cordoned)
+            .unwrap();
+        assert!(
+            scaler.next(&snapshot, now).is_none(),
+            "cordon keeps instances"
+        );
+        snapshot
+            .update_node("a", rift::config::NodeSchedule::Draining)
+            .unwrap();
+        let Some(Change::Instance(Operation::RemoveInstance { name })) =
+            scaler.next(&snapshot, now)
+        else {
+            panic!("expected retirement of game-1");
+        };
+        // The persistent world and the instance on b stay.
+        assert_eq!(name, "game-1");
+        // A retirement that did not happen is retried, but not at once.
+        assert!(!matches!(
+            scaler.next(&snapshot, now + Duration::from_millis(100)),
+            Some(Change::Instance(Operation::RemoveInstance { .. }))
+        ));
+        assert!(matches!(
+            scaler.next(&snapshot, now + RETIRE_RETRY),
+            Some(Change::Instance(Operation::RemoveInstance { name })) if name == "game-1"
+        ));
+        // A group in dev mode is left as it is.
+        snapshot
+            .update_group("game", |state| state.mode = GroupMode::Dev)
+            .unwrap();
+        assert!(scaler.next(&snapshot, now + RETIRE_RETRY * 2).is_none());
+    }
+
+    #[tokio::test]
+    async fn placement_skips_cordoned_and_draining_nodes() {
+        let snapshot = drain_snapshot();
+        let state = |agent: &str| {
+            serde_json::to_vec(&rift::node::protocol::NodeState {
+                agent: agent.into(),
+                version: "test".into(),
+                features: Vec::new(),
+                revision: 1,
+                servers: Vec::new(),
+                exits: Vec::new(),
+                resources: None,
+            })
+            .unwrap()
+        };
+        snapshot.nodes.record("a", &state("a")).unwrap();
+        snapshot.nodes.record("b", &state("b")).unwrap();
+        let chosen = || place(&snapshot.config, "game", &snapshot.nodes, &snapshot.control);
+        // Both have one instance and no memory limit; ties go to the first name.
+        assert_eq!(chosen().unwrap(), "a");
+        snapshot
+            .update_node("a", rift::config::NodeSchedule::Cordoned)
+            .unwrap();
+        assert_eq!(chosen().unwrap(), "b");
+        snapshot
+            .update_node("b", rift::config::NodeSchedule::Draining)
+            .unwrap();
+        let error = chosen().unwrap_err();
+        assert!(error.contains("cordoned"), "{error}");
+        snapshot
+            .update_node("a", rift::config::NodeSchedule::Active)
+            .unwrap();
+        assert_eq!(chosen().unwrap(), "a");
     }
 
     #[test]
@@ -737,7 +936,10 @@ rift.config.service_groups.game={template='t',storage='disposable',memory_mb=204
         );
         assert_eq!(chosen.unwrap(), "b");
         let error = choose(&config, "game", |_| false, |_| Vec::new(), |_| None).unwrap_err();
-        assert!(error.contains("a is not online"), "{error}");
+        assert!(
+            error.contains("a is offline, cordoned or draining"),
+            "{error}"
+        );
     }
 
     #[test]

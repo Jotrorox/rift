@@ -163,6 +163,11 @@ async function testWebAssets(appSource, statusSource) {
     assert(nodes[1].children[8].textContent === "9.50 on 8 CPUs" && nodes[1].children[8].children[0].textContent === "Busy", "Load or busy flag missing");
     assert(nodes[1].children[9].textContent === "512 MiB free of 100 GiB", `Disk wrong: ${nodes[1].children[9].textContent}`);
     assert(nodes[1].children[9].children[0].textContent === "Full" && nodes[1].children[9].children[0].title.includes("min_free_disk_mb"), "Full disk not flagged");
+    assert(!nodes[0].children[1].children.length, "Active node shows a schedule badge");
+    h.model.status.nodes[1].schedule = "draining";
+    await h.element("refresh-status").emit("click"); await flush();
+    const badge = h.element("nodes").children[1].children[1].children.find((child) => typeof child === "object");
+    assert(badge && badge.textContent === "Draining", "Draining badge missing");
   });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();

@@ -878,3 +878,82 @@ async fn instance_logins_authenticate_and_revocation_closes_their_sessions() {
         .unwrap();
     server.shutdown().await;
 }
+
+/// A reload swaps node logins while the server runs: an added node logs in,
+/// an unchanged one keeps its session, and a removed node or one with a new
+/// token loses its session at once.
+#[tokio::test]
+async fn node_logins_change_while_the_server_runs() {
+    let (server_tls, client_tls) = configs();
+    let node = |name: &str, token: &str| Identity {
+        name: format!("node.{name}"),
+        token: token.into(),
+        publish: vec![format!("rift.node.{name}.state")],
+        subscribe: vec![format!("rift.node.{name}.cmd")],
+        control: false,
+        players: false,
+    };
+    let logins = NodeLogins::default();
+    logins
+        .replace(vec![node("a", "node-a-test-only-long-random-token")])
+        .unwrap();
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity()],
+            nodes: logins.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let connect = |token: &str| {
+        let (client_tls, token) = (client_tls.clone(), token.to_owned());
+        async move { Client::connect(address, "localhost", client_tls, &token).await }
+    };
+    let a = connect("node-a-test-only-long-random-token").await.unwrap();
+    assert!(connect("node-b-test-only-long-random-token").await.is_err());
+
+    // A node login may not repeat a configured principal's token or name
+    // something other than a node.
+    assert!(logins.check(&[node("b", &identity().token)]).is_err());
+    let mut plugin = node("b", "node-b-test-only-long-random-token");
+    plugin.name = "plugin2".into();
+    assert!(logins.check(&[plugin]).is_err());
+
+    // Adding b leaves a's session alone.
+    let revoked = logins
+        .replace(vec![
+            node("a", "node-a-test-only-long-random-token"),
+            node("b", "node-b-test-only-long-random-token"),
+        ])
+        .unwrap();
+    assert!(revoked.is_empty());
+    let b = connect("node-b-test-only-long-random-token").await.unwrap();
+    let mut a_commands = a.subscribe("rift.node.a.cmd", None).await.unwrap();
+
+    // Removing a and changing b's token closes both sessions.
+    let revoked = logins
+        .replace(vec![node("b", "node-b-second-test-only-long-token")])
+        .unwrap();
+    assert_eq!(revoked, ["node.a", "node.b"]);
+    tokio::time::timeout(Duration::from_secs(5), a_commands.recv())
+        .await
+        .expect("a's session should close")
+        .unwrap_err();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while b.subscribe("rift.node.b.cmd", None).await.is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "b's session stayed open"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(connect("node-a-test-only-long-random-token").await.is_err());
+    assert!(connect("node-b-test-only-long-random-token").await.is_err());
+    connect("node-b-second-test-only-long-token").await.unwrap();
+    connect(&identity().token).await.unwrap();
+    server.shutdown().await;
+}
