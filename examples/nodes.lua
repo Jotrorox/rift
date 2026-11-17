@@ -4,12 +4,13 @@
 -- where. See docs/nodes.md.
 --
 -- On node1 (10.0.0.11), as an unprivileged user:
---   RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
+--   RIFT_NODE_TOKEN=... rift node \
 --     --controller 10.0.0.2:7443 --name node1 \
 --     --root /srv/rift --ca /etc/rift/messaging-ca.pem \
 --     --web https://rift.internal:8443 --allow-program java
 -- --web must be https:// (a TLS reverse proxy in front of web.listen) unless
--- the agent runs on this host. Nodes read the forwarding secret themselves.
+-- the agent runs on this host. Nodes receive the forwarding secret from this
+-- controller, sealed with their token; they need no copy of it.
 local config = require("rift.config")
 config.listeners = { public = "0.0.0.0:25565" }
 config.routes = { public = "lobby" }

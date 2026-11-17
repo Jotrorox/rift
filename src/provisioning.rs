@@ -366,6 +366,7 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
         accept_eula: false,
         forwarding: None,
         forwarding_mode: None,
+        forwarding_secret: None,
         properties: managed_properties(config, template)
             .into_iter()
             .map(|property| match property {
