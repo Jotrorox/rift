@@ -611,7 +611,7 @@ error.
 | Where | What you get |
 | --- | --- |
 | Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, agent version (flagged when outdated or different from the proxy), labels, instances, allocated memory, the measured host memory, load and disk, and whether a node is cordoned or draining. |
-| HTTP | `GET /api/nodes`, with each node's `schedule` and `drained`; `POST /api/nodes/{name}/cordon\|drain\|uncordon`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
+| HTTP | `GET /api/nodes`, with each node's `schedule` and `drained`; `POST /api/nodes/{name}/cordon\|drain\|uncordon`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers. Files over 512 KiB cross the message bus in parts, up to the same 64 MiB as local files; uploading those needs an agent with the `file_parts` feature. |
 | Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). `rift admin node cordon\|drain\|uncordon <node>` [takes a node out of service](#take-a-node-out-of-service). |
 | Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
 

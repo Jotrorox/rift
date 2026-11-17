@@ -66,6 +66,12 @@ and are listed under **SDKs**.
   `KillMode=control-group` and `Delegate=memory`. It checks offline that the
   messaging certificate names the address the agent dials and that the web
   API is reachable over HTTPS, and lists the ports to open.
+- The Files page and `/api/files/servers` read and write files of up to
+  64 MiB on node servers, instead of 512 KiB. Larger files cross the message
+  bus in 512 KiB parts; uploads are staged beside the target and renamed into
+  place after the last part. Uploading files over 512 KiB needs an agent
+  that advertises the `file_parts` feature; the controller refuses them for
+  older agents with `413`.
 - `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
   have every node download its groups' templates and server software ahead of
   time, so the first instance on a new or freshly synced node starts without
@@ -76,6 +82,7 @@ and are listed under **SDKs**.
 - `web.tls` serves the dashboard and API over HTTPS on `web.listen`, with the
   messaging certificate (`tls = true`) or its own files, so remote nodes need
   no reverse proxy for templates. The certificate is reloaded on SIGHUP.
+- `/api/files/` requests may take two minutes instead of ten seconds.
 
 ### Database
 

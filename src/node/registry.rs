@@ -510,6 +510,13 @@ fn observed_state(observed: &Mutex<BTreeMap<String, Observed>>, node: &str) -> N
         .unwrap_or_default()
 }
 
+impl Nodes {
+    /// Whether `node`'s agent advertises `feature` in its latest snapshot.
+    pub fn supports(&self, node: &str, feature: &str) -> bool {
+        supports(&observed_state(&self.0.observed, node), feature)
+    }
+}
+
 fn supports(state: &NodeState, feature: &str) -> bool {
     state.features.iter().any(|known| known == feature)
 }

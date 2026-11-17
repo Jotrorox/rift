@@ -220,7 +220,7 @@ fails with `409`.
 | `GET /api/files/templates/{path}` | `files`, unrestricted | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB). `?manifest` returns `{files: [{path, size, sha256}], directories}` for the whole tree, which node agents use to fetch only changed files |
 | `PUT /api/files/templates/{path}` | `files`, unrestricted | Write the raw request body to a file (at most 64 MiB), creating parent folders; add `?directory` to create a folder instead |
 | `DELETE /api/files/templates/{path}` | `files`, unrestricted | Delete a file, or a folder with its contents |
-| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | `files`, scoped | The same operations inside a managed server's directory. For servers on a node they go through its agent and files are limited to 512 KiB |
+| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | `files`, scoped | The same operations inside a managed server's directory. For servers on a node they go through its agent, which moves files over 512 KiB in parts; the 64 MiB limit is the same |
 
 See [Template and server files](http.md#template-and-server-files) for path
 rules, protected files and node tokens.

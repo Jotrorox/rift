@@ -646,6 +646,8 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
         .with_state(app)
 }
 
+const FILE_DEADLINE: Duration = Duration::from_secs(120);
+
 async fn boundary(State(app): State<App>, request: Request, next: Next) -> Response {
     let Ok(_permit) = app.requests.try_acquire() else {
         return error(
@@ -653,7 +655,15 @@ async fn boundary(State(app): State<App>, request: Request, next: Next) -> Respo
             "HTTP request capacity exhausted",
         );
     };
-    let mut response = match timeout(Duration::from_secs(10), next.run(request)).await {
+    // File transfers of up to 64 MiB, which for node servers cross the bus in
+    // parts, need longer than other requests. Only authenticated requests
+    // reach their handlers and read a body.
+    let deadline = if request.uri().path().starts_with("/api/files/") {
+        FILE_DEADLINE
+    } else {
+        Duration::from_secs(10)
+    };
+    let mut response = match timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error(
             StatusCode::REQUEST_TIMEOUT,

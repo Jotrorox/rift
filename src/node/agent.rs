@@ -250,6 +250,12 @@ const MAX_EXITS: usize = 64;
 /// without being registered, covering the controller's creation window.
 const PREPARE_GRACE: Duration = Duration::from_secs(600);
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(30);
+/// An upload whose next part does not arrive in time is abandoned and its
+/// staging file deleted.
+const UPLOAD_IDLE: Duration = Duration::from_secs(120);
+/// Concurrent uploads, so a misbehaving controller cannot exhaust the disk
+/// with staging files.
+const MAX_UPLOADS: usize = 16;
 
 pub struct Agent {
     options: Options,
@@ -265,6 +271,18 @@ pub struct Agent {
     /// Cached template files by path: size, modification time and SHA-256.
     hashes: StdMutex<HashMap<PathBuf, (u64, SystemTime, String)>>,
     http: reqwest::Client,
+    /// Unfinished [`Command::Upload`]s by id.
+    uploads: StdMutex<HashMap<String, Upload>>,
+}
+
+struct Upload {
+    server: String,
+    base: PathBuf,
+    segments: Vec<String>,
+    target: PathBuf,
+    staged: PathBuf,
+    received: u64,
+    touched: std::time::Instant,
 }
 
 struct Process {
@@ -310,6 +328,7 @@ impl Agent {
             prepared: StdMutex::new(HashMap::new()),
             hashes: StdMutex::new(HashMap::new()),
             http,
+            uploads: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -458,6 +477,7 @@ impl Agent {
         let mut logs_checked = std::time::Instant::now();
         loop {
             tick.tick().await;
+            self.expire_uploads(UPLOAD_IDLE);
             if logs_checked.elapsed() >= crate::managed::LOG_CHECK_INTERVAL {
                 logs_checked = std::time::Instant::now();
                 let directories: Vec<PathBuf> = self
@@ -520,7 +540,27 @@ impl Agent {
         }
     }
 
+    /// Delete the staging files of uploads idle for `idle`.
+    fn expire_uploads(&self, idle: Duration) {
+        let expired: Vec<PathBuf> = {
+            let mut uploads = self.uploads.lock().unwrap_or_else(|e| e.into_inner());
+            let ids: Vec<String> = uploads
+                .iter()
+                .filter(|(_, upload)| upload.touched.elapsed() >= idle)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter()
+                .filter_map(|id| uploads.remove(id))
+                .map(|upload| upload.staged)
+                .collect()
+        };
+        for staged in expired {
+            let _ = std::fs::remove_file(staged);
+        }
+    }
+
     async fn stop_all(&self) {
+        self.expire_uploads(Duration::ZERO);
         let children: Vec<_> = std::mem::take(&mut *self.processes.lock().await)
             .into_values()
             .filter_map(|process| process.child)
@@ -604,6 +644,11 @@ impl Agent {
                     .await
                     .map_err(io::Error::other)?
             }
+            Command::Upload(upload) => {
+                check_name(&upload.server)?;
+                let base = self.directory(&upload.directory)?;
+                self.upload(base, upload).await
+            }
             Command::Reconcile { servers } => self.reconcile(servers).await,
             Command::Warm(warm) => Ok(self.warm(warm).await),
             Command::Tree {
@@ -649,6 +694,49 @@ impl Agent {
                 Ok(json!({"removed": removed}))
             }
         }
+    }
+
+    /// Append one part of an upload, and rename the file into place after
+    /// the last. Any failure abandons the whole upload.
+    async fn upload(&self, base: PathBuf, part: protocol::Upload) -> io::Result<Value> {
+        if part.id.len() != 32 || !part.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid("upload ids are 32 hex digits"));
+        }
+        let content = protocol::decode_base64(&part.content)
+            .ok_or_else(|| invalid("file contents must be base64"))?;
+        // Taking the entry out also keeps parts of one upload from overlapping.
+        let pending = {
+            let mut uploads = self.uploads.lock().unwrap_or_else(|e| e.into_inner());
+            match (uploads.remove(&part.id), part.offset) {
+                (None, 0) if uploads.len() >= MAX_UPLOADS => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ResourceBusy,
+                        "too many uploads in progress on this node",
+                    ));
+                }
+                (None, 0) => None,
+                (None, _) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the upload expired; start it again",
+                    ));
+                }
+                (Some(upload), _) => Some(upload),
+            }
+        };
+        let result =
+            tokio::task::spawn_blocking(move || continue_upload(base, part, content, pending))
+                .await
+                .map_err(io::Error::other)??;
+        let (pending, reply) = result;
+        if let Some((id, mut upload)) = pending {
+            upload.touched = std::time::Instant::now();
+            self.uploads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, upload);
+        }
+        Ok(reply)
     }
 
     /// A move only reads or writes the directory of a server that is not
@@ -1246,6 +1334,81 @@ fn prune(directory: &Path, wanted: &BTreeSet<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+type Continued = (Option<(String, Upload)>, Value);
+
+fn continue_upload(
+    base: PathBuf,
+    part: protocol::Upload,
+    content: Vec<u8>,
+    pending: Option<Upload>,
+) -> io::Result<Continued> {
+    use crate::files;
+    let mut upload = match pending {
+        Some(upload) => upload,
+        None => {
+            let segments = files::segments(&part.path)?;
+            files::protect(&segments)?;
+            if !base.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the server directory does not exist yet",
+                ));
+            }
+            let target = files::resolve(&base, &segments)?;
+            let staged = files::begin_upload(&base, &segments, &target, &part.id)?;
+            Upload {
+                server: part.server.clone(),
+                base: base.clone(),
+                segments,
+                target,
+                staged,
+                received: 0,
+                touched: std::time::Instant::now(),
+            }
+        }
+    };
+    let step = (|| {
+        if upload.server != part.server
+            || upload.base != base
+            || upload.segments.join("/") != files::segments(&part.path)?.join("/")
+        {
+            return Err(invalid("upload part belongs to another file"));
+        }
+        if part.offset != upload.received {
+            return Err(invalid("upload part does not continue the file"));
+        }
+        if content.len() > protocol::FILE_PART
+            || upload.received + content.len() as u64 > protocol::MAX_REMOTE_FILE as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "files on nodes are limited to 64 MiB through the web console",
+            ));
+        }
+        files::append_upload(&upload.staged, upload.received, &content)?;
+        upload.received += content.len() as u64;
+        if part.done {
+            // A symlink raced into the path since the first part is refused.
+            files::resolve(&upload.base, &upload.segments)?;
+            files::finish_upload(&upload.staged, &upload.target)?;
+            return Ok(json!({
+                "path": upload.segments.join("/"),
+                "type": "file",
+                "size": upload.received,
+            }));
+        }
+        Ok(json!({"received": upload.received}))
+    })();
+    match step {
+        Ok(reply) if part.done => Ok((None, reply)),
+        Ok(reply) => Ok((Some((part.id, upload)), reply)),
+        Err(error) => {
+            let _ = std::fs::remove_file(&upload.staged);
+            Err(error)
+        }
+    }
+}
+
 fn serve_files(base: &Path, request: &protocol::Files) -> io::Result<Value> {
     use crate::files;
     let segments = files::segments(&request.path)?;
@@ -1259,13 +1422,17 @@ fn serve_files(base: &Path, request: &protocol::Files) -> io::Result<Value> {
             if !metadata.is_file() {
                 return Err(invalid("only regular files and folders are served"));
             }
-            if metadata.len() > protocol::MAX_REMOTE_FILE as u64 {
-                return Err(io::Error::new(
-                    io::ErrorKind::FileTooLarge,
-                    "files on nodes are limited to 512 KiB through the web console",
-                ));
-            }
-            Ok(json!({"content": protocol::encode_base64(&std::fs::read(&target)?)}))
+            let Some(offset) = request.offset else {
+                // A controller from before parts reads the whole file at once.
+                if metadata.len() > protocol::FILE_PART as u64 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::FileTooLarge,
+                        "files on nodes are limited to 512 KiB for this controller version",
+                    ));
+                }
+                return Ok(json!({"content": protocol::encode_base64(&std::fs::read(&target)?)}));
+            };
+            read_part(&target, offset)
         }
         "PUT" => {
             files::protect(&segments)?;
@@ -1283,10 +1450,10 @@ fn serve_files(base: &Path, request: &protocol::Files) -> io::Result<Value> {
                     .ok_or_else(|| invalid("file contents must be base64"))?,
                 None => Vec::new(),
             };
-            if content.len() > protocol::MAX_REMOTE_FILE {
+            if content.len() > protocol::FILE_PART {
                 return Err(io::Error::new(
                     io::ErrorKind::FileTooLarge,
-                    "files on nodes are limited to 512 KiB through the web console",
+                    "send files over 512 KiB in parts",
                 ));
             }
             files::write(base, &segments, &target, request.folder, &content)
@@ -1297,6 +1464,35 @@ fn serve_files(base: &Path, request: &protocol::Files) -> io::Result<Value> {
             "use GET, PUT or DELETE",
         )),
     }
+}
+
+/// Up to [`protocol::FILE_PART`] bytes of a file from `offset`, with the size
+/// and modification time the controller uses to notice a file that changes
+/// between parts.
+fn read_part(target: &Path, offset: u64) -> io::Result<Value> {
+    use std::io::{Read, Seek};
+    let mut file = std::fs::File::open(target)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > protocol::MAX_REMOTE_FILE as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "files on nodes are limited to 64 MiB through the web console",
+        ));
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| time.as_nanos() as u64);
+    file.seek(io::SeekFrom::Start(offset.min(metadata.len())))?;
+    let mut content = Vec::new();
+    file.take(protocol::FILE_PART as u64)
+        .read_to_end(&mut content)?;
+    Ok(json!({
+        "content": protocol::encode_base64(&content),
+        "size": metadata.len(),
+        "modified": modified,
+    }))
 }
 
 fn check_name(name: &str) -> io::Result<()> {
