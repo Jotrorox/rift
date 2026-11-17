@@ -10,6 +10,7 @@ mod host;
 pub mod protocol;
 mod registry;
 pub mod seal;
+pub mod transfer;
 
 pub use registry::{
     DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities, server_requirements,

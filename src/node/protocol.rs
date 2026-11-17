@@ -64,6 +64,8 @@ pub mod feature {
     /// [`super::Prepare::forwarding_secret`]: the agent opens the controller's
     /// sealed secret. Without it the agent writes its own copy, if any.
     pub const FORWARDING_SECRET: &str = "forwarding_secret";
+    /// `tree`, `read`, `receive` and `discard`, for `rift admin move`.
+    pub const MOVE: &str = "move";
 }
 
 /// Every feature this build's agent applies and its controller may need.
@@ -72,6 +74,7 @@ pub const FEATURES: &[&str] = &[
     feature::BUS_CERTIFICATE,
     feature::ISOLATION,
     feature::MEMORY_LIMIT,
+    feature::MOVE,
     feature::FORWARDING_SECRET,
 ];
 
@@ -158,7 +161,99 @@ pub enum Command {
     Reconcile {
         servers: Vec<String>,
     },
+    /// `rift admin move`, source side: one page of a stopped server's
+    /// directory tree, [`Tree`] entries from `offset` on.
+    Tree {
+        server: String,
+        directory: PathBuf,
+        offset: u64,
+    },
+    /// `rift admin move`, source side: up to [`MAX_REMOTE_FILE`] bytes of one
+    /// file of a stopped server, as `{"content": base64, "size": total}`.
+    Read {
+        server: String,
+        directory: PathBuf,
+        path: String,
+        offset: u64,
+    },
+    /// `rift admin move`, target side: build the moved directory.
+    Receive(Receive),
+    /// Delete a persistent directory whose instance moved to another node.
+    Discard {
+        server: String,
+        directory: PathBuf,
+    },
 }
+
+/// One page of a directory tree: folders come before their contents, in a
+/// stable order, so a page boundary never splits a folder from its files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tree {
+    pub entries: Vec<TreeEntry>,
+    /// The offset of the next page; `None` after the last one.
+    pub next: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEntry {
+    /// Relative to the server directory, `/`-separated.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub folder: bool,
+    #[serde(default)]
+    pub size: u64,
+    /// Unix permission bits; 0 where the source has none.
+    #[serde(default)]
+    pub mode: u32,
+}
+
+/// A step of receiving a moved server directory. The agent assembles it in a
+/// staging folder next to `directory` and renames it into place on `commit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receive {
+    pub server: String,
+    /// The final directory, relative to the agent's `--root`.
+    pub directory: PathBuf,
+    pub step: ReceiveStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ReceiveStep {
+    /// Start over with an empty staging folder. A directory left behind by
+    /// an interrupted move of the same server is replaced; any other
+    /// directory already at the destination is refused.
+    Begin,
+    Folder {
+        path: String,
+    },
+    /// Write `content` (base64) at `offset`; `end` closes the file.
+    Chunk {
+        path: String,
+        offset: u64,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<FileEnd>,
+    },
+    /// Rename the staging folder to the final directory.
+    Commit,
+    /// The move is recorded: drop the marker of an unfinished move.
+    Finish,
+    /// Delete the staging folder; the final directory is never touched.
+    Abort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEnd {
+    /// SHA-256 of the whole file as read on the source node.
+    pub sha256: String,
+    /// Unix permission bits; 0 leaves the default.
+    pub mode: u32,
+}
+
+/// Marks a directory that a move put in place but the controller has not
+/// recorded yet. Never copied from a source.
+pub const MOVE_MARKER: &str = ".rift-move.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Start {
@@ -651,6 +746,59 @@ mod tests {
         for invalid in ["Zm8", "Z===", "Zm=v", "Zm8=Zm8=", "Zm.v"] {
             assert!(decode_base64(invalid).is_none(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn move_commands_round_trip() {
+        let command = Command::Receive(Receive {
+            server: "lobby-1".into(),
+            directory: "local/services/lobby-1".into(),
+            step: ReceiveStep::Chunk {
+                path: "world/level.dat".into(),
+                offset: 0,
+                content: encode_base64(b"level"),
+                end: Some(FileEnd {
+                    sha256: "ab".repeat(32),
+                    mode: 0o644,
+                }),
+            },
+        });
+        let text = serde_json::to_string(&command).unwrap();
+        assert!(
+            text.starts_with(r#"{"op":"receive","server":"lobby-1","#),
+            "{text}"
+        );
+        assert!(text.contains(r#""step":{"action":"chunk","#), "{text}");
+        assert_eq!(serde_json::from_str::<Command>(&text).unwrap(), command);
+        let begin =
+            r#"{"op":"receive","server":"lobby-1","directory":"d","step":{"action":"begin"}}"#;
+        assert!(matches!(
+            serde_json::from_str::<Command>(begin).unwrap(),
+            Command::Receive(Receive {
+                step: ReceiveStep::Begin,
+                ..
+            })
+        ));
+        let tree = Tree {
+            entries: vec![
+                TreeEntry {
+                    path: "world".into(),
+                    folder: true,
+                    ..TreeEntry::default()
+                },
+                TreeEntry {
+                    path: "world/level.dat".into(),
+                    size: 5,
+                    mode: 0o644,
+                    ..TreeEntry::default()
+                },
+            ],
+            next: None,
+        };
+        let value = serde_json::to_value(&tree).unwrap();
+        assert_eq!(value["entries"][0]["folder"], true);
+        assert!(value["entries"][1].get("folder").is_none());
+        assert_eq!(serde_json::from_value::<Tree>(value).unwrap(), tree);
     }
 
     #[test]

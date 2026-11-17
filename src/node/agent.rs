@@ -605,7 +605,87 @@ impl Agent {
                     .map_err(io::Error::other)?
             }
             Command::Reconcile { servers } => self.reconcile(servers).await,
+            Command::Tree {
+                server,
+                directory,
+                offset,
+            } => {
+                check_name(&server)?;
+                self.check_stopped(&server).await?;
+                let base = self.directory(&directory)?;
+                let tree =
+                    tokio::task::spawn_blocking(move || super::transfer::tree(&base, offset))
+                        .await
+                        .map_err(io::Error::other)??;
+                serde_json::to_value(tree).map_err(io::Error::other)
+            }
+            Command::Read {
+                server,
+                directory,
+                path,
+                offset,
+            } => {
+                check_name(&server)?;
+                self.check_stopped(&server).await?;
+                let base = self.directory(&directory)?;
+                tokio::task::spawn_blocking(move || {
+                    super::transfer::read_chunk(&base, &path, offset)
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            Command::Receive(receive) => self.receive(receive).await,
+            Command::Discard { server, directory } => {
+                check_name(&server)?;
+                let _storage = self.storage.lock().await;
+                self.check_stopped(&server).await?;
+                let directory = self.directory(&directory)?;
+                let removed = tokio::task::spawn_blocking(move || {
+                    provisioning::discard_on_node(&server, &directory)
+                })
+                .await
+                .map_err(io::Error::other)??;
+                Ok(json!({"removed": removed}))
+            }
         }
+    }
+
+    /// A move only reads or writes the directory of a server that is not
+    /// running here.
+    async fn check_stopped(&self, server: &str) -> io::Result<()> {
+        if self.processes.lock().await.contains_key(server) {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                format!("{server} is still running on node {}", self.options.name),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn receive(&self, receive: protocol::Receive) -> io::Result<Value> {
+        use protocol::ReceiveStep;
+        check_name(&receive.server)?;
+        let target = self.directory(&receive.directory)?;
+        let staging = self.directory(&super::transfer::staging(
+            &receive.server,
+            &receive.directory,
+        ))?;
+        // Steps that create, rename or delete whole directories are
+        // serialized with prepare, remove and reconcile.
+        let _storage = match receive.step {
+            ReceiveStep::Begin | ReceiveStep::Commit | ReceiveStep::Abort => {
+                Some(self.storage.lock().await)
+            }
+            _ => None,
+        };
+        if matches!(receive.step, ReceiveStep::Begin | ReceiveStep::Commit) {
+            self.check_stopped(&receive.server).await?;
+        }
+        tokio::task::spawn_blocking(move || {
+            super::transfer::receive_step(&receive.server, &staging, &target, &receive.step)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     /// `relative` below the root, refusing symlinks and `..`.
