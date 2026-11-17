@@ -688,6 +688,7 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
         accept_eula: true,
         forwarding: Some(true),
         forwarding_mode: None,
+        forwarding_secret: None,
         properties: vec![("online-mode".into(), "false".into(), true)],
     };
     let wait = Duration::from_secs(20);
@@ -736,18 +737,35 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
     // Template changes reach the next instance; removed files disappear.
     fs::write(storage.join("Global/server/config/a.yml"), "a: 2\n").unwrap();
     fs::remove_file(storage.join("bedwars/map/region/r.0.0.mca")).unwrap();
+    // The controller's sealed secret wins over the agent's own copy.
+    let mut sealed = prepare("bedwars-2", disposable);
+    sealed.forwarding_secret =
+        Some(rift::node::seal::seal(TOKEN, "node1", b"controller secret").unwrap());
     fixture
         .nodes
-        .request(
-            "node1",
-            &Command::Prepare(Box::new(prepare("bedwars-2", disposable))),
-            wait,
-        )
+        .request("node1", &Command::Prepare(Box::new(sealed)), wait)
         .await
         .unwrap();
     let second = fixture.root.join("agent/temp/services/bedwars-2");
     assert_eq!(fs::read(second.join("config/a.yml")).unwrap(), b"a: 2\n");
     assert!(!second.join("world/region/r.0.0.mca").exists());
+    assert!(
+        fs::read_to_string(second.join("config/paper-global.yml"))
+            .unwrap()
+            .contains("secret: \"controller secret\"")
+    );
+    // A secret sealed with another token never opens.
+    let mut foreign = prepare("bedwars-3", disposable);
+    foreign.forwarding_secret = Some(
+        rift::node::seal::seal("another-node-token-with-at-least-32-bytes", "node1", b"x").unwrap(),
+    );
+    let error = fixture
+        .nodes
+        .request("node1", &Command::Prepare(Box::new(foreign)), wait)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("could not be opened"), "{error}");
+    assert!(!fixture.root.join("agent/temp/services/bedwars-3").exists());
     // A disposable directory that already exists is never reused.
     assert!(
         fixture
@@ -880,7 +898,7 @@ fn agent_options_require_a_token_and_default_to_java() {
     }
     let error = agent::Options::parse(&args(&["--web", "http://10.0.0.2:8080"])).unwrap_err();
     assert!(error.to_string().contains("https://"), "{error}");
-    // The forwarding secret comes from the node's own environment.
+    // A fallback forwarding secret, for controllers that send none.
     assert_eq!(options.forwarding_secret_env, "RIFT_FORWARDING_SECRET");
     let secret_env = ["--forwarding-secret-env", "RIFT_NODE_OPTIONS_TEST_SECRET"];
     let error = agent::Options::parse(&args(&secret_env)).unwrap_err();

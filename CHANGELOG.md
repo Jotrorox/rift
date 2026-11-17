@@ -36,6 +36,12 @@ and are listed under **SDKs**.
   disposable instances and retires each one once it is empty, while
   replacements start on other nodes. Persistent instances and named servers
   stay. `/api/nodes` reports each node's `schedule` and `drained`.
+- The controller hands each node the forwarding secret (Velocity secret or
+  BungeeGuard token) in its `prepare` commands, sealed with AES-256-GCM under a
+  key derived from that node's token. Nodes no longer need
+  `RIFT_FORWARDING_SECRET`; if it is still set and differs, the agent uses the
+  controller's secret and logs a warning. It remains a fallback for older
+  controllers, and agents advertise the `forwarding_secret` feature.
 - The Files page and `/api/files/servers` read and write files of up to
   64 MiB on node servers, instead of 512 KiB. Larger files cross the message
   bus in 512 KiB parts; uploads are staged beside the target and renamed into

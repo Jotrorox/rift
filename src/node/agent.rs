@@ -45,7 +45,7 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
     --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
     --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
-    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret or BungeeGuard token (default RIFT_FORWARDING_SECRET)\n\
+    --forwarding-secret-env <variable>  fallback forwarding secret for controllers that do not send theirs (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
 
 /// Parsed `rift node` arguments.
@@ -59,7 +59,8 @@ pub struct Options {
     pub root: PathBuf,
     pub web: Option<String>,
     pub allowed_programs: BTreeSet<String>,
-    /// Written into new Paper instances; never sent by the controller.
+    /// Written into new Paper instances only when the controller sends no
+    /// secret of its own in `prepare` (a controller older than this agent).
     pub forwarding_secret: Option<String>,
     pub forwarding_secret_env: String,
 }
@@ -910,14 +911,7 @@ impl Agent {
                         .ok_or_else(|| invalid(format!("unknown forwarding mode {mode}")))?,
                 };
                 let secret = match mode.secret_name() {
-                    Some(what) => {
-                        Some(self.options.forwarding_secret.clone().ok_or_else(|| {
-                            invalid(format!(
-                                "set {} on node {} to the controller's {what}",
-                                self.options.forwarding_secret_env, self.options.name
-                            ))
-                        })?)
-                    }
+                    Some(what) => Some(self.forwarding_secret(prepare, what)?),
                     None => None,
                 };
                 provisioning::InstanceForwarding::new(mode, secret, online_mode)
@@ -963,6 +957,35 @@ impl Agent {
             forwarding,
             properties,
         })
+    }
+
+    /// The controller's secret from `prepare`, or for an older controller
+    /// that sends none, this agent's own `--forwarding-secret-env`.
+    fn forwarding_secret(&self, prepare: &protocol::Prepare, what: &str) -> io::Result<String> {
+        let local = self.options.forwarding_secret.as_ref();
+        let Some(sealed) = &prepare.forwarding_secret else {
+            return local.cloned().ok_or_else(|| {
+                invalid(format!(
+                    "the controller sent no {what}: upgrade it, or set {} on node {}",
+                    self.options.forwarding_secret_env, self.options.name
+                ))
+            });
+        };
+        let secret = super::seal::open(&self.options.token, &self.options.name, sealed)?;
+        let secret = String::from_utf8(secret)
+            .ok()
+            .filter(|secret| {
+                (1..=1024).contains(&secret.len()) && !secret.chars().any(char::is_control)
+            })
+            .ok_or_else(|| invalid(format!("the controller sent an invalid {what}")))?;
+        if local.is_some_and(|local| *local != secret) {
+            log_warn!(
+                "node {}: {} differs from the controller's {what}; using the controller's, so remove the variable",
+                self.options.name,
+                self.options.forwarding_secret_env
+            );
+        }
+        Ok(secret)
     }
 
     fn template_url(&self, relative: &str) -> io::Result<reqwest::Url> {

@@ -49,7 +49,8 @@ pub fn principal_grants(node: &str) -> (Vec<String>, Vec<String>) {
     )
 }
 
-/// [`Start`] fields an agent applies, advertised in [`NodeState::features`].
+/// [`Start`] (and [`Prepare`]) fields an agent applies, advertised in
+/// [`NodeState::features`].
 /// Agents ignore fields they do not know, so the controller checks this list
 /// before it sends a start. An agent from before the list advertises nothing,
 /// whatever its version says: release candidates and nightlies all report
@@ -63,6 +64,9 @@ pub mod feature {
     pub const ISOLATION: &str = "isolation";
     /// `memory_limit`.
     pub const MEMORY_LIMIT: &str = "memory_limit";
+    /// [`super::Prepare::forwarding_secret`]: the agent opens the controller's
+    /// sealed secret. Without it the agent writes its own copy, if any.
+    pub const FORWARDING_SECRET: &str = "forwarding_secret";
     /// Not a [`Start`] field: [`Files::offset`](super::Files::offset) and
     /// [`Command::Upload`](super::Command::Upload), for files over
     /// [`FILE_PART`](super::FILE_PART).
@@ -75,6 +79,7 @@ pub const FEATURES: &[&str] = &[
     feature::BUS_CERTIFICATE,
     feature::ISOLATION,
     feature::MEMORY_LIMIT,
+    feature::FORWARDING_SECRET,
     feature::FILE_PARTS,
 ];
 
@@ -181,7 +186,8 @@ pub struct Start {
     /// The bus certificate (PEM, public) for a server with a bus login: the
     /// agent writes it into the server directory and points `RIFT_BUS_CERT`
     /// at it. The login's token is in `environment`, which makes this the one
-    /// command that carries a secret; it is scoped to this instance.
+    /// command besides [`Prepare`] (the sealed forwarding secret) that carries
+    /// a secret; it is scoped to this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_certificate: Option<String>,
     /// The server's `isolation`, applied by the agent on its own kernel.
@@ -430,14 +436,18 @@ pub struct Prepare {
     pub map: Option<String>,
     pub accept_eula: bool,
     /// `Some(online_mode)`: configure player forwarding for Paper-family
-    /// software. The forwarding secret never crosses the bus; agents read
-    /// their own copy from `--forwarding-secret-env`. (The one secret that
-    /// does cross is an instance's bus token, in [`Start`].)
+    /// software.
     pub forwarding: Option<bool>,
     /// `bungeecord` or `bungeeguard`; absent means Velocity, which is all an
     /// older controller sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarding_mode: Option<String>,
+    /// The Velocity secret or BungeeGuard token when `forwarding` needs one,
+    /// sealed with this node's token (see [`super::seal`]). An older
+    /// controller sends none, and the agent falls back to its own copy from
+    /// `--forwarding-secret-env`; older agents ignore it the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding_secret: Option<String>,
     /// `(name, value, replace)`: replaced settings always win, others are defaults.
     pub properties: Vec<(String, String, bool)>,
 }
