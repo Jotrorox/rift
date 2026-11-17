@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod protocol;
 mod registry;
+pub mod seal;
 pub mod transfer;
 
 pub use registry::{
