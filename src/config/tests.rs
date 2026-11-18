@@ -1908,8 +1908,23 @@ fn tab_list_parses_text_components_and_player_scope() {
             header: Some(serde_json::json!("Welcome {player}")),
             footer: Some(serde_json::json!({ "text": "{online} online", "color": "gray" })),
             network: true,
+            ..Default::default()
         })
     );
+    let config = Config::from_lua(
+        &with_security("tab_list = { names = 'all', format = '{prefix}{name} &7[{server}]' }"),
+        "tab.lua",
+    )
+    .unwrap();
+    let list = config.tab_list.unwrap();
+    assert!(list.backend_names && !list.network && list.header.is_none());
+    assert_eq!(list.format.as_deref(), Some("{prefix}{name} &7[{server}]"));
+    let config = Config::from_lua(
+        &with_security("tab_list = { names = 'network', header = 'x' }"),
+        "tab.lua",
+    )
+    .unwrap();
+    assert!(!config.tab_list.unwrap().backend_names);
     let config = Config::from_lua(
         &with_security("tab_list = { players = 'server', header = 'x' }"),
         "tab.lua",
@@ -1922,10 +1937,27 @@ fn tab_list_parses_text_components_and_player_scope() {
 #[test]
 fn invalid_tab_list_settings_are_rejected_with_context() {
     for (settings, expected) in [
-        ("tab_list = {}", "set header, footer or players"),
+        ("tab_list = {}", "set header, footer, players"),
         (
             "tab_list = { players = 'server' }",
-            "set header, footer or players",
+            "set header, footer, players",
+        ),
+        (
+            "tab_list = { names = 'network', format = '{name}' }",
+            "set header, footer, players",
+        ),
+        ("tab_list = { names = 'server' }", "tab_list.names"),
+        (
+            "tab_list = { names = 'all', format = '{prefix}' }",
+            "must contain {name}",
+        ),
+        (
+            "tab_list = { names = 'all', format = '{name}' .. string.rep('x', 300) }",
+            "at most 256 bytes",
+        ),
+        (
+            "tab_list = { names = 'all', format = 1 }",
+            "tab_list.format",
         ),
         ("tab_list = { players = 'all' }", "tab_list.players"),
         ("tab_list = { header = 1 }", "tab_list.header"),

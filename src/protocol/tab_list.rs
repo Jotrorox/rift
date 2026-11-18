@@ -1,6 +1,8 @@
 //! Tab list header/footer and the entries Rift lists for players on other
 //! servers. Rift records which entries the current backend added, so it only
 //! adds players elsewhere on the network and never removes a backend's entry.
+//! With `tab_list.names = "all"` it also sets the display name and list order
+//! of the backend's own entries, and sets them again after the backend does.
 //!
 //! Packet IDs: PrismarineJS minecraft-data through 26.1; 26.2 and 26.3 from
 //! the official server artifacts' generated packet reports. Player Info Update
@@ -105,19 +107,29 @@ fn key(bytes: &mut &[u8], session: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Report each entry a backend player list packet adds (`true`) or removes
-/// (`false`). Returns whether the packet was a player list packet at all.
+/// What a player list packet does to one entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Change {
+    Added,
+    Removed,
+    /// The display name or list order of a listed entry changed.
+    Renamed,
+}
+
+/// Report each entry a backend player list packet adds, removes or renames.
+/// An addition is reported once, whatever else the packet sets with it.
+/// Returns whether the packet was a player list packet at all.
 pub(super) fn changes(
     version: ProtocolVersion,
     ids: TabIds,
     packet: &Packet,
-    mut change: impl FnMut([u8; 16], bool),
+    mut change: impl FnMut([u8; 16], Change),
 ) -> io::Result<bool> {
     let number = version.number();
     let mut bytes = packet.data.as_slice();
     if packet.id == ids.remove_players {
         for _ in 0..count(&mut bytes)? {
-            change(take(&mut bytes, 16)?.try_into().unwrap(), false);
+            change(take(&mut bytes, 16)?.try_into().unwrap(), Change::Removed);
         }
     } else if packet.id == ids.players {
         let action = if number >= 761 {
@@ -139,7 +151,9 @@ pub(super) fn changes(
             if number >= 761 {
                 if action & 1 != 0 {
                     profile(&mut bytes)?;
-                    change(uuid, true);
+                    change(uuid, Change::Added);
+                } else if action & (32 | 64) != 0 {
+                    change(uuid, Change::Renamed);
                 }
                 if action & 2 != 0 {
                     key(&mut bytes, true)?;
@@ -172,13 +186,16 @@ pub(super) fn changes(
                         if number >= 759 {
                             key(&mut bytes, false)?;
                         }
-                        change(uuid, true);
+                        change(uuid, Change::Added);
                     }
                     1 | 2 => {
                         read_varint(&mut bytes)?;
                     }
-                    3 => display(&mut bytes, false)?,
-                    4 => change(uuid, false),
+                    3 => {
+                        display(&mut bytes, false)?;
+                        change(uuid, Change::Renamed);
+                    }
+                    4 => change(uuid, Change::Removed),
                     _ => unreachable!(),
                 }
             }
@@ -204,17 +221,26 @@ pub struct TabEntry {
     pub order: i32,
 }
 
-/// The display name and list order a client has for a Rift entry.
+/// A player's display name and list order, for an entry the backend lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TabName {
+    /// A text component; `None` shows the name.
+    pub display: Option<Arc<Json>>,
+    /// The list order clients from 1.21.2 sort by, highest first.
+    pub order: i32,
+}
+
+/// The display name and list order a client has for an entry Rift set.
 type Shown = (Option<Arc<Json>>, i32);
 
-/// What `entry` shows on `version`; the list order exists from 1.21.2.
+/// What an entry shows on `version`; the list order exists from 1.21.2.
+fn shown_as(version: ProtocolVersion, display: &Option<Arc<Json>>, order: i32) -> Shown {
+    let order = if version.number() >= 768 { order } else { 0 };
+    (display.clone(), order)
+}
+
 fn shown(version: ProtocolVersion, entry: &TabEntry) -> Shown {
-    let order = if version.number() >= 768 {
-        entry.order
-    } else {
-        0
-    };
-    (entry.display.clone(), order)
+    shown_as(version, &entry.display, entry.order)
 }
 
 /// What Rift wants the client's tab list to show.
@@ -225,6 +251,10 @@ pub struct TabView {
     /// Players to list in addition to the backend's own entries. `None` lists
     /// only the backend's players.
     pub players: Option<Vec<TabEntry>>,
+    /// Display names and list orders for entries the backend lists, by UUID.
+    /// `None` leaves them to the backend. A listed player missing here keeps
+    /// the backend's name, unless Rift named them before.
+    pub names: Option<BTreeMap<[u8; 16], TabName>>,
 }
 
 /// One client's tab list, as far as Rift has changed or observed it.
@@ -235,6 +265,9 @@ pub(crate) struct TabList {
     /// Entries Rift added for players on other servers, as the client shows
     /// them.
     remote: BTreeMap<[u8; 16], Shown>,
+    /// Backend entries whose display name and list order Rift set, as the
+    /// client shows them.
+    named: BTreeMap<[u8; 16], Shown>,
     /// Header and footer last sent by Rift since the client last reset them.
     header: Option<(Json, Json)>,
     /// Rift has set a header and footer, so the backend's are dropped.
@@ -259,13 +292,19 @@ impl TabList {
         if packet.id == ids.header {
             return Ok(!self.owns_header);
         }
-        let (backend, remote) = (&mut self.backend, &mut self.remote);
+        let (backend, remote, named) = (&mut self.backend, &mut self.remote, &mut self.named);
         let mut changed = false;
-        changes(version, ids, packet, |uuid, added| {
+        changes(version, ids, packet, |uuid, change| {
+            // The backend replaced or removed whatever name Rift set; a
+            // later sync sets it again.
+            changed |= named.remove(&uuid).is_some();
+            if change == Change::Renamed {
+                return;
+            }
             // Either way the client no longer has a Rift entry for this player:
             // an add replaces it and a removal deletes it.
             changed |= remote.remove(&uuid).is_some();
-            changed |= if added {
+            changed |= if change == Change::Added {
                 backend.insert(uuid)
             } else {
                 backend.remove(&uuid)
@@ -285,6 +324,7 @@ impl TabList {
     pub(crate) fn reset(&mut self) {
         self.backend.clear();
         self.remote.clear();
+        self.named.clear();
         self.header = None;
         self.revision += 1;
     }
@@ -294,7 +334,7 @@ impl TabList {
     }
 
     pub(crate) fn modified(&self) -> bool {
-        self.owns_header || !self.remote.is_empty()
+        self.owns_header || !self.remote.is_empty() || !self.named.is_empty()
     }
 
     /// Remove every Rift entry, for a legacy switch that keeps the client's list.
@@ -354,18 +394,52 @@ impl TabList {
             .into_iter()
             .partition(|entry| !self.remote.contains_key(&entry.uuid));
         // Listed players whose prefix, suffix or rank changed.
-        let changed: Vec<&TabEntry> = kept
+        let mut changed: Vec<([u8; 16], Shown)> = kept
             .into_iter()
-            .filter(|entry| self.remote.get(&entry.uuid) != Some(&shown(version, entry)))
+            .map(|entry| (entry.uuid, shown(version, entry)))
+            .filter(|(uuid, shown)| self.remote.get(uuid) != Some(shown))
             .collect();
         for batch in added.chunks(BATCH) {
             packets.push(addition(version, ids, batch)?);
         }
+        for entry in added {
+            self.remote.insert(entry.uuid, shown(version, entry));
+        }
+        for (uuid, shown) in &changed {
+            self.remote.insert(*uuid, shown.clone());
+        }
+        // The backend's own entries, the player's included.
+        let plain: Shown = (None, 0);
+        let renamed: Vec<([u8; 16], Shown)> = self
+            .backend
+            .iter()
+            .filter_map(|uuid| {
+                let wanted = view
+                    .names
+                    .as_ref()
+                    .and_then(|names| names.get(uuid))
+                    .map_or_else(
+                        || plain.clone(),
+                        |name| shown_as(version, &name.display, name.order),
+                    );
+                match self.named.get(uuid) {
+                    Some(current) if *current == wanted => None,
+                    // Never named by Rift and nothing to show: the backend's.
+                    None if wanted == plain => None,
+                    _ => Some((*uuid, wanted)),
+                }
+            })
+            .collect();
+        for (uuid, shown) in &renamed {
+            if *shown == plain {
+                self.named.remove(uuid);
+            } else {
+                self.named.insert(*uuid, shown.clone());
+            }
+        }
+        changed.extend(renamed);
         for batch in changed.chunks(BATCH) {
             packets.push(update(version, ids, batch)?);
-        }
-        for entry in added.into_iter().chain(changed) {
-            self.remote.insert(entry.uuid, shown(version, entry));
         }
         Ok(packets)
     }
@@ -449,7 +523,11 @@ fn addition(version: ProtocolVersion, ids: TabIds, entries: &[&TabEntry]) -> io:
 }
 
 /// Set the display name, and from 1.21.2 the list order, of listed entries.
-fn update(version: ProtocolVersion, ids: TabIds, entries: &[&TabEntry]) -> io::Result<Packet> {
+fn update(
+    version: ProtocolVersion,
+    ids: TabIds,
+    entries: &[([u8; 16], Shown)],
+) -> io::Result<Packet> {
     let number = version.number();
     let mut data = Vec::new();
     if number >= 761 {
@@ -459,11 +537,11 @@ fn update(version: ProtocolVersion, ids: TabIds, entries: &[&TabEntry]) -> io::R
         write_varint(3, &mut data); // Update display name.
     }
     write_varint(entries.len() as i32, &mut data);
-    for entry in entries {
-        data.extend(entry.uuid);
-        write_display(version, entry.display.as_deref(), &mut data)?;
+    for (uuid, (display, order)) in entries {
+        data.extend(uuid);
+        write_display(version, display.as_deref(), &mut data)?;
         if number >= 768 {
-            write_varint(entry.order, &mut data);
+            write_varint(*order, &mut data);
         }
     }
     Ok(Packet::new(ids.players, data))

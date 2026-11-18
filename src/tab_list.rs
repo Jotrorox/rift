@@ -2,7 +2,9 @@
 //! optionally every player on the network in each player's tab list.
 //!
 //! Header and footer text may use `{player}`, `{server}`, `{online}` and
-//! `{server_online}`. Sessions rebuild their view only when the registry,
+//! `{server_online}`. With `names = "all"`, the entries backends list
+//! themselves take the same display name and order as Rift's own; `format`
+//! shapes that name (see `players::format_name`). Sessions rebuild their view only when the registry,
 //! configuration, per-player override or client tab list has changed.
 //! Entries and counts are what the viewing player may see (see
 //! [`Viewer`]), so a hidden player is neither listed nor counted.
@@ -23,6 +25,12 @@ pub struct TabList {
     pub footer: Option<Json>,
     /// List players on other servers as well as the backend's own entries.
     pub network: bool,
+    /// Also name and order the entries backends list (`names = "all"`).
+    pub backend_names: bool,
+    /// How a player's name is shown, as legacy text with `{prefix}`,
+    /// `{name}`, `{suffix}`, `{group}` and `{server}`. `None` shows the
+    /// prefix and suffix around the name, and nothing without either.
+    pub format: Option<String>,
 }
 
 /// A header and footer for one player, set through `rift.players.tab_list`.
@@ -71,6 +79,9 @@ pub fn view(
         players: config
             .is_some_and(|config| config.network)
             .then(|| registry.tab_entries(server, viewer)),
+        names: config
+            .is_some_and(|config| config.backend_names)
+            .then(|| registry.tab_names()),
     }
 }
 
@@ -101,9 +112,9 @@ fn render(text: Json, values: &[(&str, &str)]) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::TabEntry;
+    use crate::protocol::{TabEntry, TabName};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
     fn placeholders_render_in_strings_and_components() {
@@ -117,7 +128,7 @@ mod tests {
                 "extra": [{"text": "{server_online} here", "color": "gray"}],
                 "{player}": "{unknown}",
             })),
-            network: false,
+            ..TabList::default()
         };
         let view = view(
             &registry,
@@ -139,6 +150,51 @@ mod tests {
             ))
         );
         assert_eq!(view.players, None);
+        assert_eq!(view.names, None);
+    }
+
+    #[test]
+    fn all_names_cover_every_decorated_player_on_any_server() {
+        let registry = Arc::new(PlayerRegistry::default());
+        let _alice = registry.register([1; 16], "Alice", "lobby").unwrap();
+        let _bob = registry.register([2; 16], "Bob", "lobby").unwrap();
+        let _carol = registry.register([3; 16], "Carol", "survival").unwrap();
+        let display = Arc::new(json!({"text": "[VIP] Bob", "color": "gold"}));
+        registry.set_display(&[2; 16], Some(display.clone()), 10);
+        registry.set_display(&[3; 16], None, 5);
+        let config = TabList {
+            backend_names: true,
+            ..TabList::default()
+        };
+        let view = view(
+            &registry,
+            Viewer::System,
+            Some(&config),
+            None,
+            "Alice",
+            "lobby",
+        );
+        // Names alone list nobody extra and set no header.
+        assert_eq!((view.header, view.players), (None, None));
+        assert_eq!(
+            view.names,
+            Some(BTreeMap::from([
+                (
+                    [2; 16],
+                    TabName {
+                        display: Some(display),
+                        order: 10
+                    }
+                ),
+                (
+                    [3; 16],
+                    TabName {
+                        display: None,
+                        order: 5
+                    }
+                ),
+            ]))
+        );
     }
 
     #[test]

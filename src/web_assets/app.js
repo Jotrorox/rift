@@ -92,7 +92,7 @@
     // Fields that only matter while their setting is on.
     for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample", "server-list-favicon-choose", "server-list-favicon-remove"]) $(id).disabled = !$("server-list-enabled").checked;
     $("server-list-favicon-picker").classList.toggle("disabled", !$("server-list-enabled").checked);
-    for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
+    for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players", "tab-list-names", "tab-list-format"]) $(id).disabled = !$("tab-list-enabled").checked;
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
     for (const { button, unavailable } of state.templateButtons) button.disabled = state.busy || unavailable || !allowed("servers");
@@ -870,6 +870,8 @@
     $("tab-list-header").value = componentText(list?.header);
     $("tab-list-footer").value = componentText(list?.footer);
     $("tab-list-players").value = list?.players === "network" ? "network" : "server";
+    $("tab-list-names").value = list?.names === "all" ? "all" : "network";
+    $("tab-list-format").value = list?.format || "";
     state.settingsDirty.tabList = false;
   }
   function tabListValue() {
@@ -880,7 +882,13 @@
       if (parsed !== undefined) value[key] = parsed;
     }
     if ($("tab-list-players").value === "network") value.players = "network";
-    if (!Object.keys(value).length) throw new Error("Set a header, a footer or list everyone on the network, or turn the tab list off.");
+    if ($("tab-list-names").value === "all") value.names = "all";
+    if (!Object.keys(value).length) throw new Error("Set a header, a footer, list everyone on the network or name every player, or turn the tab list off.");
+    const format = $("tab-list-format").value.trim();
+    if (format) {
+      if (!format.includes("{name}")) throw new Error("The name format must contain {name}.");
+      value.format = format;
+    }
     return value;
   }
   // Permissions: groups, users, registered nodes and the change log, all

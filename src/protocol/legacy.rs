@@ -145,12 +145,14 @@ impl LegacyState {
                 header: ids.header,
             };
             let players = &mut self.players;
-            super::tab_list::changes(version, tab, packet, |uuid, added| {
-                if added {
+            super::tab_list::changes(version, tab, packet, |uuid, change| match change {
+                super::tab_list::Change::Added => {
                     players.insert(uuid);
-                } else {
+                }
+                super::tab_list::Change::Removed => {
                     players.remove(&uuid);
                 }
+                super::tab_list::Change::Renamed => {}
             })?;
         }
         if self.players.len() > 65536 || self.bosses.len() > 4096 {

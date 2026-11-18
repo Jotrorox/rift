@@ -903,9 +903,10 @@ async function testWebAssets(appSource, statusSource) {
   });
   await test("turning the tab list off sends null and network listing is explicit", async () => {
     const h = fixture(appSource);
-    h.model.definitions.tab_list = { header: "Hi {player}", footer: null, players: "server" };
+    h.model.definitions.tab_list = { header: "Hi {player}", footer: null, players: "server", names: "all", format: "{prefix}{name} &7{server}" };
     await flush();
     assert(h.element("tab-list-header").value === "Hi {player}", "Header not rendered");
+    assert(h.element("tab-list-names").value === "all" && h.element("tab-list-format").value === "{prefix}{name} &7{server}", "Names not rendered");
     const bodies = [];
     h.model.intercept = (path, options) => { if (options.method === "PUT") { bodies.push(JSON.parse(options.body).definition); return h.response({ revision: "rev-1" }); } return null; };
     h.element("tab-list-players").value = "network"; await h.element("tab-list-form").emit("submit"); await flush();
@@ -914,6 +915,7 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("tab-list-header").disabled && h.element("tab-list-players").disabled, "Fields stayed editable for a disabled tab list");
     await h.element("tab-list-form").emit("submit"); await flush();
     assert(bodies[0].header === "Hi {player}" && bodies[0].players === "network" && !("footer" in bodies[0]), "Tab list fields incorrect");
+    assert(bodies[0].names === "all" && bodies[0].format === "{prefix}{name} &7{server}", "Names were not kept");
     assert(bodies[1] === null, "Disabled tab list was not removed");
   });
   const PLAYER = "0123456789abcdef0123456789abcdef";

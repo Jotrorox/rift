@@ -1590,6 +1590,8 @@ fn definition_values(config: &Config) -> Value {
             "header": list.header,
             "footer": list.footer,
             "players": if list.network { "network" } else { "server" },
+            "names": if list.backend_names { "all" } else { "network" },
+            "format": list.format,
         })
     });
     let permission_groups = config

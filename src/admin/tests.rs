@@ -882,6 +882,7 @@ async fn tab_list_shows_header_footer_and_players_on_other_servers() {
             header: Some(serde_json::json!("Hi {player}")),
             footer: Some(serde_json::json!("{online} on {server}")),
             network: true,
+            ..Default::default()
         })
         .await;
         let codec = fixture.codec;

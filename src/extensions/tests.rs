@@ -382,6 +382,82 @@ async fn network_tab_entries_show_the_prefix_and_suffix_of_the_listed_player() {
     watcher.abort();
 }
 
+/// `tab_list.format` names every joined player, those without a prefix
+/// included, with the group's display name and the server; a new format
+/// renames everyone at once, and removing it restores the plain entries.
+#[tokio::test]
+async fn tab_format_names_every_player_and_follows_reloads() {
+    use rift_permissions::Change;
+    let runtime = runtime("api_version=1");
+    let players = runtime.players().clone();
+    let roster = players.roster().clone();
+    let authority = runtime.permissions().clone();
+    let (alice, bob) = ([1; 16], [2; 16]);
+    let apply = |change| authority.apply(Actor::Cli, change).unwrap();
+    apply(Change::CreateGroup {
+        name: "vip".into(),
+        weight: 10,
+        display_name: Some("VIP".into()),
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::Group("vip".into()),
+        node: Node::prefix(100, "&6[VIP] &f").unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::User(Uuid::from_bytes(bob)),
+        node: Node::inherit("vip", true).unwrap(),
+    });
+    let mut sessions = Vec::new();
+    for (uuid, name) in [(alice, "Alice"), (bob, "Bob")] {
+        let record = roster.register(uuid, name, "lobby").unwrap();
+        let (handle, actions) = players.register(u64::from(uuid[0]), &uuid, name, 774, "lobby");
+        sessions.push((record, handle, actions));
+    }
+    let shown = |uuid: &[u8; 16]| {
+        let player = roster.get(uuid).unwrap();
+        (player.display.as_deref().cloned(), player.order)
+    };
+    let legacy = |text: &str| Some(crate::text::legacy::parse(text, '&'));
+    assert_eq!(shown(&alice), (None, 0));
+    assert_eq!(shown(&bob), (legacy("&6[VIP] &fBob"), 10));
+    players.set_tab_format(Some("{prefix}{name} &8{group} {server}"));
+    assert_eq!(shown(&alice), (legacy("Alice &8default lobby"), 0));
+    assert_eq!(shown(&bob), (legacy("&6[VIP] &fBob &8VIP lobby"), 10));
+    // A switch renames the player for the new server.
+    sessions[1].1.set_server("game");
+    assert_eq!(shown(&bob), (legacy("&6[VIP] &fBob &8VIP game"), 10));
+    players.set_tab_format(None);
+    assert_eq!(shown(&alice), (None, 0));
+    assert_eq!(shown(&bob), (legacy("&6[VIP] &fBob"), 10));
+}
+
+#[test]
+fn tab_name_formats_replace_each_placeholder_once() {
+    use super::players::format_name;
+    assert_eq!(format_name(None, "", "Bob", "", "default", "lobby"), None);
+    assert_eq!(
+        format_name(None, "&6[VIP] ", "Bob", " *", "VIP", "lobby").as_deref(),
+        Some("&6[VIP] Bob *")
+    );
+    assert_eq!(
+        format_name(Some("{name}"), "", "Bob", "", "default", "lobby").as_deref(),
+        Some("Bob")
+    );
+    // Replaced text is not scanned again, and unknown braces stay.
+    assert_eq!(
+        format_name(
+            Some("{prefix}{name}{suffix} [{group}] {server} {other} {"),
+            "{name} ",
+            "Bob",
+            "",
+            "VIP",
+            "lobby"
+        )
+        .as_deref(),
+        Some("{name} Bob [VIP] lobby {other} {")
+    );
+}
+
 #[test]
 fn schema_and_authenticated_mode_are_required() {
     // `api_version` is optional and no longer selects anything.

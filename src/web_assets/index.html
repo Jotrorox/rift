@@ -137,7 +137,7 @@
         </section>
 
         <section class="view" id="view-tab-list" aria-labelledby="view-title" hidden>
-          <div class="page-head"><p class="page-intro">A header and footer for every player’s tab list, and optionally everyone on the network. Use <code>{player}</code>, <code>{server}</code>, <code>{online}</code> and <code>{server_online}</code> in text. Extensions can override the text per player with <code>rift.players.tab_list</code>.</p><button type="button" class="button secondary" id="tab-list-refresh">Refresh</button></div>
+          <div class="page-head"><p class="page-intro">A header and footer for every player’s tab list, and optionally everyone on the network. Use <code>{player}</code>, <code>{server}</code>, <code>{online}</code> and <code>{server_online}</code> in text. Names show each player’s permission prefix and suffix; a name format takes <code>{prefix}</code>, <code>{name}</code>, <code>{suffix}</code>, <code>{group}</code> and <code>{server}</code> with <code>&amp;</code> colour codes. Extensions can override the text per player with <code>rift.players.tab_list</code>.</p><button type="button" class="button secondary" id="tab-list-refresh">Refresh</button></div>
           <section class="panel" id="tab-list-panel" aria-label="Tab list editor">
             <form id="tab-list-form">
               <div class="form-row top"><label class="checkbox"><input type="checkbox" id="tab-list-enabled"> Rift manages the tab list</label></div>
@@ -145,6 +145,8 @@
                 <div class="field"><label for="tab-list-header">Header</label><textarea id="tab-list-header" spellcheck="false" placeholder="Welcome, {player}"></textarea></div>
                 <div class="field"><label for="tab-list-footer">Footer</label><textarea id="tab-list-footer" spellcheck="false" placeholder="{online} players online"></textarea></div>
                 <div class="field"><label for="tab-list-players">Players listed</label><select id="tab-list-players"><option value="server">Players on the same server</option><option value="network">Everyone on the network</option></select></div>
+                <div class="field"><label for="tab-list-names">Rank names</label><select id="tab-list-names"><option value="network">Players Rift lists from other servers</option><option value="all">Every player, the server’s own entries too</option></select></div>
+                <div class="field"><label for="tab-list-format">Name format <span class="muted">Optional</span></label><input id="tab-list-format" maxlength="256" spellcheck="false" placeholder="{prefix}{name}{suffix}"></div>
               </div>
               <div class="editor-actions"><div class="action-group"></div><div class="action-group"><button type="submit" class="button" id="tab-list-save">Save &amp; apply</button></div></div>
             </form>
