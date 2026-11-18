@@ -911,6 +911,8 @@ pub struct Extensions {
     permissions_config: PermissionsConfig,
     /// `players.record_ip` of this configuration.
     record_ip: bool,
+    /// `tab_list.format` of this configuration.
+    tab_format: Option<String>,
     players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
     /// The dispatch chain: this script, persistent plugins, bus responders.
@@ -1055,6 +1057,10 @@ impl Extensions {
             permissions,
             permissions_config: config.permissions.clone(),
             record_ip: config.record_ip,
+            tab_format: config
+                .tab_list
+                .as_ref()
+                .and_then(|list| list.format.clone()),
             job_gates: previous.map_or_else(
                 || Arc::new(Mutex::new(BTreeMap::new())),
                 |p| p.job_gates.clone(),
@@ -1132,6 +1138,7 @@ impl Extensions {
     pub fn activate(&self) {
         self.permissions.configure(&self.permissions_config);
         self.players.set_record_ip(self.record_ip);
+        self.players.set_tab_format(self.tab_format.as_deref());
         let empty = BTreeMap::new();
         let groups = self.script.as_ref().map_or(&empty, |script| &script.groups);
         if let Err(error) = self.permissions.mirror_config(groups) {

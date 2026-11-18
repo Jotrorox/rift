@@ -32,7 +32,7 @@ use std::io;
 pub(crate) use switching::ChatKind;
 pub use switching::{GameMode, PlayerWorld, Suggestion};
 pub(crate) use tab_list::TabList;
-pub use tab_list::{TabEntry, TabView};
+pub use tab_list::{TabEntry, TabName, TabView};
 pub use versions::{ClientVersions, releases, translated_range, translated_releases};
 
 /// Whether a client on `client` can play on a backend on `backend`, directly

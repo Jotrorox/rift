@@ -113,6 +113,49 @@ pub struct Players {
     record_ip: Arc<std::sync::atomic::AtomicBool>,
     /// Counts language changes, so sessions notice one without a lock.
     languages: Arc<std::sync::atomic::AtomicU64>,
+    /// `tab_list.format` of the configuration in effect.
+    tab_format: Arc<Mutex<Option<Arc<str>>>>,
+}
+
+/// A player's tab list name: `format` with `{prefix}`, `{name}`, `{suffix}`,
+/// `{group}` and `{server}` replaced in one pass, so a prefix that contains
+/// a placeholder stays text. Without a format it is the prefix and suffix
+/// around the name, and `None` when the player has neither.
+pub(crate) fn format_name(
+    format: Option<&str>,
+    prefix: &str,
+    name: &str,
+    suffix: &str,
+    group: &str,
+    server: &str,
+) -> Option<String> {
+    let Some(format) = format else {
+        return (!prefix.is_empty() || !suffix.is_empty())
+            .then(|| format!("{prefix}{name}{suffix}"));
+    };
+    let mut result = String::with_capacity(format.len() + prefix.len() + name.len() + suffix.len());
+    let mut rest = format;
+    'outer: while let Some(start) = rest.find('{') {
+        result.push_str(&rest[..start]);
+        rest = &rest[start..];
+        for (key, value) in [
+            ("{prefix}", prefix),
+            ("{name}", name),
+            ("{suffix}", suffix),
+            ("{group}", group),
+            ("{server}", server),
+        ] {
+            if let Some(after) = rest.strip_prefix(key) {
+                result.push_str(value);
+                rest = after;
+                continue 'outer;
+            }
+        }
+        result.push('{');
+        rest = &rest[1..];
+    }
+    result.push_str(rest);
+    Some(result)
 }
 
 /// What a session knows about its player beyond the name.
@@ -417,6 +460,26 @@ impl Players {
             directory,
             record_ip: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             languages: Arc::default(),
+            tab_format: Arc::default(),
+        }
+    }
+
+    /// `tab_list.format`: how tab lists name players. A change renames every
+    /// joined player at once.
+    pub fn set_tab_format(&self, format: Option<&str>) {
+        {
+            let mut current = self
+                .tab_format
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if current.as_deref() == format {
+                return;
+            }
+            *current = format.map(Arc::from);
+        }
+        let sessions = self.lock();
+        for entry in sessions.values() {
+            self.decorate(&entry.key, &entry.name, &entry.server);
         }
     }
 
@@ -714,27 +777,34 @@ impl Players {
     }
 
     /// Put the player's permission prefix and suffix around `name` on their
-    /// roster record, as other servers' network tab lists show them, with the
-    /// weight of their primary group as the list order. The text takes `&`
-    /// codes and a colour carries into the name, as in a chat format. A
-    /// player with neither keeps the plain entry. Resolved like
-    /// [`Players::visibility`].
+    /// roster record, as tab lists show them, with the weight of their
+    /// primary group as the list order. `tab_list.format` arranges them (see
+    /// [`format_name`]). The text takes `&` codes and a colour carries into
+    /// the name, as in a chat format. Without a format, a player with neither
+    /// keeps the plain entry. Resolved like [`Players::visibility`].
     fn decorate(&self, uuid: &[u8; 16], name: &str, server: &str) {
         let meta = self.meta_on(uuid, server);
         let (prefix, suffix) = (
             meta.prefix.unwrap_or_default(),
             meta.suffix.unwrap_or_default(),
         );
-        if prefix.is_empty() && suffix.is_empty() {
+        let groups = self.permissions.groups();
+        let group = groups.get(&meta.primary_group);
+        let format = self
+            .tab_format
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let label = group
+            .and_then(|group| group.display_name.as_deref())
+            .unwrap_or(meta.primary_group.as_str());
+        let Some(text) = format_name(format.as_deref(), &prefix, name, &suffix, label, server)
+        else {
             self.roster.set_display(uuid, None, 0);
             return;
-        }
-        let display = crate::text::legacy::parse(&format!("{prefix}{name}{suffix}"), '&');
-        let order = self
-            .permissions
-            .groups()
-            .get(&meta.primary_group)
-            .map_or(0, |group| group.weight);
+        };
+        let display = crate::text::legacy::parse(&text, '&');
+        let order = group.map_or(0, |group| group.weight);
         self.roster
             .set_display(uuid, Some(Arc::new(display)), order);
     }

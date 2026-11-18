@@ -14,6 +14,12 @@ and are listed under **SDKs**.
 
 ### Added
 
+- `tab_list.names = "all"` gives the entries backends list themselves the
+  same rank names and order as Rift's own entries for players on other
+  servers, so a backend without a tab plugin (such as Pumpkin) shows
+  prefixes and suffixes too. `tab_list.format` arranges the name, for example
+  `"{prefix}{name}{suffix} &8{server}"`, with `{group}` for the primary
+  group's display name. The dashboard's Tab list page edits both.
 - `rift admin move <instance> <node>` moves a persistent instance to another
   node on purpose: it stops the instance, copies its folder between the node
   agents through the proxy with a SHA-256 check per file, records the new node

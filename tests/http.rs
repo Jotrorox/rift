@@ -2376,7 +2376,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     put("/api/definitions/permission_groups/Staff", json!({})).expect(400);
     put(
         "/api/definitions/tab_list",
-        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"}),
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network", "names": "all", "format": "{prefix}{name} &7{group}"}),
     )
     .expect(200);
     put(
@@ -2437,7 +2437,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     );
     assert_eq!(
         values["tab_list"],
-        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"})
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network", "names": "all", "format": "{prefix}{name} &7{group}"})
     );
     assert_eq!(values["server_list"]["motd"]["color"], "gold");
     assert_eq!(values["server_list"]["max_players"], 50);

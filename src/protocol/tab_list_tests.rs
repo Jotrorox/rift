@@ -165,6 +165,7 @@ fn rift_lists_only_players_the_backend_does_not() {
         let view = TabView {
             header: None,
             players: Some(vec![entry(1, "Own"), entry(2, "Local"), entry(3, "Remote")]),
+            names: None,
         };
         let packets = tabs.sync(version, Some([1; 16]), &view).unwrap();
         assert_eq!(
@@ -205,6 +206,7 @@ fn backend_entries_displace_rift_entries_without_removal() {
     let view = TabView {
         header: None,
         players: Some(vec![entry(3, "Mover")]),
+        names: None,
     };
     tabs.sync(version, None, &view).unwrap();
     let revision = tabs.revision();
@@ -233,6 +235,7 @@ fn additions_are_batched() {
     let view = TabView {
         header: None,
         players: Some(players),
+        names: None,
     };
     let packets = TabList::default().sync(version, None, &view).unwrap();
     let counts: Vec<_> = packets.iter().map(|packet| packet.data[1]).collect();
@@ -249,6 +252,7 @@ fn rift_owns_the_header_until_it_hands_it_back() {
         let view = TabView {
             header: Some((json!("Top"), json!({"text": "Bottom", "color": "gray"}))),
             players: None,
+            names: None,
         };
         let packets = tabs.sync(version, None, &view).unwrap();
         let mut expected = Vec::new();
@@ -278,6 +282,7 @@ fn legacy_switches_remove_rift_entries() {
     let view = TabView {
         header: None,
         players: Some(vec![entry(3, "Remote")]),
+        names: None,
     };
     tabs.sync(version, None, &view).unwrap();
     assert_eq!(
@@ -303,6 +308,7 @@ fn display_names_and_list_order_are_encoded_for_every_layout() {
         let view = TabView {
             header: None,
             players: Some(vec![remote.clone(), entry(4, "Plain")]),
+            names: None,
         };
         let packets = tabs.sync(version, None, &view).unwrap();
         // What the client reads: hex colours only from 1.16.
@@ -347,11 +353,15 @@ fn display_names_and_list_order_are_encoded_for_every_layout() {
         assert_eq!(packets, [Packet::new(ids.players, expected)]);
         // Rift's own packets parse like a backend's.
         let mut seen = Vec::new();
-        let listed = changes(version, ids, &packets[0], |uuid, added| {
-            seen.push((uuid[0], added));
+        let listed = changes(version, ids, &packets[0], |uuid, change| {
+            seen.push((uuid[0], change));
         });
         assert!(listed.unwrap());
-        assert_eq!(seen, [(3, true), (4, true)], "protocol {number}");
+        assert_eq!(
+            seen,
+            [(3, Change::Added), (4, Change::Added)],
+            "protocol {number}"
+        );
         assert!(tabs.sync(version, None, &view).unwrap().is_empty());
     }
 }
@@ -405,6 +415,7 @@ fn changed_display_names_update_listed_entries_in_place() {
         let view = |players| TabView {
             header: None,
             players: Some(players),
+            names: None,
         };
         let plain = view(vec![entry(3, "Remote"), entry(4, "Other")]);
         assert_eq!(tabs.sync(version, None, &plain).unwrap().len(), 1);
@@ -434,8 +445,12 @@ fn changed_display_names_update_listed_entries_in_place() {
             [Packet::new(ids.players, expected)],
             "protocol {number}"
         );
-        let listed = changes(version, ids, &packets[0], |_, _| panic!("no entry changes"));
+        let mut seen = Vec::new();
+        let listed = changes(version, ids, &packets[0], |uuid, change| {
+            seen.push((uuid[0], change));
+        });
         assert!(listed.unwrap());
+        assert_eq!(seen, [(3, Change::Renamed)], "protocol {number}");
         assert!(tabs.sync(version, None, &named).unwrap().is_empty());
         // Only the rank changes: clients without a list order have nothing new.
         let promoted = view(vec![
@@ -463,4 +478,143 @@ fn changed_display_names_update_listed_entries_in_place() {
         );
         assert!(tabs.sync(version, None, &plain).unwrap().is_empty());
     }
+}
+
+fn name(display: Json, order: i32) -> TabName {
+    TabName {
+        display: Some(Arc::new(display)),
+        order,
+    }
+}
+
+fn names(entries: &[(u8, TabName)]) -> TabView {
+    TabView {
+        names: Some(
+            entries
+                .iter()
+                .map(|(uuid, name)| ([*uuid; 16], name.clone()))
+                .collect(),
+        ),
+        ..TabView::default()
+    }
+}
+
+/// With `names`, the backend's own entries, the player's included, take
+/// Rift's display name and list order; players without one keep the
+/// backend's, and players Rift does not know are left alone.
+#[test]
+fn backend_entries_take_rift_names_for_every_layout() {
+    let display = json!({"text": "[VIP] Local", "color": "gold"});
+    for version in switchable() {
+        let number = version.number();
+        let ids = ids(version).unwrap();
+        let mut tabs = TabList::default();
+        tabs.observe(version, &backend_add(version, &[1, 2, 5]))
+            .unwrap();
+        let view = names(&[
+            (1, name(json!("Own"), 3)),
+            (2, name(display.clone(), 10)),
+            (9, name(json!("Elsewhere"), 1)),
+        ]);
+        let packets = tabs.sync(version, Some([1; 16]), &view).unwrap();
+        let shown = |order: i32| if number >= 768 { order } else { 0 };
+        assert_eq!(
+            packets,
+            [update(
+                version,
+                ids,
+                &[
+                    ([1; 16], (Some(Arc::new(json!("Own"))), shown(3))),
+                    ([2; 16], (Some(Arc::new(display.clone())), shown(10))),
+                ]
+            )
+            .unwrap()],
+            "protocol {number}"
+        );
+        // Rift's update parses as a rename, never as an addition.
+        let mut seen = Vec::new();
+        changes(version, ids, &packets[0], |uuid, change| {
+            seen.push((uuid[0], change))
+        })
+        .unwrap();
+        assert_eq!(seen, [(1, Change::Renamed), (2, Change::Renamed)]);
+        assert!(tabs.modified());
+        assert!(tabs.sync(version, Some([1; 16]), &view).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn backend_renames_and_re_adds_are_named_again() {
+    let version = ProtocolVersion::new(774).unwrap();
+    let ids = ids(version).unwrap();
+    let mut tabs = TabList::default();
+    tabs.observe(version, &backend_add(version, &[2])).unwrap();
+    let view = names(&[(2, name(json!("[VIP] Local"), 10))]);
+    assert_eq!(tabs.sync(version, None, &view).unwrap().len(), 1);
+    // The backend sets its own display name: Rift sets its name again.
+    let revision = tabs.revision();
+    let mut rename = vec![32, 1];
+    rename.extend([2; 16]);
+    rename.push(0);
+    assert!(
+        tabs.observe(version, &Packet::new(ids.players, rename))
+            .unwrap()
+    );
+    assert!(tabs.revision() > revision);
+    assert_eq!(tabs.sync(version, None, &view).unwrap().len(), 1);
+    // A list order update counts too, on its own.
+    let revision = tabs.revision();
+    let mut order = vec![64, 1];
+    order.extend([2; 16]);
+    order.push(1);
+    tabs.observe(version, &Packet::new(ids.players, order))
+        .unwrap();
+    assert!(tabs.revision() > revision);
+    assert_eq!(tabs.sync(version, None, &view).unwrap().len(), 1);
+    // The backend adds the entry again, as on a respawn.
+    tabs.observe(version, &backend_add(version, &[2])).unwrap();
+    assert_eq!(tabs.sync(version, None, &view).unwrap().len(), 1);
+    // A removed entry is forgotten and not renamed.
+    tabs.observe(version, &backend_remove(version, &[2]))
+        .unwrap();
+    assert!(tabs.sync(version, None, &view).unwrap().is_empty());
+    assert!(!tabs.modified());
+    // A reconfiguration forgets the names with the entries.
+    tabs.observe(version, &backend_add(version, &[2])).unwrap();
+    tabs.sync(version, None, &view).unwrap();
+    tabs.reset();
+    assert!(!tabs.modified());
+}
+
+#[test]
+fn names_rift_set_are_cleared_when_they_go_away() {
+    let version = ProtocolVersion::new(774).unwrap();
+    let ids = ids(version).unwrap();
+    let mut tabs = TabList::default();
+    tabs.observe(version, &backend_add(version, &[2, 3]))
+        .unwrap();
+    let named = names(&[
+        (2, name(json!("[VIP] Local"), 10)),
+        (3, name(json!("[Mod] Other"), 50)),
+    ]);
+    tabs.sync(version, None, &named).unwrap();
+    // Bob loses his prefix: his entry is cleared, Carol's is kept.
+    let fewer = names(&[(3, name(json!("[Mod] Other"), 50))]);
+    let plain = (None, 0);
+    assert_eq!(
+        tabs.sync(version, None, &fewer).unwrap(),
+        [update(version, ids, &[([2; 16], plain.clone())]).unwrap()]
+    );
+    assert!(tabs.sync(version, None, &fewer).unwrap().is_empty());
+    // Turning names off clears every name Rift set.
+    assert_eq!(
+        tabs.sync(version, None, &TabView::default()).unwrap(),
+        [update(version, ids, &[([3; 16], plain)]).unwrap()]
+    );
+    assert!(!tabs.modified());
+    assert!(
+        tabs.sync(version, None, &TabView::default())
+            .unwrap()
+            .is_empty()
+    );
 }

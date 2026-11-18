@@ -6,7 +6,10 @@
 //! node from the `rift.visible-to` meta key): Rift does not know what
 //! "vanished" means, only who may see whom. Each reader names its [`Viewer`]
 //! and gets the players that viewer may see.
-use crate::{auth::ProfileProperty, protocol::TabEntry};
+use crate::{
+    auth::ProfileProperty,
+    protocol::{TabEntry, TabName},
+};
 use serde_json::Value as Json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -210,6 +213,28 @@ impl PlayerRegistry {
                 properties: player.properties.clone(),
                 display: player.display.clone(),
                 order: player.order,
+            })
+            .collect()
+    }
+
+    /// The display name and list order of every connected player who has
+    /// one, for the entries backends list themselves. Visibility does not
+    /// apply: these only name entries the backend already shows.
+    pub fn tab_names(&self) -> BTreeMap<[u8; 16], TabName> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .players
+            .values()
+            .filter(|player| player.display.is_some() || player.order != 0)
+            .map(|player| {
+                (
+                    player.uuid,
+                    TabName {
+                        display: player.display.clone(),
+                        order: player.order,
+                    },
+                )
             })
             .collect()
     }

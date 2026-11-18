@@ -119,6 +119,8 @@ rift.config.tab_list = {
     header = { text = "My Network", color = "gold", bold = true },
     footer = "\u{00A7}7{online} players online \u{00A7}8| \u{00A7}7You are on {server}",
     players = "network", -- "server" (the default) lists only the current backend's players.
+    names = "all",       -- Rank names on the backend's own entries too.
+    format = "{prefix}{name}{suffix} &8{server}",
 }
 ```
 
@@ -126,6 +128,8 @@ rift.config.tab_list = {
 | --- | --- | --- |
 | `header`, `footer` | none | Text above and below the list. Each is limited to 4096 bytes before placeholders are replaced. |
 | `players` | `"server"` | `"server"` lists only the current backend's players. `"network"` adds the players on every other backend. |
+| `names` | `"network"` | `"network"` puts rank names on the entries Rift adds. `"all"` also renames the backend's own entries; see [names on every entry](#names-on-every-entry). |
+| `format` | `{prefix}{name}{suffix}` | How names are shown; see [name format](#name-format). Up to 256 bytes, and it must contain `{name}`. |
 
 The tab list works on every Minecraft version Rift can switch players on
 (1.8.9–26.3). Reloads apply to connected players. Removing `tab_list` removes
@@ -167,7 +171,8 @@ other backend.
 
 A player with a prefix or suffix in Rift's [permissions](permissions.md) is
 listed with them around their name, so players on other servers show their
-rank like the backend's own. There is no setting for this.
+rank like the backend's own. This needs no setting; `names` and `format`
+extend it to the backend's own entries and change how names look.
 
 - **Colors:** the text takes `&` codes (see
   [legacy codes](text.md#legacy-codes)), and a color carries into the name
@@ -182,10 +187,54 @@ rank like the backend's own. There is no setting for this.
   primary group as their list order. The client sorts them by weight, highest
   first, ahead of entries without an order. Older clients have no list order
   and sort as they always did. Entries a backend lists keep that backend's
-  order.
-- **No prefix or suffix:** such a player, and every player on a network that
-  does not use Rift's permissions, is listed by name alone, with no display
-  name or order.
+  order, unless `names = "all"`.
+- **No prefix or suffix:** without a `format`, such a player, and every
+  player on a network that does not use Rift's permissions, is listed by name
+  alone, with no display name or order.
+
+### Names on every entry
+
+By default the players on a viewer's own server are the backend's entries,
+with whatever names its plugins give them. With `names = "all"`, Rift gives
+those entries the same name and list order as its own, the viewer's entry
+included, so every player in the list shows their rank. Use it for backends
+without a tab plugin, such as Pumpkin; it works with either `players`
+setting.
+
+- Rift sets the name after the backend adds an entry, and again whenever the
+  backend changes that entry's display name or list order, so the backend's
+  names are replaced, not combined.
+- Players without a name to show (no prefix or suffix and no `format`) and
+  entries for players Rift does not know, such as NPCs, keep the backend's.
+- When a player loses their name, or `names` is turned off, Rift clears the
+  display names it set; the backend's own come back when it next sends them.
+- On Paper with [RiftPerms](riftperms.md), use either this or RiftPerms'
+  `tab` feature, not both.
+
+### Name format
+
+`format` is legacy text like the prefixes themselves (`&` codes and
+`&#rrggbb`), with these placeholders:
+
+| Placeholder | Value |
+| --- | --- |
+| `{prefix}`, `{suffix}` | The player's winning prefix or suffix, or nothing |
+| `{name}` | The player's name |
+| `{group}` | Their primary group's display name, or its name without one |
+| `{server}` | The server they are on |
+
+With a `format`, every player gets a display name, with their primary
+group's weight as the list order, whether or not they have a prefix.
+Placeholders are replaced once: a prefix that contains `{name}` stays text.
+Names follow server switches and permission changes as above, and a reload
+with a new format renames everyone at once.
+
+```lua
+rift.config.tab_list = {
+    names = "all",
+    format = "{prefix}{name}{suffix} &8[&7{server}&8]",
+}
+```
 
 ### Hidden players
 
