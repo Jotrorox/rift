@@ -926,7 +926,7 @@ rift.config.nodes.node2={address='10.0.0.2'}
 rift.config.templates.t={server_jar='paper.jar'}
 rift.config.service_groups.game={template='t',storage='disposable',port_range={30000,30099},nodes={'node1','node2'}}
 rift.config.service_groups.world={template='t',storage='persistent',port_range={31000,31099},nodes={'node1','node2'}}
-rift.config.backups={directory='%DIRECTORY%',keep=2}";
+rift.config.backups={directory=[[%DIRECTORY%]],keep=2}";
 
     fn snapshot(directory: &Path) -> Arc<Snapshot> {
         let source = SOURCE.replace("%DIRECTORY%", &directory.display().to_string());

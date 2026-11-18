@@ -301,7 +301,7 @@ impl Store {
                         return fs::remove_file(&file);
                     }
                     fs::create_dir_all(target.parent().expect("objects have a shard folder"))?;
-                    fs::File::open(&file)?.sync_all()?;
+                    sync(&file)?;
                     fs::rename(&file, &target)
                 })
                 .await
@@ -359,7 +359,7 @@ impl Store {
                         target.file_name().unwrap().to_string_lossy()
                     ));
                     fs::write(&staged, &bytes)?;
-                    fs::File::open(&staged)?.sync_all()?;
+                    sync(&staged)?;
                     fs::rename(&staged, &target)
                 })
                 .await
@@ -551,6 +551,12 @@ fn object_path(root: &Path, sha256: &str) -> PathBuf {
 
 fn manifest_path(root: &Path, instance: &str, id: &str) -> PathBuf {
     root.join(manifest_key(instance, id))
+}
+
+/// Flush a finished file to disk before it is renamed into place. Windows
+/// only flushes through a handle opened for writing.
+fn sync(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// The UTF-8 names in `folder`; none if it does not exist.
