@@ -2649,10 +2649,11 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
             }
         }
     }
-    // A folder that is in place but not recorded is removed again.
+    // A folder that is in place but not recorded is taken back again, kept
+    // for the next attempt where the node can resume a copy.
     let undo = || async {
         if copy {
-            transfer::discard_orphan(nodes, &name, &to, &directory).await;
+            transfer::set_aside(nodes, &name, &to, &directory).await;
         }
     };
     // The folder keeps its world; only its port and address change. Named

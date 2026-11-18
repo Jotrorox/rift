@@ -744,6 +744,7 @@ async fn send(
             let end = (next >= entry.size).then(|| FileEnd {
                 sha256: entry.sha256.clone(),
                 mode: entry.mode,
+                modified: None,
             });
             let last = end.is_some();
             if chunk.is_empty() && !last {

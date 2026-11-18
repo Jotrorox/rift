@@ -551,6 +551,12 @@ fn server_operations_enforce_auth_origin_json_and_backend_validation() {
             .unwrap()
             .contains(&json!("POST /api/servers/{name}/start"))
     );
+    assert!(
+        discovery["endpoints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("POST|DELETE /api/servers/{name}/move"))
+    );
     for operation in ["start", "stop"] {
         let path = format!("/api/servers/primary/{operation}");
         public.json("POST", &path, json!({})).expect(401);
@@ -615,6 +621,40 @@ fn managed_state_and_accepted_operations_are_private_and_restart_bound() {
         .value();
     assert!(public.get("managed_servers").is_none());
     assert!(!public.to_string().contains("private-process-argument"));
+    // Only servers on nodes move, and only a running move can be cancelled.
+    assert!(initial["managed_servers"][0]["move"].is_null());
+    let refused = admin
+        .json(
+            "POST",
+            "/api/servers/primary/move",
+            json!({"node": "node2"}),
+        )
+        .expect(409)
+        .value();
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("runs on this host"), "{message}");
+    admin
+        .json("POST", "/api/servers/primary/move", json!({}))
+        .expect(400);
+    admin
+        .json(
+            "POST",
+            "/api/servers/primary/move",
+            json!({"node": "node2", "copy": false, "keep_source": true}),
+        )
+        .expect(400);
+    admin
+        .json(
+            "POST",
+            "/api/servers/missing/move",
+            json!({"node": "node2"}),
+        )
+        .expect(404);
+    let idle = admin
+        .json("DELETE", "/api/servers/primary/move", json!({}))
+        .expect(409)
+        .value();
+    assert!(idle["error"].as_str().unwrap().contains("not moving"));
     let stopped = admin
         .json("POST", "/api/servers/primary/stop", json!({}))
         .expect(202)

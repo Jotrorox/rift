@@ -72,6 +72,20 @@ and are listed under **SDKs**.
   `node` or backend, for example to the new values. `rift admin servers`
   shows the node the configuration still names as `configured_node`. See
   [docs/nodes.md](docs/nodes.md#move-a-named-server).
+- Moves can be started and followed from the dashboard: servers on nodes have
+  a Move button that asks for the new node, and the server list shows the
+  copy's progress, rate and time left, with a button to cancel it. The web API
+  has `POST /api/servers/{name}/move` (an operation to poll) and
+  `DELETE /api/servers/{name}/move` to cancel, and `/api/servers` and
+  `rift admin servers` report a running move under `move`.
+  `rift admin move <server> --cancel` cancels from the command line.
+- An interrupted move resumes instead of starting over. When a copy fails,
+  is cancelled or the proxy stops during it, the files that arrived stay on
+  the new node, and the next move of the same server to that node sends only
+  the files that are missing or changed since; it recognises a copied file by
+  its size and modification time, which moved files now keep. What the source
+  deleted meanwhile is dropped. Both agents need the new `move_resume`
+  feature; with older agents a move starts over as before.
 
 ### Nodes
 

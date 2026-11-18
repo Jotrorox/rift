@@ -435,7 +435,10 @@ rift admin move lobby-3 node2
 ```
 
 The command needs the `servers` [admin permission](admin.md) and returns when
-the move has finished:
+the move has finished. In the [dashboard](http.md), choose **Move…** next to
+the server on the Servers page instead, pick the new node and follow the copy
+in the server list; the web API has the same as
+[`POST /api/servers/{name}/move`](http-api.md#managed-servers). Either way:
 
 1. Rift checks the move: the instance must be a persistent instance of a
    service group with `nodes`, and `node2` must match the group's `nodes`, be
@@ -448,8 +451,9 @@ the move has finished:
 3. It copies the instance folder from the old node to the new one through the
    proxy, over the message bus, in chunks of 512 KiB. Agents need no extra
    ports or credentials. The new node checks every file against the SHA-256
-   of the bytes read on the old one, and assembles the copy in a staging
-   folder next to the instance folder.
+   of the bytes read on the old one, gives it the modification time it has
+   there, and assembles the copy in a staging folder next to the instance
+   folder.
 4. It puts the copy in place, records the new node in the instance database
    and gives the instance a new backend address. The port stays the same if it
    is free on the new node; otherwise the instance gets the first free port of
@@ -461,22 +465,55 @@ the move has finished:
 | `--keep-source` | Keep the old folder on the old node instead of deleting it |
 | `--no-copy` | Copy nothing: the folder is already on the new node |
 
-The reply lists what was copied, the new port and address, and
-`cleanup_error` if the old folder could not be deleted. Delete that folder by
+The reply lists what was copied (`copied`, with `reused_files` and
+`reused_bytes` that an earlier attempt had already copied), the new port and
+address, and `cleanup_error` if the old folder could not be deleted. Delete that folder by
 hand then: it is not used again. Plugins see the move on
 [`rift.events.instances`](messaging-subjects.md#events) with
 `"event":"moved"`.
 
 **If something fails**, the instance stays on its old node with its files
-untouched, and starts again if it was running. A copy that was interrupted,
-also by a controller restart, stays on the new node until the next move of the
-same instance to that node, which replaces it. Rift never replaces a folder it
+untouched, and starts again if it was running. Rift never replaces a folder it
 did not put there itself.
 
 **While a move runs**, the instance's service group holds still: its scaling
 does not create, start, stop or remove instances. Other groups and reloads are
 not held up. The copy is limited by the bus, so plan for a few minutes per
-gigabyte on a slow link.
+gigabyte on a slow link. `rift admin servers` and `GET /api/servers` show the
+move under `move`: its phase (`stopping`, `copying` or `committing`), the
+files and bytes copied so far and, when the old node's agent reports it, the
+size of the whole folder. The dashboard turns that into a progress bar with
+the rate and the time left.
+
+### Interrupted and cancelled moves
+
+A long copy does not have to finish in one go. Cancel it with
+
+```sh
+rift admin move lobby-3 --cancel
+```
+
+or **Cancel move** in the dashboard, and the instance goes back to its old
+node and starts again if it was running. A move can be cancelled until its
+copy is done; once it commits, it finishes.
+
+What was copied is kept. When a copy fails (the old node went offline, the
+bus dropped, the proxy restarted) or is cancelled, the files that arrived
+whole stay on the new node in `.rift-move-lobby-3` next to the instance
+folder. Running the same move again, to the same node, continues the copy: it
+sends only the files that are missing, and those that changed on the old node
+meanwhile, which it tells by their size and modification time. Files the old
+node no longer has are left out of the result. A copy that was already put in
+place, but whose move the proxy could not record, is taken back the same way.
+
+Resuming needs the `move_resume` feature on both agents, new in this release.
+With an older agent on the new node, a failed copy is deleted and the next
+move starts over; with an older agent on the old node, every file is sent
+again.
+
+If you decide against the move instead, delete `.rift-move-lobby-3` and
+`.rift-resume-lobby-3` below `local/services` on the new node, or let a later
+move of the instance to that node reuse them.
 
 ### Recover the instances of a dead node
 
@@ -651,7 +688,9 @@ controller checks them before it starts a server there:
 
 [Moves](#move-a-persistent-instance-to-another-node) need the `move` feature on
 both agents (only the new one with `--no-copy`); an older agent refuses the
-move before the instance is stopped. [Backups](backups.md) and restores in
+move before the instance is stopped. Resuming an
+[interrupted move](#interrupted-and-cancelled-moves) needs `move_resume` on
+both; without it a move starts over. [Backups](backups.md) and restores in
 place need the `backup` feature.
 
 A refused server shows the reason as its last error, and service groups place

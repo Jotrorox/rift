@@ -19,6 +19,9 @@
     templateButtons: [], files: { root: "templates", path: "", editing: null, baseline: "", buttons: [] },
     // Plugin restarts and the plugin log tail.
     pluginButtons: [], pluginLog: "", pluginLogPolling: false,
+    // Moves between nodes: the configured nodes, the server whose move form
+    // is open, copy rates by server, and moves this tab asked to cancel.
+    nodes: [], move: null, moveRates: new Map(), cancelledMoves: new Set(), moveTick: 0,
   };
   function permsState() {
     return { groups: [], tracks: [], group: "", groupDetail: null, user: "", userDetail: null, users: [], registered: [], events: [], expanded: new Set(),
@@ -76,6 +79,7 @@
     $("nodes-warm").hidden = Boolean(state.groups);
     $("nodes-warm").disabled = state.busy || !allowed("servers") || Boolean(state.groups);
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
+    $("move-start").disabled = state.busy || !allowed("servers") || !$("move-node").value;
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
     for (const id of ["server-list-save", "tab-list-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
@@ -220,8 +224,11 @@
     const group = $("servers-group").value;
     const servers = state.managedServers.filter((server) => !group || server.group === group);
     state.serverButtons = [];
+    for (const name of state.moveRates.keys()) if (!state.managedServers.some((server) => server.name === name && server.move)) state.moveRates.delete(name);
     table("managed-servers", servers, 10, (tr, server) => {
-      cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
+      cell(tr, server.name);
+      const lifecycle = cell(tr, server.state, `state ${server.state}`);
+      if (server.move) lifecycle.append(moveProgress(server.name, server.move));
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
       cell(tr, storageLabel(server.storage));
@@ -255,6 +262,28 @@
           if (discardsFiles(server.storage) && !window.confirm(`Remove ${server.name} and permanently delete its files, including its world? This can't be undone.`)) return;
           instanceOperation(server.name, "remove", server.storage);
         });
+        actions.append(button);
+      }
+      // Persistent servers on nodes move with their folder (rift admin move).
+      const movable = server.node && server.node !== "local" && (server.storage || "persistent") === "persistent";
+      if (server.move || movable) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button subtle";
+        const occupied = number(server.players) > 0 || number(server.reservations) > 0;
+        let unavailable;
+        if (server.move) {
+          button.textContent = "Cancel move";
+          button.title = `Stop the move. ${server.name} stays on ${server.move.from} and starts again if it was running; what was copied stays on ${server.move.to}, so moving there again continues the copy.`;
+          unavailable = server.move.phase === "committing" || Boolean(server.move.cancelling);
+          button.addEventListener("click", () => { if (!button.disabled) cancelMove(server.name); });
+        } else {
+          button.textContent = "Move…";
+          button.title = occupied ? "Players must leave first: transfer them to another server or drain this one." : "Copy this server’s folder to another node and run it there.";
+          unavailable = occupied || Boolean(server.moving) || ["stopping", "removing"].includes(server.state);
+          button.addEventListener("click", () => { if (!button.disabled) openMove(server); });
+        }
+        button.setAttribute("aria-label", `${button.textContent} ${server.name}`);
+        state.serverButtons.push({ button, unavailable });
         actions.append(button);
       }
     }, group ? `No instances in ${group} yet.` : "No managed servers yet. Create one from a service group.");
@@ -389,6 +418,7 @@
       const disk = cell(tr, known(host.disk_free_mb) ? `${mib(host.disk_free_mb)} free of ${mib(host.disk_total_mb)}` : "—");
       if (known(host.disk_free_mb) && number(host.disk_free_mb) < number(node.min_free_disk_mb)) flag(disk, "Full", `Below min_free_disk_mb (${count(node.min_free_disk_mb)} MiB): no new instances are placed here.`);
     }, "No nodes configured.");
+    state.nodes = nodes;
     state.managedServers = status.managed_servers || [];
     renderServers();
     const root = $("files-root").value || state.files.root;
@@ -1893,6 +1923,139 @@
       $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
+  // Moves between nodes. The copy runs on the proxy, so the page only starts
+  // it, shows its progress from the server list and reports its outcome.
+  function moveOutcome(message, kind = "") {
+    text("server-result", message);
+    $("server-result").className = `operation-result ${kind}`;
+  }
+  // Bytes per second copied, smoothed over the status refreshes.
+  function moveRate(name, move) {
+    const copied = number(move.bytes) - number(move.reused_bytes), now = Date.now();
+    const previous = state.moveRates.get(name);
+    if (previous && now - previous.at < 1000 && copied >= previous.copied) return previous.rate;
+    let rate = null;
+    if (previous && copied >= previous.copied) {
+      const sample = (copied - previous.copied) * 1000 / (now - previous.at);
+      rate = previous.rate === null ? sample : previous.rate * 0.6 + sample * 0.4;
+    }
+    state.moveRates.set(name, { copied, at: now, rate });
+    return rate;
+  }
+  function moveLabel(name, move) {
+    if (move.cancelling) return `Cancelling the move to ${move.to}…`;
+    if (move.phase === "stopping") return `Stopping before the move to ${move.to}…`;
+    if (move.phase === "committing") return `Finishing the move to ${move.to}…`;
+    const done = number(move.bytes), known = move.total_bytes !== null && move.total_bytes !== undefined, total = number(move.total_bytes);
+    let label = known
+      ? `Copying to ${move.to}: ${bytes(done)} of ${bytes(total)} (${Math.min(100, Math.floor(done * 100 / Math.max(total, 1)))}%)`
+      : `Copying to ${move.to}: ${bytes(done)}`;
+    if (number(move.reused_bytes)) label += ` · ${bytes(move.reused_bytes)} kept from an earlier attempt`;
+    const rate = moveRate(name, move);
+    if (rate) {
+      label += ` · ${bytes(rate)}/s`;
+      if (known && total > done) label += ` · about ${uptime((total - done) / rate)} left`;
+    }
+    return label;
+  }
+  function moveProgress(name, move) {
+    const wrap = document.createElement("span"), bar = document.createElement("progress"), label = document.createElement("span");
+    wrap.className = "move-progress";
+    // Without a total (older agents) the bar stays indeterminate.
+    if (move.phase === "committing") { bar.max = 1; bar.value = 1; }
+    else if (move.phase === "copying" && !move.cancelling && move.total_bytes !== null && move.total_bytes !== undefined) {
+      bar.max = Math.max(number(move.total_bytes), 1); bar.value = Math.min(number(move.bytes), bar.max);
+    }
+    bar.setAttribute("aria-label", `Move of ${name}`);
+    label.textContent = moveLabel(name, move);
+    wrap.append(bar, label);
+    return wrap;
+  }
+  function openMove(server) {
+    state.move = server.name;
+    text("move-heading", `Move ${server.name}`);
+    text("move-result", ""); $("move-result").className = "operation-result";
+    const candidates = state.nodes.filter((node) => node.name !== server.node);
+    text("move-intro", candidates.length
+      ? `Rift stops ${server.name}, copies its folder from ${server.node} to the new node over the message bus, and starts it there if it was running. Players can’t join it until then. If the copy is interrupted or cancelled, moving it to the same node again continues where it stopped.`
+      : `No other node is configured. Add one to rift.config.nodes before moving ${server.name}.`);
+    const select = $("move-node");
+    select.replaceChildren();
+    for (const node of candidates) {
+      const option = document.createElement("option");
+      const reason = node.state !== "online" ? (node.state === "never_connected" ? "never connected" : node.state || "offline")
+        : node.schedule && node.schedule !== "active" ? node.schedule : "";
+      option.value = node.name; option.textContent = reason ? `${node.name} (${reason})` : node.name; option.disabled = Boolean(reason);
+      select.append(option);
+    }
+    select.value = candidates.find((node) => node.state === "online" && (!node.schedule || node.schedule === "active"))?.name || "";
+    $("move-keep-source").checked = false;
+    $("move-panel").hidden = false;
+    controls();
+    select.focus?.();
+  }
+  function closeMove() {
+    state.move = null; $("move-panel").hidden = true; controls();
+  }
+  async function startMove() {
+    const name = state.move, node = $("move-node").value;
+    if (!name || !node || state.busy) return;
+    state.busy = true; controls();
+    text("move-result", `Starting the move of ${name} to ${node}…`); $("move-result").className = "operation-result";
+    let accepted = null;
+    try {
+      accepted = await request(`/api/servers/${encodeURIComponent(name)}/move`, { method: "POST", body: JSON.stringify({ node, keep_source: $("move-keep-source").checked }) });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("move-result", error.message || "The move could not be started."); $("move-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+    if (!accepted) return;
+    closeMove();
+    moveOutcome(`Moving ${name} to ${node}. Its progress shows in the list; the move carries on if you leave this page.`);
+    followMove(name, node, accepted.poll, state.session);
+    await refreshStatus({ syncSource: false });
+  }
+  async function followMove(name, node, poll, session) {
+    let failures = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (session !== state.session) return;
+      let operation;
+      try { operation = await request(poll); failures = 0; } catch (error) {
+        failures += 1;
+        if (error.status !== 404 && failures < 5) continue;
+        moveOutcome(`Lost track of the move of ${name}: ${error.message} Check its node in the list.`, "warning");
+        return;
+      }
+      if (operation.status === "pending") continue;
+      const cancelled = state.cancelledMoves.delete(name);
+      if (operation.status === "succeeded") {
+        const outcome = operation.result || {}, copied = outcome.copied;
+        let message = `Moved ${name} to ${outcome.node || node}`;
+        if (copied) message += ` (${bytes(copied.bytes)} copied${number(copied.reused_bytes) ? `, ${bytes(copied.reused_bytes)} kept from an earlier attempt` : ""})`;
+        moveOutcome(outcome.cleanup_error ? `${message}, but: ${outcome.cleanup_error}` : `${message}.`, outcome.cleanup_error ? "warning" : "success");
+      } else moveOutcome(operation.error || `The move of ${name} failed.`, cancelled ? "warning" : "error");
+      await refreshStatus({ syncSource: false });
+      return;
+    }
+  }
+  async function cancelMove(name) {
+    if (state.busy) return;
+    if (!window.confirm(`Cancel the move of ${name}? It stays on its current node and starts again if it was running. What was copied so far stays on the new node, so moving it there again continues the copy.`)) return;
+    state.busy = true; controls();
+    try {
+      await request(`/api/servers/${encodeURIComponent(name)}/move`, { method: "DELETE", body: "{}" });
+      state.cancelledMoves.add(name);
+      moveOutcome(`Cancelling the move of ${name}…`);
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      moveOutcome(error.message || "The move could not be cancelled.", "error");
+    } finally { state.busy = false; controls(); }
+    await refreshStatus({ syncSource: false });
+  }
+  $("move-form").addEventListener("submit", (event) => { event.preventDefault(); if (!$("move-start").disabled) startMove(); });
+  $("move-close").addEventListener("click", closeMove);
+  $("move-node").addEventListener("change", controls);
   $("servers-group").addEventListener("change", () => { renderServers(); controls(); });
   $("source").addEventListener("input", controls);
   $("source").addEventListener("keydown", (event) => {
@@ -1933,7 +2096,7 @@
     for (const id of ["server-list-result", "tab-list-result", "perm-groups-result", "perm-group-result", "perm-track-result", "perm-users-result", "perm-user-result",
       "perm-group-node-result", "perm-user-node-result", "perm-trace-result", "perm-holders-result", "perm-activity-result"]) text(id, "");
     for (const id of ["perm-group-panel", "perm-group-nodes-panel", "perm-user-panel", "perm-user-nodes-panel", "perm-compiled-panel"]) $(id).classList.toggle("hidden", true);
-    state.serverButtons = []; return true;
+    state.serverButtons = []; state.nodes = []; state.moveRates.clear(); state.cancelledMoves.clear(); closeMove(); return true;
   }
   $("refresh-status").addEventListener("click", () => refreshStatus());
   $("console-server").addEventListener("change", () => {
@@ -2261,6 +2424,9 @@
   }, 5000);
   setInterval(() => {
     if (document.hidden || state.busy) return;
+    // Moves show their progress every two seconds.
+    state.moveTick = (state.moveTick + 1) % 2;
+    if (state.moveTick === 0 && allowed("read") && state.managedServers.some((server) => server.move)) refreshStatus({ showError: false, syncSource: false });
     if ($("console-follow").checked) pollLogs();
     if ($("view-plugins").hidden === false && $("plugin-log-follow").checked) pollPluginLog();
   }, 1000);
