@@ -2197,14 +2197,13 @@ async fn move_server(
     let flag = |key: &str, default: bool| match value.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
-        Some(_) => Err(error(
-            StatusCode::BAD_REQUEST,
-            format!("{key} must be a boolean"),
-        )),
+        Some(_) => Err(format!("{key} must be a boolean")),
     };
     let (copy, keep_source) = match (flag("copy", true), flag("keep_source", false)) {
         (Ok(copy), Ok(keep_source)) => (copy, keep_source),
-        (Err(failure), _) | (_, Err(failure)) => return failure,
+        (Err(message), _) | (_, Err(message)) => {
+            return error(StatusCode::BAD_REQUEST, message);
+        }
     };
     if !copy && keep_source {
         return error(
