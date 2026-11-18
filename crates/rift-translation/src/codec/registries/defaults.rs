@@ -96,7 +96,7 @@ pub fn syncs(protocol: i32, registry: &str) -> bool {
 /// data is loaded.
 pub fn synced(protocol: i32, registry: &str) -> bool {
     let registry = data::strip(registry);
-    names(protocol).iter().any(|name| *name == registry)
+    names(protocol).contains(&registry)
 }
 
 /// The registries a client of `protocol` needs, with full data.
