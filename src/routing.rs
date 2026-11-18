@@ -101,6 +101,15 @@ impl Backend {
         self
     }
 
+    /// The same backend at another address, keeping its declared version
+    /// and translated clients.
+    pub fn at(&self, address: &str) -> io::Result<Self> {
+        let mut backend = Self::parse(address)?;
+        backend.version = self.version;
+        backend.clients = self.clients.clone();
+        Ok(backend)
+    }
+
     /// This backend's own translation setting, when it has one.
     pub fn clients(&self) -> Option<&crate::protocol::ClientVersions> {
         self.clients.as_ref()

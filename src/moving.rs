@@ -1,6 +1,6 @@
-//! `rift admin move <instance> <node>`: move a persistent instance to another
-//! node on purpose. Rift never does this on its own; a persistent instance
-//! otherwise stays on the node it was created on.
+//! `rift admin move <server> <node>`: move a persistent instance, or a named
+//! server of `managed_servers`, to another node on purpose. Rift never does
+//! this on its own; such a server otherwise stays on its node.
 //!
 //! 1. Check the move against the current configuration and nodes.
 //! 2. Park the instance: refuse every start and stop its process
@@ -11,7 +11,10 @@
 //!    restored from a backup of a node that died.
 //! 4. Commit in the instance transaction queue (`runtime::move_instance`):
 //!    put the folder in place, refresh its port, re-register the instance in
-//!    the instance database and give it a new worker on the new node.
+//!    the instance database and give it a new worker on the new node. A
+//!    named server keeps its port, and the instance database remembers its
+//!    new node over the Lua configuration until that configuration changes
+//!    the server's node or backend ([`rift::config::MovedServer`]).
 //! 5. Delete the old folder unless `--keep-source`, and start the server
 //!    again if it was running.
 //!
@@ -33,7 +36,7 @@ use crate::{admin, runtime::Snapshot};
 /// How long the administration service waits for a move, copy included.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(6 * 60 * 60);
 
-const USAGE: &str = "usage: move <instance> <node> [--no-copy] [--keep-source]";
+const USAGE: &str = "usage: move <server> <node> [--no-copy] [--keep-source]";
 
 /// A parsed `move` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,12 +92,15 @@ pub(crate) struct Commit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Checked {
     pub from: String,
-    /// The instance's folder, relative to each agent's root; the same on
+    /// The server's folder, relative to each agent's root; the same on
     /// every node.
     pub directory: PathBuf,
+    /// A named server of `managed_servers` rather than a service instance.
+    pub named: bool,
 }
 
-/// Whether `instance` may move to node `to` now. `source_online` also
+/// Whether `instance`, a service instance or a named server of
+/// `managed_servers`, may move to node `to` now. `source_online` also
 /// requires the old node to be reachable, which a copy needs.
 pub(crate) fn check(
     snapshot: &Snapshot,
@@ -103,32 +109,6 @@ pub(crate) fn check(
     source_online: bool,
 ) -> Result<Checked, String> {
     let config = &snapshot.config;
-    let Some(registration) = config.instances.get(instance) else {
-        if config
-            .managed_servers
-            .get(instance)
-            .is_some_and(|server| server.node.is_some())
-        {
-            return Err(format!(
-                "managed_servers.{instance} is configured in Lua: copy its folder yourself and change its node and backend there"
-            ));
-        }
-        return Err(format!(
-            "unknown service instance {instance:?}; use servers to list instances"
-        ));
-    };
-    let group_name = &registration.group;
-    let Some(from) = registration.node.clone() else {
-        return Err(format!(
-            "{instance} runs on this host; only instances on nodes can move"
-        ));
-    };
-    if registration.storage != InstanceStorage::Persistent {
-        return Err(format!(
-            "{instance} is {}: its folder is rebuilt from the template anyway, so remove it and let service group {group_name} create a new instance instead",
-            registration.storage.as_str()
-        ));
-    }
     let names = || {
         config
             .nodes
@@ -137,9 +117,20 @@ pub(crate) fn check(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let Some(server) = config.managed_servers.get(instance) else {
+        return Err(format!(
+            "unknown server {instance:?}; use servers to list servers"
+        ));
+    };
+    let registration = config.instances.get(instance);
+    let Some(from) = server.node.clone() else {
+        return Err(format!(
+            "{instance} runs on this host; only servers on nodes can move"
+        ));
+    };
     if to == LOCAL_NODE {
         return Err(format!(
-            "service_groups.{group_name} runs its instances on nodes, not on this host; choose one of: {}",
+            "{instance} runs on nodes, not on this host; choose one of: {}",
             names()
         ));
     }
@@ -152,20 +143,34 @@ pub(crate) fn check(
     if to == from {
         return Err(format!("{instance} already runs on node {to}"));
     }
-    let group = config
-        .service_groups
-        .get(group_name)
-        .ok_or_else(|| format!("unknown service group {group_name:?}"))?;
-    if !group
-        .nodes
-        .as_ref()
-        .is_some_and(|selector| selector.matches(to, node))
-    {
-        return Err(format!(
-            "node {to} does not match service_groups.{group_name}.nodes; add the node or its labels there first"
-        ));
+    // What a service instance needs on top: a persistent folder, a node its
+    // group may use and room in that node's memory.
+    let mut memory = None;
+    if let Some(registration) = registration {
+        let group_name = &registration.group;
+        if registration.storage != InstanceStorage::Persistent {
+            return Err(format!(
+                "{instance} is {}: its folder is rebuilt from the template anyway, so remove it and let service group {group_name} create a new instance instead",
+                registration.storage.as_str()
+            ));
+        }
+        let group = config
+            .service_groups
+            .get(group_name)
+            .ok_or_else(|| format!("unknown service group {group_name:?}"))?;
+        if !group
+            .nodes
+            .as_ref()
+            .is_some_and(|selector| selector.matches(to, node))
+        {
+            return Err(format!(
+                "node {to} does not match service_groups.{group_name}.nodes; add the node or its labels there first"
+            ));
+        }
+        memory = Some(group.memory_mb.unwrap_or(DEFAULT_INSTANCE_MEMORY_MB));
+    } else {
+        check_named_port(snapshot, instance, to)?;
     }
-    let memory = group.memory_mb.unwrap_or(DEFAULT_INSTANCE_MEMORY_MB);
     let (instances, allocated) = rift::node::usage(config)
         .get(to)
         .copied()
@@ -176,7 +181,7 @@ pub(crate) fn check(
             node.max_instances
         ));
     }
-    if let Some(total) = node.memory_mb
+    if let (Some(total), Some(memory)) = (node.memory_mb, memory)
         && total.saturating_sub(allocated) < memory
     {
         return Err(format!(
@@ -194,19 +199,14 @@ pub(crate) fn check(
             node.min_free_disk_mb
         ));
     }
-    if let Some(available) = host
-        .memory_available_mb
-        .filter(|&available| available < memory as u64)
+    if let (Some(available), Some(memory)) = (host.memory_available_mb, memory)
+        && available < memory as u64
     {
         return Err(format!(
             "node {to} has {available} MiB of available memory, but {instance} needs {memory} MiB"
         ));
     }
-    let directory = config
-        .managed_servers
-        .get(instance)
-        .map(|server| server.directory.clone())
-        .ok_or_else(|| format!("{instance} has no managed server"))?;
+    let directory = server.directory.clone();
     let schedule = snapshot.control.node(to);
     if !schedule.accepts_instances() {
         return Err(format!(
@@ -216,10 +216,14 @@ pub(crate) fn check(
     }
     let lacking = snapshot
         .nodes
-        .lacking(to, &rift::node::server_requirements(&group.server));
+        .lacking(to, &rift::node::server_requirements(server));
     if !lacking.is_empty() {
+        let definition = match registration {
+            Some(registration) => format!("service_groups.{}", registration.group),
+            None => format!("managed_servers.{instance}"),
+        };
         return Err(format!(
-            "node {to} runs an agent that cannot apply {} for service_groups.{group_name}; upgrade rift on that node to {}",
+            "node {to} runs an agent that cannot apply {} for {definition}; upgrade rift on that node to {}",
             lacking.join(", "),
             env!("CARGO_PKG_VERSION")
         ));
@@ -251,7 +255,53 @@ pub(crate) fn check(
             directory.display()
         ));
     }
-    Ok(Checked { from, directory })
+    Ok(Checked {
+        from,
+        directory,
+        named: registration.is_none(),
+    })
+}
+
+/// A named server keeps its backend port on the new node, since its own
+/// files may name it; that port must be free there. Its move is remembered
+/// in the instance database, so it also needs one.
+fn check_named_port(snapshot: &Snapshot, name: &str, to: &str) -> Result<(), String> {
+    let config = &snapshot.config;
+    let Some(store) = &snapshot.instance_store else {
+        return Err(format!(
+            "managed_servers.{name}: moving a named server needs the instance database, which Rift opens when it runs from a configuration file"
+        ));
+    };
+    let port_of = |name: &str| {
+        config
+            .backends
+            .get(name)?
+            .address()
+            .rsplit_once(':')?
+            .1
+            .parse::<u16>()
+            .ok()
+    };
+    let port =
+        port_of(name).ok_or_else(|| format!("managed_servers.{name}: backend has no port"))?;
+    if let Some((other, _)) = config.managed_servers.iter().find(|(other, server)| {
+        other.as_str() != name
+            && server.node.as_deref() == Some(to)
+            && port_of(other.as_str()) == Some(port)
+    }) {
+        return Err(format!(
+            "port {port} of {name} is already used on node {to} by {other}; a named server keeps its port when it moves"
+        ));
+    }
+    let reserved = store
+        .reserved_ports_on(Some(to))
+        .map_err(|error| error.to_string())?;
+    if reserved.contains(&port) {
+        return Err(format!(
+            "port {port} of {name} is reserved on node {to} by an instance being created or removed; try again later"
+        ));
+    }
+    Ok(())
 }
 
 /// Run a whole move; see the module documentation.

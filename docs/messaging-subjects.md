@@ -185,7 +185,7 @@ like their other host calls.
 | `rift.events.control` | Command name and success, excluding status/player details |
 | `rift.events.reload` | The active revision after a successful reload |
 | `rift.events.players` | Players as they join, switch servers and quit |
-| `rift.events.instances` | The creation, removal or move result, with `"event":"created"`, `"removed"` or `"moved"`, after each committed instance change, including automatic scaling |
+| `rift.events.instances` | The creation, removal or move result, with `"event":"created"`, `"removed"` or `"moved"`, after each committed instance change, including automatic scaling; a named server's move has `group` and `storage` set to `null` |
 | `rift.events.permissions` | Every committed [permission](permissions.md) change, the same JSON as `rift.perms.update` |
 | `rift.events.plugins` | Persistent plugins starting, failing, restarting and stopping, and operator restarts, as described in [plugins](plugin-operations.md) |
 | `rift.events.servers` | Changes to what backends report about themselves (see [server state](#server-state)) |
