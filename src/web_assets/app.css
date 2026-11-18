@@ -331,3 +331,6 @@ tbody tr:hover td.diff-cell{background:var(--well)}
 @media(prefers-reduced-transparency:reduce){.toolbar,.status-bar{background:var(--bg);-webkit-backdrop-filter:none;backdrop-filter:none}}
 @media(prefers-reduced-motion:no-preference){.button,.icon-button,.nav a{transition:background-color .12s ease}.sidebar{transition:transform .25s cubic-bezier(.3,0,0,1),visibility .25s}}
 @media(forced-colors:active){.indicator,.health:before,td.state:before{forced-color-adjust:none}.nav a[aria-current=page]{outline:2px solid CanvasText}}
+.move-intro{margin:0;padding:0 var(--pad) 12px}
+.move-progress{display:block;margin-top:6px;color:var(--secondary);font-size:.75rem;white-space:normal}
+.move-progress progress{display:block;width:100%;min-width:140px;height:6px;margin-bottom:4px;accent-color:var(--accent)}

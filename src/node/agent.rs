@@ -872,12 +872,15 @@ impl Agent {
         // Steps that create, rename or delete whole directories are
         // serialized with prepare, remove and reconcile.
         let _storage = match receive.step {
-            ReceiveStep::Begin | ReceiveStep::Commit | ReceiveStep::Abort => {
+            ReceiveStep::Begin | ReceiveStep::Resume | ReceiveStep::Commit | ReceiveStep::Abort => {
                 Some(self.storage.lock().await)
             }
             _ => None,
         };
-        if matches!(receive.step, ReceiveStep::Begin | ReceiveStep::Commit) {
+        if matches!(
+            receive.step,
+            ReceiveStep::Begin | ReceiveStep::Resume | ReceiveStep::Commit
+        ) {
             self.check_stopped(&receive.server).await?;
         }
         tokio::task::spawn_blocking(move || {

@@ -434,6 +434,8 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
                 "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
                 "moving": server.moving,
+                // Phase and progress while `rift admin move` runs.
+                "move": crate::moving::describe(&server.name),
                 // Set while `rift admin move` overrides the configuration.
                 "configured_node": config
                     .moved_servers
@@ -846,10 +848,12 @@ pub(crate) async fn execute(
                 .map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        [command, rest @ ..] if command == "move" => {
-            let request = crate::moving::Request::parse(rest)?;
-            crate::moving::run(snapshot, commands, request).await
-        }
+        [command, rest @ ..] if command == "move" => match crate::moving::Command::parse(rest)? {
+            crate::moving::Command::Move(request) => {
+                crate::moving::run(snapshot, crate::moving::Committer::Admin(commands), request).await
+            }
+            crate::moving::Command::Cancel(instance) => crate::moving::cancel(&instance),
+        },
         [command, instance] if command == "backup" => crate::backups::backup_now(snapshot, instance).await,
         [command] if command == "backups" => crate::backups::list(snapshot, None).await,
         [command, action, instance, which] if command == "backups" && action == "forget" => {
@@ -924,7 +928,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <server> <node> [--no-copy] [--keep-source] | backup <instance> | backups [instance] | backups forget <instance> <snapshot>|all | restore <instance> [snapshot] [--node <node>] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <server> <node> [--no-copy] [--keep-source] | move <server> --cancel | backup <instance> | backups [instance] | backups forget <instance> <snapshot>|all | restore <instance> [snapshot] [--node <node>] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -1040,7 +1044,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <server> <node> [--no-copy] [--keep-source]|backup <instance>|backups [instance]|backups forget <instance> <snapshot>|all|restore <instance> [snapshot] [--node <node>]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <server> <node> [--no-copy] [--keep-source]|move <server> --cancel|backup <instance>|backups [instance]|backups forget <instance> <snapshot>|all|restore <instance> [snapshot] [--node <node>]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {

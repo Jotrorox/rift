@@ -1102,12 +1102,31 @@ async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() 
     fs::write(source.join("world/level.dat"), b"level").unwrap();
     fs::write(source.join("server.properties"), b"server-port=30000\n").unwrap();
     fs::write(source.join("blank.txt"), b"").unwrap();
-    let copied = transfer::copy(&fixture.nodes, "lobby-1", "node1", "node2", relative)
-        .await
-        .unwrap();
+    let progress = transfer::Progress::default();
+    let copied = transfer::copy(
+        &fixture.nodes,
+        "lobby-1",
+        "node1",
+        "node2",
+        relative,
+        &progress,
+    )
+    .await
+    .unwrap();
     assert_eq!(copied.files, 4);
     assert_eq!(copied.folders, 4);
-    assert_eq!(copied.bytes, region.len() as u64 + 5 + 18);
+    let bytes = region.len() as u64 + 5 + 18;
+    assert_eq!(copied.bytes, bytes);
+    assert_eq!(copied.reused_files, 0);
+    assert_eq!(
+        copied.total,
+        Some(protocol::TreeTotal {
+            files: 4,
+            folders: 4,
+            bytes,
+        })
+    );
+    assert_eq!(*progress.lock().unwrap(), copied);
     // Staged next to the destination until the controller commits.
     assert!(!target.exists());
     assert!(
@@ -1116,6 +1135,26 @@ async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() 
             .join("agent2/local/services/.rift-move-lobby-1")
             .is_dir()
     );
+    // Copying again, as after an interruption, sends only what changed.
+    fs::write(source.join("world/level.dat"), b"LEVEL").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(source.join("world/level.dat"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000))
+        .unwrap();
+    let again = transfer::copy(
+        &fixture.nodes,
+        "lobby-1",
+        "node1",
+        "node2",
+        relative,
+        &transfer::Progress::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((again.files, again.bytes), (1, 5));
+    assert_eq!((again.reused_files, again.reused_bytes), (3, bytes - 5));
     transfer::commit(&fixture.nodes, "lobby-1", "node2", relative)
         .await
         .unwrap();
@@ -1123,7 +1162,7 @@ async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() 
         fs::read(target.join("world/region/r.0.0.mca")).unwrap(),
         region
     );
-    assert_eq!(fs::read(target.join("world/level.dat")).unwrap(), b"level");
+    assert_eq!(fs::read(target.join("world/level.dat")).unwrap(), b"LEVEL");
     assert_eq!(fs::read(target.join("blank.txt")).unwrap(), b"");
     assert!(target.join("plugins/empty").is_dir());
     assert!(target.join(protocol::MOVE_MARKER).exists());
@@ -1133,10 +1172,22 @@ async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() 
     assert!(!target.join(protocol::MOVE_MARKER).exists());
     // A recorded folder is never replaced by another copy, and a failed
     // copy leaves no staging folder and the source untouched.
-    let error = transfer::copy(&fixture.nodes, "lobby-1", "node1", "node2", relative)
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+    let error = transfer::copy(
+        &fixture.nodes,
+        "lobby-1",
+        "node1",
+        "node2",
+        relative,
+        &transfer::Progress::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.error.kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "{error}"
+    );
+    assert!(!error.kept);
     assert!(
         !fixture
             .root

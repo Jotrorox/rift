@@ -9,11 +9,22 @@
 //! target checks every file against the SHA-256 of the bytes read on the
 //! source. The staging folder becomes the server directory only when the
 //! controller commits the move, and the source is only deleted after that.
+//!
+//! An interrupted copy is resumed: with [`feature::MOVE_RESUME`] on the
+//! target, a failed copy keeps its staging folder, and the next move of the
+//! same server into that node starts with [`ReceiveStep::Resume`]. The agent
+//! sets aside what the earlier attempt left as a [`resumable`] folder, and
+//! [`ReceiveStep::Have`] takes over every file that arrived whole, which the
+//! agent recognises by its size and the modification time of the source
+//! file. Everything else is sent again; what the earlier attempt left that
+//! the source no longer has is deleted on commit.
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -23,6 +34,7 @@ use super::{
     Nodes,
     protocol::{
         self, Command, FILE_PART, FileEnd, MOVE_MARKER, Receive, ReceiveStep, Tree, TreeEntry,
+        TreeTotal, feature,
     },
 };
 
@@ -32,12 +44,55 @@ const WAIT: Duration = Duration::from_secs(60);
 const PAGE_BYTES: usize = 256 * 1024;
 const PAGE_ENTRIES: usize = 2048;
 
-/// What [`copy`] transferred.
+/// What [`copy`] transferred, also while it runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Copied {
+    /// Files sent, and their bytes; `bytes` also counts the file being sent.
     pub files: u64,
     pub folders: u64,
     pub bytes: u64,
+    /// Files that an interrupted earlier attempt already put on the target.
+    pub reused_files: u64,
+    pub reused_bytes: u64,
+    /// The whole folder, when the source agent reports it
+    /// ([`feature::MOVE_RESUME`]).
+    pub total: Option<TreeTotal>,
+}
+
+impl Copied {
+    /// Whether anything reached the target that a later attempt can reuse.
+    pub fn landed(&self) -> bool {
+        self.files > 0 || self.reused_files > 0
+    }
+}
+
+/// [`copy`] updates this while it runs, for progress reports.
+pub type Progress = Mutex<Copied>;
+
+fn update(progress: &Progress, change: impl FnOnce(&mut Copied)) -> Copied {
+    let mut copied = progress.lock().unwrap_or_else(|error| error.into_inner());
+    change(&mut *copied);
+    *copied
+}
+
+/// A failed [`copy`].
+#[derive(Debug)]
+pub struct CopyError {
+    pub error: io::Error,
+    /// The staging folder stays on the target, so moving the same server
+    /// into that node again resumes the copy.
+    pub kept: bool,
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+/// Whether a copy into `node` can be resumed after an interruption.
+pub fn resumes(nodes: &Nodes, node: &str) -> bool {
+    nodes.supports(node, feature::MOVE_RESUME)
 }
 
 /// The staging folder of a move into `directory`, next to it below the
@@ -50,20 +105,29 @@ pub fn staging(server: &str, directory: &Path) -> PathBuf {
 }
 
 /// Copy `directory` of the stopped `server` from node `from` into a staging
-/// folder on node `to`. [`commit`] puts it in place; on failure the staging
-/// folder is deleted again.
+/// folder on node `to`, resuming what an interrupted earlier copy left there
+/// when `to` [`resumes`]. [`commit`] puts it in place. On failure the
+/// staging folder is kept for the next attempt if `to` resumes and anything
+/// arrived, and deleted otherwise. `progress` follows the copy as it runs.
 pub async fn copy(
     nodes: &Nodes,
     server: &str,
     from: &str,
     to: &str,
     directory: &Path,
-) -> io::Result<Copied> {
-    let result = copy_tree(nodes, server, from, to, directory).await;
-    if result.is_err() {
-        abort(nodes, server, to, directory).await;
+    progress: &Progress,
+) -> Result<Copied, CopyError> {
+    let resume = resumes(nodes, to);
+    match copy_tree(nodes, server, from, to, directory, resume, progress).await {
+        Ok(copied) => Ok(copied),
+        Err(error) => {
+            let kept = resume && update(progress, |_| {}).landed();
+            if !kept {
+                abort(nodes, server, to, directory).await;
+            }
+            Err(CopyError { error, kept })
+        }
     }
-    result
 }
 
 async fn copy_tree(
@@ -72,9 +136,15 @@ async fn copy_tree(
     from: &str,
     to: &str,
     directory: &Path,
+    resume: bool,
+    progress: &Progress,
 ) -> io::Result<Copied> {
-    receive(nodes, to, server, directory, ReceiveStep::Begin).await?;
-    let mut copied = Copied::default();
+    let start = if resume {
+        ReceiveStep::Resume
+    } else {
+        ReceiveStep::Begin
+    };
+    receive(nodes, to, server, directory, start).await?;
     let mut offset = 0;
     loop {
         let reply = nodes
@@ -90,19 +160,48 @@ async fn copy_tree(
             .await?;
         let page: Tree = serde_json::from_value(reply)
             .map_err(|error| io::Error::other(format!("invalid tree from node {from}: {error}")))?;
-        for entry in page.entries {
+        if let Some(total) = page.total {
+            update(progress, |copied| copied.total = Some(total));
+        }
+        // The target creates the page's folders and keeps the files that
+        // an earlier attempt already received.
+        let missing = if resume {
+            let entries = page.entries.clone();
+            let reply =
+                receive(nodes, to, server, directory, ReceiveStep::Have { entries }).await?;
+            let missing = reply["missing"]
+                .as_array()
+                .ok_or_else(|| io::Error::other(format!("node {to} sent an invalid have reply")))?
+                .iter()
+                .map(|index| index.as_u64().map(|index| index as usize))
+                .collect::<Option<BTreeSet<_>>>()
+                .ok_or_else(|| io::Error::other(format!("node {to} sent an invalid have reply")))?;
+            Some(missing)
+        } else {
+            None
+        };
+        for (index, entry) in page.entries.into_iter().enumerate() {
             if entry.folder {
-                let path = entry.path;
-                receive(nodes, to, server, directory, ReceiveStep::Folder { path }).await?;
-                copied.folders += 1;
+                if missing.is_none() {
+                    let path = entry.path;
+                    receive(nodes, to, server, directory, ReceiveStep::Folder { path }).await?;
+                }
+                update(progress, |copied| copied.folders += 1);
+            } else if missing
+                .as_ref()
+                .is_some_and(|missing| !missing.contains(&index))
+            {
+                update(progress, |copied| {
+                    copied.reused_files += 1;
+                    copied.reused_bytes += entry.size;
+                });
             } else {
-                copy_file(nodes, server, (from, to), directory, &entry).await?;
-                copied.files += 1;
-                copied.bytes += entry.size;
+                copy_file(nodes, server, (from, to), directory, &entry, progress).await?;
+                update(progress, |copied| copied.files += 1);
             }
         }
         match page.next {
-            None => return Ok(copied),
+            None => return Ok(update(progress, |_| {})),
             Some(next) if next > offset => offset = next,
             Some(_) => {
                 return Err(io::Error::other(format!(
@@ -121,6 +220,7 @@ async fn copy_file(
     (from, to): (&str, &str),
     directory: &Path,
     entry: &TreeEntry,
+    progress: &Progress,
 ) -> io::Result<()> {
     let changed = || {
         io::Error::other(format!(
@@ -155,6 +255,7 @@ async fn copy_file(
         let end = (next == entry.size).then(|| FileEnd {
             sha256: hex(&digest.clone().finalize()),
             mode: entry.mode,
+            modified: entry.modified,
         });
         let last = end.is_some();
         let step = ReceiveStep::Chunk {
@@ -165,13 +266,16 @@ async fn copy_file(
         };
         let written = receive(nodes, to, server, directory, step);
         if last {
-            return written.await.map(|_| ());
+            written.await?;
+            update(progress, |copied| copied.bytes += length);
+            return Ok(());
         }
         let (written, following) = tokio::join!(
             written,
             read(nodes, from, server, directory, &entry.path, next)
         );
         written?;
+        update(progress, |copied| copied.bytes += length);
         chunk = Some(following?);
         offset = next;
     }
@@ -259,8 +363,23 @@ pub async fn discard_orphan(nodes: &Nodes, server: &str, to: &str, directory: &P
     }
 }
 
-/// Delete the staging folder on `to`, if any; best effort, since the next
-/// move into that node starts over anyway.
+/// Take back a folder that [`commit`] put in place on `to` but the
+/// controller could not record: kept to resume from when `to` [`resumes`],
+/// deleted otherwise. Best effort, like [`abort`].
+pub async fn set_aside(nodes: &Nodes, server: &str, to: &str, directory: &Path) {
+    if resumes(nodes, to)
+        && receive(nodes, to, server, directory, ReceiveStep::Resume)
+            .await
+            .is_ok()
+    {
+        return;
+    }
+    discard_orphan(nodes, server, to, directory).await;
+}
+
+/// Delete the staging folder on `to`, and what an interrupted copy left
+/// there to resume, if any; best effort, since the next move into that node
+/// starts over anyway.
 pub async fn abort(nodes: &Nodes, server: &str, to: &str, directory: &Path) {
     let _ = receive(nodes, to, server, directory, ReceiveStep::Abort).await;
 }
@@ -272,9 +391,18 @@ pub(crate) fn tree(base: &Path, offset: u64) -> io::Result<Tree> {
         return Err(invalid("the server directory is not a folder"));
     }
     let mut page = Tree::default();
+    let mut total = TreeTotal::default();
     let mut index = 0u64;
     let mut budget = PAGE_BYTES;
     walk(base, "", &mut |entry| {
+        if offset == 0 {
+            if entry.folder {
+                total.folders += 1;
+            } else {
+                total.files += 1;
+                total.bytes += entry.size;
+            }
+        }
         if index >= offset && page.next.is_none() {
             let cost = entry.path.len() + 64;
             if page.entries.len() < PAGE_ENTRIES && cost <= budget {
@@ -288,6 +416,9 @@ pub(crate) fn tree(base: &Path, offset: u64) -> io::Result<Tree> {
         // Later pages stop at their end; the first one validates everything.
         page.next.is_none() || offset == 0
     })?;
+    if offset == 0 {
+        page.total = Some(total);
+    }
     Ok(page)
 }
 
@@ -335,6 +466,7 @@ fn walk(
                 folder: false,
                 size: metadata.len(),
                 mode: mode(&metadata),
+                modified: modified(&metadata),
             };
             if !visit(entry) {
                 return Ok(false);
@@ -385,6 +517,16 @@ fn replaced(server: &str, target: &Path) -> PathBuf {
         .join(format!(".rift-replaced-{server}"))
 }
 
+/// Where [`ReceiveStep::Resume`] sets aside what an interrupted move of
+/// `server` left behind, for [`ReceiveStep::Have`] to take files from.
+/// Deleted on commit, abort and begin.
+pub fn resumable(server: &str, target: &Path) -> PathBuf {
+    target
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join(format!(".rift-resume-{server}"))
+}
+
 /// Agent side of [`Command::Receive`], with `staging` and `target` already
 /// resolved below the agent's root.
 pub(crate) fn apply_step(
@@ -404,6 +546,7 @@ pub(crate) fn apply_step(
             ))
         }
     };
+    let previous = resumable(server, target);
     match step {
         ReceiveStep::Begin => {
             let mut replaced = false;
@@ -426,12 +569,67 @@ pub(crate) fn apply_step(
             if exists(staging)? {
                 fs::remove_dir_all(staging)?;
             }
-            fs::create_dir_all(staging)?;
-            fs::write(
-                staging.join(MOVE_MARKER),
-                json!({"server": server}).to_string(),
-            )?;
+            if exists(&previous)? {
+                fs::remove_dir_all(&previous)?;
+            }
+            create_staging(server, staging)?;
             Ok(json!({"replaced": replaced}))
+        }
+        ReceiveStep::Resume => {
+            let mut replaced = false;
+            if exists(target)? {
+                if moved_server(target).as_deref() != Some(server) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "{} already exists on this node; delete it, or move with --no-copy to use it as the server's folder",
+                            target.display()
+                        ),
+                    ));
+                }
+                // Put in place by a move the controller never recorded: a
+                // whole copy, which the files of this attempt come from.
+                absorb(target, &previous)?;
+                replaced = true;
+            }
+            if exists(staging)? {
+                if moved_server(staging).as_deref() == Some(server) {
+                    absorb(staging, &previous)?;
+                } else {
+                    fs::remove_dir_all(staging)?;
+                }
+            }
+            create_staging(server, staging)?;
+            Ok(json!({"replaced": replaced, "resumed": exists(&previous)?}))
+        }
+        ReceiveStep::Have { entries } => {
+            staged()?;
+            let earlier = exists(&previous)?;
+            let mut missing = Vec::new();
+            for (index, entry) in entries.iter().enumerate() {
+                let path = resolve_received(staging, &entry.path)?;
+                if entry.folder {
+                    fs::create_dir_all(&path)?;
+                    continue;
+                }
+                if received(&path, entry)? {
+                    continue;
+                }
+                // A path that no longer fits the earlier tree, such as a
+                // file below what was a file then, is simply sent again.
+                if earlier
+                    && let Ok(old) = resolve_received(&previous, &entry.path)
+                    && received(&old, entry)?
+                {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::rename(&old, &path)?;
+                    continue;
+                }
+                missing.push(index);
+            }
+            Ok(json!({"missing": missing}))
         }
         ReceiveStep::Folder { path } => {
             staged()?;
@@ -480,12 +678,23 @@ pub(crate) fn apply_step(
                         "{path} arrived damaged: its SHA-256 differs from the source"
                     )));
                 }
+                // Only a whole, verified file gets the source's time, which
+                // is what a resumed move recognises it by.
+                if let Some(modified) = end.modified {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&file_path)?
+                        .set_modified(UNIX_EPOCH + Duration::from_nanos(modified))?;
+                }
                 set_mode(&file_path, end.mode)?;
             }
             Ok(json!({}))
         }
         ReceiveStep::Commit => {
             if !exists(staging)? && moved_server(target).as_deref() == Some(server) {
+                if exists(&previous)? {
+                    fs::remove_dir_all(&previous)?;
+                }
                 return Ok(json!({"committed": true}));
             }
             staged()?;
@@ -514,6 +723,10 @@ pub(crate) fn apply_step(
             if replace && exists(&old)? {
                 fs::remove_dir_all(&old)?;
             }
+            // What an earlier attempt left that the source no longer has.
+            if exists(&previous)? {
+                fs::remove_dir_all(&previous)?;
+            }
             Ok(json!({"committed": true}))
         }
         ReceiveStep::Finish => match fs::remove_file(target.join(MOVE_MARKER)) {
@@ -525,9 +738,64 @@ pub(crate) fn apply_step(
             if exists(staging)? {
                 fs::remove_dir_all(staging)?;
             }
+            if exists(&previous)? {
+                fs::remove_dir_all(&previous)?;
+            }
             Ok(json!({"aborted": true}))
         }
     }
+}
+
+fn create_staging(server: &str, staging: &Path) -> io::Result<()> {
+    fs::create_dir_all(staging)?;
+    fs::write(
+        staging.join(MOVE_MARKER),
+        json!({"server": server}).to_string(),
+    )
+}
+
+/// Move everything below `from` into `into`, replacing what is there, and
+/// delete `from`.
+fn absorb(from: &Path, into: &Path) -> io::Result<()> {
+    if !exists(into)? {
+        return fs::rename(from, into);
+    }
+    if !fs::symlink_metadata(into)?.is_dir() {
+        fs::remove_file(into)?;
+        return fs::rename(from, into);
+    }
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), into.join(entry.file_name()));
+        if fs::symlink_metadata(&source)?.is_dir() {
+            absorb(&source, &target)?;
+        } else {
+            if fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.is_dir()) {
+                fs::remove_dir_all(&target)?;
+            }
+            fs::rename(&source, &target)?;
+        }
+    }
+    fs::remove_dir_all(from)
+}
+
+/// Whether `path` is a file that an earlier attempt received whole from
+/// `entry`: verified files get the source's modification time, so a file
+/// with the same size and time is the same file, unless the source was
+/// changed and its time put back on purpose. Fixes its permission bits,
+/// which a change does not touch the time for.
+fn received(path: &Path, entry: &TreeEntry) -> io::Result<bool> {
+    let Some(time) = entry.modified else {
+        return Ok(false);
+    };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(false);
+    };
+    if !metadata.is_file() || metadata.len() != entry.size || modified(&metadata) != Some(time) {
+        return Ok(false);
+    }
+    set_mode(path, entry.mode)?;
+    Ok(true)
 }
 
 /// The server a not yet recorded move put into `directory`, if any.
@@ -585,6 +853,13 @@ fn hash(path: &Path) -> io::Result<String> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The modification time in nanoseconds since the Unix epoch, if the
+/// filesystem has one.
+fn modified(metadata: &fs::Metadata) -> Option<u64> {
+    let since = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_nanos()).ok()
 }
 
 #[cfg(unix)]
@@ -648,16 +923,47 @@ mod tests {
         fs::canonicalize(&path).unwrap()
     }
 
-    /// The agent-side steps of a move, without the bus.
-    fn relay(source: &Path, staging: &Path, target: &Path) -> io::Result<()> {
-        receive_step("lobby-1", staging, target, &ReceiveStep::Begin)?;
+    /// The agent-side steps of a copy, without the bus, starting with
+    /// `start`; returns the paths of the files sent.
+    fn send(
+        source: &Path,
+        staging: &Path,
+        target: &Path,
+        start: ReceiveStep,
+    ) -> io::Result<Vec<String>> {
+        let resume = start == ReceiveStep::Resume;
+        receive_step("lobby-1", staging, target, &start)?;
+        let mut sent = Vec::new();
         let mut offset = 0;
         loop {
             let page = tree(source, offset)?;
-            for entry in page.entries {
+            let missing: Option<Vec<u64>> = if resume {
+                let step = ReceiveStep::Have {
+                    entries: page.entries.clone(),
+                };
+                let reply = receive_step("lobby-1", staging, target, &step)?;
+                let missing = reply["missing"].as_array().unwrap();
+                Some(
+                    missing
+                        .iter()
+                        .map(|index| index.as_u64().unwrap())
+                        .collect(),
+                )
+            } else {
+                None
+            };
+            for (index, entry) in page.entries.into_iter().enumerate() {
                 if entry.folder {
-                    let step = ReceiveStep::Folder { path: entry.path };
-                    receive_step("lobby-1", staging, target, &step)?;
+                    if !resume {
+                        let step = ReceiveStep::Folder { path: entry.path };
+                        receive_step("lobby-1", staging, target, &step)?;
+                    }
+                    continue;
+                }
+                if missing
+                    .as_ref()
+                    .is_some_and(|missing| !missing.contains(&(index as u64)))
+                {
                     continue;
                 }
                 let mut digest = Sha256::new();
@@ -671,6 +977,7 @@ mod tests {
                     let end = (next == entry.size).then(|| FileEnd {
                         sha256: hex(&digest.clone().finalize()),
                         mode: entry.mode,
+                        modified: entry.modified,
                     });
                     let last = end.is_some();
                     let step = ReceiveStep::Chunk {
@@ -685,14 +992,119 @@ mod tests {
                     }
                     position = next;
                 }
+                sent.push(entry.path);
             }
             match page.next {
                 Some(next) => offset = next,
                 None => break,
             }
         }
+        Ok(sent)
+    }
+
+    /// A whole copy from scratch, committed.
+    fn relay(source: &Path, staging: &Path, target: &Path) -> io::Result<()> {
+        send(source, staging, target, ReceiveStep::Begin)?;
         receive_step("lobby-1", staging, target, &ReceiveStep::Commit)?;
         Ok(())
+    }
+
+    fn set_time(path: &Path, seconds: u64) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_resumed_copy_reuses_whole_files_and_drops_what_the_source_lost() {
+        let root = scratch("resume");
+        let source = root.join("a/lobby-1");
+        fs::create_dir_all(source.join("world/region")).unwrap();
+        let big: Vec<u8> = (0..FILE_PART * 2 + 5).map(|i| (i % 249) as u8).collect();
+        fs::write(source.join("world/region/big.mca"), &big).unwrap();
+        fs::write(source.join("world/level.dat"), b"level").unwrap();
+        fs::write(source.join("world/changed.dat"), b"old!").unwrap();
+        fs::write(source.join("gone.txt"), b"gone").unwrap();
+        set_time(&source.join("world/changed.dat"), 1_000);
+        let target = root.join("b/lobby-1");
+        let staging = root.join("b/.rift-move-lobby-1");
+        let previous = resumable("lobby-1", &target);
+        // The first attempt copies everything and is cut off before the
+        // commit, half way through rewriting the big file.
+        send(&source, &staging, &target, ReceiveStep::Begin).unwrap();
+        let interrupted = fs::OpenOptions::new()
+            .write(true)
+            .open(staging.join("world/region/big.mca"))
+            .unwrap();
+        interrupted.set_len(FILE_PART as u64).unwrap();
+        drop(interrupted);
+        // Meanwhile the server ran: one file changed without changing size,
+        // one was deleted and one added.
+        fs::write(source.join("world/changed.dat"), b"new!").unwrap();
+        set_time(&source.join("world/changed.dat"), 2_000);
+        fs::remove_file(source.join("gone.txt")).unwrap();
+        fs::write(source.join("added.txt"), b"added").unwrap();
+        let page = tree(&source, 0).unwrap();
+        assert_eq!(
+            page.total,
+            Some(TreeTotal {
+                files: 4,
+                folders: 2,
+                bytes: big.len() as u64 + 5 + 4 + 5,
+            })
+        );
+        assert!(tree(&source, 1).unwrap().total.is_none());
+        let resumed = send(&source, &staging, &target, ReceiveStep::Resume).unwrap();
+        assert_eq!(
+            resumed,
+            ["added.txt", "world/changed.dat", "world/region/big.mca"]
+        );
+        assert!(previous.exists());
+        receive_step("lobby-1", &staging, &target, &ReceiveStep::Commit).unwrap();
+        assert!(!previous.exists() && !staging.exists());
+        assert_eq!(fs::read(target.join("world/region/big.mca")).unwrap(), big);
+        assert_eq!(fs::read(target.join("world/changed.dat")).unwrap(), b"new!");
+        assert_eq!(fs::read(target.join("world/level.dat")).unwrap(), b"level");
+        assert_eq!(fs::read(target.join("added.txt")).unwrap(), b"added");
+        assert!(!target.join("gone.txt").exists());
+        // Received files carry the source's time.
+        let time = |path: &Path| modified(&fs::metadata(path).unwrap());
+        assert_eq!(
+            time(&target.join("world/changed.dat")),
+            time(&source.join("world/changed.dat"))
+        );
+        // A copy that was put in place but never recorded is whole: resuming
+        // takes it back and sends nothing.
+        let begin = receive_step("lobby-1", &staging, &target, &ReceiveStep::Resume).unwrap();
+        assert_eq!(begin["replaced"], true);
+        assert_eq!(begin["resumed"], true);
+        assert!(!target.exists());
+        assert!(
+            send(&source, &staging, &target, ReceiveStep::Resume)
+                .unwrap()
+                .is_empty()
+        );
+        receive_step("lobby-1", &staging, &target, &ReceiveStep::Commit).unwrap();
+        assert_eq!(fs::read(target.join("world/region/big.mca")).unwrap(), big);
+        // Starting over and aborting delete what an attempt left.
+        receive_step("lobby-1", &staging, &target, &ReceiveStep::Finish).unwrap();
+        fs::create_dir_all(&previous).unwrap();
+        receive_step("lobby-1", &staging, &target, &ReceiveStep::Abort).unwrap();
+        assert!(!previous.exists());
+        // Without a recorded time nothing is reused, and a folder that is not
+        // a move of this server is never taken over.
+        let error = receive_step("lobby-1", &staging, &target, &ReceiveStep::Resume).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        let entry = TreeEntry {
+            path: "world/level.dat".into(),
+            size: 5,
+            ..TreeEntry::default()
+        };
+        assert!(!received(&target.join("world/level.dat"), &entry).unwrap());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -808,6 +1220,7 @@ mod tests {
                 end: sha256.map(|sha256| FileEnd {
                     sha256: sha256.into(),
                     mode: 0,
+                    modified: None,
                 }),
             };
         // Nothing is written before a move begins.
