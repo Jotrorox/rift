@@ -437,7 +437,7 @@ pub async fn agents(config: &Config, report: &mut Report) {
             ));
         } else if version != own {
             report.warnings.push(format!(
-                "node {name}: agent {version} differs from this rift {own}; upgrade agents together with the controller"
+                "node {name}: agent {version} differs from this rift {own}; finish the upgrade so both run the same release, controller first"
             ));
         }
     }

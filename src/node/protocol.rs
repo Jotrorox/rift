@@ -80,6 +80,9 @@ pub mod feature {
     /// entries and file ends, and `total` on the first tree page: a move
     /// that was interrupted reuses the files it already copied.
     pub const MOVE_RESUME: &str = "move_resume";
+    /// Not a [`Start`] field: [`Command::Warm`](super::Command::Warm), for
+    /// `rift admin warm`.
+    pub const WARM: &str = "warm";
 }
 
 /// Every feature this build's agent applies and its controller may need.
@@ -93,6 +96,7 @@ pub const FEATURES: &[&str] = &[
     feature::FILE_PARTS,
     feature::BACKUP,
     feature::MOVE_RESUME,
+    feature::WARM,
 ];
 
 /// A [`Start`] field that an agent without `feature` would silently drop.
@@ -236,8 +240,8 @@ pub struct Backup {
     pub save_commands: bool,
 }
 
-/// The templates an agent should cache now. Agents from before this command
-/// refuse it as an unknown `op`.
+/// The templates an agent should cache now. Only agents that advertise
+/// [`feature::WARM`] get it; older ones would refuse it as an unknown `op`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warm {
     pub templates: Vec<TemplateAssets>,
