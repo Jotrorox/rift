@@ -1340,4 +1340,23 @@ rift.config.service_groups.hub={template='hub',storage='disposable',port_range={
     assert!(error.contains("(0 cached)"), "{error}");
     assert!(error.contains("a: node a is unreachable"), "{error}");
     assert!(error.contains("b: node b is unreachable"), "{error}");
+    // An online agent without the `warm` feature is told to upgrade before
+    // anything is sent to it, whatever version it reports.
+    let state = serde_json::to_vec(&rift::node::protocol::NodeState {
+        agent: "a".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        features: Vec::new(),
+        revision: 1,
+        servers: Vec::new(),
+        exits: Vec::new(),
+        resources: None,
+    })
+    .unwrap();
+    snapshot.nodes.record("a", &state).unwrap();
+    let error = warm_templates(&snapshot, None).await.unwrap_err();
+    assert!(
+        error.contains("a: the agent on a cannot warm templates; upgrade rift on that node"),
+        "{error}"
+    );
+    assert!(error.contains("b: node b is unreachable"), "{error}");
 }

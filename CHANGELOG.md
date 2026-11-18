@@ -139,7 +139,8 @@ and are listed under **SDKs**.
 - `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
   have every node download its groups' templates and server software ahead of
   time, so the first instance on a new or freshly synced node starts without
-  waiting. Agents need the same version as the controller for it.
+  waiting. Agents need the new `warm` feature; the controller tells older
+  agents to upgrade instead of sending the command.
 
 ### Integration and operations
 

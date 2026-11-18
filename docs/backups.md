@@ -154,4 +154,4 @@ leaves the old folder for you to delete.
 Backups and restores need agents with the `backup` feature; Rift logs a
 warning once per node whose agent lacks it and backs up nothing there. A
 restore onto another node needs the `move` feature on that node instead.
-Upgrade the agents together with the controller.
+Upgrade the controller first, then the agents ([upgrade nodes](upgrading.md#upgrade-nodes)).

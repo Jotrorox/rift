@@ -419,8 +419,8 @@ match it, including their server software, exactly as a `prepare` would.
 - The command fails if any node is unreachable or any template fails, after
   the others have finished. The message names each failure; run it again once
   the node is back.
-- Agents older than the controller do not know the command and report that
-  they need an upgrade.
+- Warming needs the `warm` feature. A node whose agent lacks it is reported
+  as needing an upgrade and nothing is sent to it.
 
 Warming does not touch existing instances: like a template edit, it only
 changes what the next new instance copies.
@@ -674,9 +674,12 @@ principal.
 - `env` and `inherit_env` travel with the start command and apply on the node
   as they would locally, against the agent's environment.
 
-**Agents older than the controller**
+## Agents older than the controller
 
-Upgrade agents together with the controller. An agent ignores start settings
+Upgrade the controller first, then the agents one node at a time
+([upgrade nodes](upgrading.md#upgrade-nodes)). The
+[version skew policy](stability.md#controller-and-node-agents) lists the
+supported combinations. An agent ignores start settings
 it does not know, so each agent reports the settings it applies, and the
 controller checks them before it starts a server there:
 
@@ -691,7 +694,9 @@ both agents (only the new one with `--no-copy`); an older agent refuses the
 move before the instance is stopped. Resuming an
 [interrupted move](#interrupted-and-cancelled-moves) needs `move_resume` on
 both; without it a move starts over. [Backups](backups.md) and restores in
-place need the `backup` feature.
+place need the `backup` feature,
+[warming the caches](#warm-the-node-caches) needs `warm`, and uploading files
+over 512 KiB needs `file_parts`.
 
 A refused server shows the reason as its last error, and service groups place
 new instances only on nodes whose agent can run them. Agents from 0.1.0 and

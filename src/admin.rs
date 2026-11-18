@@ -661,6 +661,22 @@ pub(crate) async fn warm_templates(
                 }
             }
         }
+        // An agent without the feature would refuse the command; say why
+        // instead. A node that never connected fails as unreachable below.
+        let warm_feature = [rift::node::protocol::Requirement {
+            feature: rift::node::protocol::feature::WARM,
+            mandatory: true,
+        }];
+        if !command.is_empty() && !snapshot.nodes.lacking(&node, &warm_feature).is_empty() {
+            let error = format!(
+                "the agent on {node} cannot warm templates; upgrade rift on that node to {}",
+                env!("CARGO_PKG_VERSION")
+            );
+            work.spawn(async move {
+                json!({"node": node, "ok": false, "error": error, "templates": results})
+            });
+            continue;
+        }
         let nodes = snapshot.nodes.clone();
         work.spawn(async move {
             if !command.is_empty() {
@@ -670,14 +686,7 @@ pub(crate) async fn warm_templates(
                 match nodes.request(&node, &warm, DOWNLOAD_DEADLINE).await {
                     Ok(reply) => results.extend(reply["templates"].as_array().cloned().unwrap_or_default()),
                     Err(error) => {
-                        let error = if error.kind() == io::ErrorKind::InvalidInput
-                            && error.to_string().contains("unknown variant")
-                        {
-                            format!("the agent on {node} is older than the controller; upgrade it")
-                        } else {
-                            error.to_string()
-                        };
-                        return json!({"node": node, "ok": false, "error": error, "templates": results});
+                        return json!({"node": node, "ok": false, "error": error.to_string(), "templates": results});
                     }
                 }
             }
