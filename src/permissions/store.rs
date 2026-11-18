@@ -2,7 +2,7 @@
 //! effects of one change inside the authority's transaction, each recorded as
 //! an [`Op`] so the change log can replay it exactly.
 use super::PermError;
-use crate::database::{Conn, OptionalExtension, Row, params};
+use crate::database::{Conn, Dialect, OptionalExtension, Row, params};
 use rift_permissions::{
     Change, ContextSet, DEFAULT_GROUP, Group, Limits, Node, NodeKind, SubjectRef, Track, User,
     Uuid,
@@ -107,6 +107,63 @@ CREATE TABLE perm_change (
 INSERT INTO perm_meta (key, value) VALUES ('revision', '0');
 "#;
 
+/// [`SCHEMA`] in MariaDB: `BIGINT` integers, bytewise `utf8mb4_nopad_bin`
+/// text, `VARCHAR` where a key covers the column (MariaDB cannot index
+/// `TEXT` whole) and a hashed unique key over node contexts, which can be
+/// longer than an index allows. MariaDB has no partial or expression
+/// indexes, so the name index covers `(kind, last_name)`.
+pub(super) const MARIADB_SCHEMA: &str = r#"
+CREATE TABLE perm_subject (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  kind BIGINT NOT NULL,
+  "key" VARCHAR(255) NOT NULL,
+  weight BIGINT NOT NULL DEFAULT 0,
+  display_name TEXT,
+  last_name VARCHAR(255),
+  primary_group TEXT,
+  created_at BIGINT NOT NULL,
+  UNIQUE (kind, "key"),
+  INDEX perm_subject_name (kind, last_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE perm_node (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  subject_id BIGINT NOT NULL,
+  kind BIGINT NOT NULL,
+  "key" VARCHAR(512) NOT NULL,
+  value TEXT NOT NULL,
+  priority BIGINT,
+  contexts TEXT NOT NULL DEFAULT '',
+  expires_at BIGINT,
+  source TEXT NOT NULL DEFAULT 'store',
+  UNIQUE perm_node_entry (subject_id, kind, "key", contexts) USING HASH,
+  INDEX perm_node_group (kind, "key"),
+  INDEX perm_node_expiry (expires_at),
+  FOREIGN KEY (subject_id) REFERENCES perm_subject (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE perm_track (
+  name VARCHAR(255) PRIMARY KEY,
+  "groups" LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE perm_registered (
+  node VARCHAR(512) PRIMARY KEY,
+  description TEXT,
+  dflt TEXT NOT NULL,
+  owner TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE perm_meta (
+  "key" VARCHAR(255) PRIMARY KEY,
+  value TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE perm_change (
+  revision BIGINT PRIMARY KEY,
+  at BIGINT NOT NULL,
+  actor TEXT NOT NULL,
+  ops LONGTEXT NOT NULL,
+  reason TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+INSERT INTO perm_meta ("key", value) VALUES ('revision', '0');
+"#;
+
 const USER: i64 = 0;
 const GROUP: i64 = 1;
 
@@ -167,7 +224,7 @@ pub(super) fn revision(connection: &Conn) -> Result<u64, PermError> {
 }
 
 /// Append a change row; its revision is one past the last, as SQLite's
-/// rowid would be, on both backends.
+/// rowid would be, on every backend.
 pub(super) fn record(
     connection: &Conn,
     at: u64,
@@ -178,7 +235,7 @@ pub(super) fn record(
     let json = serde_json::to_string(ops).map_err(|e| PermError::Storage(e.to_string()))?;
     let revision: u64 = connection.query_row(
         "INSERT INTO perm_change (revision, at, actor, ops, reason)
-         VALUES ((SELECT COALESCE(MAX(revision), 0) + 1 FROM perm_change), ?1, ?2, ?3, ?4)
+         SELECT COALESCE(MAX(revision), 0) + 1, ?1, ?2, ?3, ?4 FROM perm_change
          RETURNING revision",
         params![sql_time(at), actor, json, reason],
         |r| r.get(0),
@@ -370,12 +427,20 @@ pub(super) fn set_last_name(
     name: &str,
     now: u64,
 ) -> Result<(), PermError> {
-    connection.execute(
-        "INSERT INTO perm_subject (kind, key, last_name, created_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(kind, key) DO UPDATE SET last_name = excluded.last_name
-         WHERE perm_subject.last_name IS DISTINCT FROM excluded.last_name",
-        params![USER, uuid.to_string(), name, sql_time(now)],
-    )?;
+    let sql = match connection.dialect() {
+        // No WHERE on MariaDB's upsert; it writes nothing for an unchanged
+        // name anyway.
+        Dialect::Mariadb => {
+            "INSERT INTO perm_subject (kind, key, last_name, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, key) DO UPDATE SET last_name = excluded.last_name"
+        }
+        Dialect::Sqlite | Dialect::Postgres => {
+            "INSERT INTO perm_subject (kind, key, last_name, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, key) DO UPDATE SET last_name = excluded.last_name
+             WHERE perm_subject.last_name IS DISTINCT FROM excluded.last_name"
+        }
+    };
+    connection.execute(sql, params![USER, uuid.to_string(), name, sql_time(now)])?;
     Ok(())
 }
 
@@ -405,10 +470,10 @@ pub(super) fn select(
          JOIN perm_subject s ON s.id = n.subject_id
          WHERE (?1 IS NULL OR s.kind = ?1) AND (?2 IS NULL OR n.kind = ?2)
            AND (?3 IS NULL OR (s.kind = ?3 AND s.key = ?4))
-           AND (?5 IS NULL OR n.key {like} ?5 ESCAPE '\\')
+           AND (?5 IS NULL OR {like} ESCAPE '\\')
            AND (?6 IS NULL OR n.source = ?6)
          ORDER BY n.id",
-        like = connection.dialect().like(),
+        like = connection.dialect().like("n.key", "?5"),
     );
     connection.each(
         &sql,

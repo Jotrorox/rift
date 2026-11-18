@@ -71,10 +71,11 @@ pub struct Config {
     /// Hosts running `rift node`; servers without a node run on this host.
     pub nodes: BTreeMap<String, NodeConfig>,
     /// The SQLite file of the instance database, unless `database` puts it
-    /// on a PostgreSQL server.
+    /// on a PostgreSQL or MariaDB server.
     pub instance_database: PathBuf,
-    /// `rift.config.database` with `backend = "postgres"`; `None` for SQLite.
-    pub database: Option<crate::database::PostgresConfig>,
+    /// `rift.config.database` with `backend = "postgres"` or `"mariadb"`;
+    /// `None` for SQLite.
+    pub database: Option<crate::database::ServerConfig>,
     /// Downloaded template software, like CloudNet's `local/versioncache`.
     pub software_cache: PathBuf,
     /// Template folders served by the web file browser (`local/templates`).
@@ -622,7 +623,7 @@ impl Config {
         if let Some(variable) = self
             .database
             .as_ref()
-            .and_then(crate::database::PostgresConfig::url_variable)
+            .and_then(crate::database::ServerConfig::url_variable)
         {
             variables.push(("database.url_env".into(), variable.to_owned()));
         }
@@ -1297,10 +1298,10 @@ impl Config {
     }
 
     /// Where the instance database lives: the SQLite file
-    /// `instance_database`, or the PostgreSQL database of `database`.
+    /// `instance_database`, or the server database of `database`.
     pub fn database_location(&self) -> crate::database::Location {
         match &self.database {
-            Some(postgres) => crate::database::Location::Postgres(postgres.clone()),
+            Some(server) => crate::database::Location::Server(server.clone()),
             None => crate::database::Location::Sqlite(self.instance_database.clone()),
         }
     }

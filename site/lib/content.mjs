@@ -25,7 +25,7 @@ export const DOCS = [
   page('Operate', 'operations', 'Day-to-day operations', 'Reloads, maintenance mode, draining and transfers.'),
   page('Operate', 'admin', 'Admin CLI', 'The admin endpoint, its token and permissions, and every rift admin command.'),
   page('Operate', 'deployment', 'Deployment', 'Run Rift under systemd or in a container.'),
-  page('Operate', 'database', 'SQLite or PostgreSQL', 'Where Rift keeps its state, using PostgreSQL, standby controllers and copying between backends.'),
+  page('Operate', 'database', 'SQLite, PostgreSQL or MariaDB', 'Where Rift keeps its state, using PostgreSQL or MariaDB, standby controllers and copying between backends.'),
   page('Operate', 'monitoring', 'Monitoring and logs', 'Prometheus metrics, connection events, log levels and what to do about each error.'),
   page('Operate', 'hardening', 'Hardening', 'Rate limits, PROXY protocol behind a load balancer, and how Rift guards its secrets.'),
   page('Operate', 'upgrading', 'Upgrade and rollback', 'Graceful shutdown, upgrades, rollback and the forward-only database.'),

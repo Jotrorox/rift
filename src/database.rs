@@ -3,23 +3,27 @@
 //! extension store.
 //!
 //! It is either a SQLite file beside the configuration (`instance_database`,
-//! by default `rift.sqlite3`) or a PostgreSQL database
-//! (`database.backend = "postgres"`). Components use one connection API,
+//! by default `rift.sqlite3`), a PostgreSQL database
+//! (`database.backend = "postgres"`) or a MariaDB database
+//! (`database.backend = "mariadb"`). Components use one connection API,
 //! [`Conn`], and write their SQL once with `?N` placeholders; the few
-//! constructs the two dialects spell differently go through [`Dialect`].
+//! constructs the dialects spell differently go through [`Dialect`], and the
+//! MariaDB backend translates the rest (see [`mariadb`]).
 //!
 //! One process owns the database. For a file, an OS lock on `<file>.lock` is
 //! taken at open and released at exit, even after a crash; opening runs
 //! `PRAGMA integrity_check` and refuses a damaged file rather than serving
-//! partial state. For PostgreSQL, the owner holds a session advisory lock
-//! (see [`postgres`]); a standby Rift (`database.standby`) waits for it, so a
-//! second controller takes over when the first stops.
+//! partial state. On a server, the owner holds a session lock (an advisory
+//! lock in PostgreSQL, see [`postgres`]; a named lock in MariaDB); a standby
+//! Rift (`database.standby`) waits for it, so a second controller takes over
+//! when the first stops.
 //!
 //! Each component creates and migrates its own tables and records its schema
 //! version in `rift_schema`. SQLite files written before that table existed
 //! kept the instance schema version in `PRAGMA user_version`; it seeds the
 //! `instances` row once.
 pub mod copy;
+pub(crate) mod mariadb;
 pub(crate) mod postgres;
 mod value;
 
@@ -46,6 +50,11 @@ const POSTGRES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rift_schema (
     version BIGINT NOT NULL
 );";
 
+const MARIADB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rift_schema (
+    component VARCHAR(255) PRIMARY KEY NOT NULL,
+    version BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin";
+
 /// The component whose version older files kept in `PRAGMA user_version`.
 const LEGACY_COMPONENT: &str = "instances";
 
@@ -56,24 +65,29 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-/// The SQL dialect of a connection, for the few constructs SQLite and
-/// PostgreSQL spell differently. Everything else is written once.
+/// The SQL dialect of a connection, for the few constructs SQLite,
+/// PostgreSQL and MariaDB spell differently. Everything else is written once.
 ///
 /// PostgreSQL tables use `TEXT COLLATE "C"` (bytewise, like SQLite's BINARY)
 /// and `BIGINT` for every integer and boolean, so ordering, uniqueness and
-/// integer reads match SQLite.
+/// integer reads match SQLite. MariaDB tables do the same with the
+/// `utf8mb4_nopad_bin` collation, `VARCHAR` for keyed text (MariaDB cannot
+/// index `TEXT` whole) and `LONGBLOB` for blobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Sqlite,
     Postgres,
+    Mariadb,
 }
 
 impl Dialect {
-    /// ASCII case-insensitive `LIKE` (SQLite's `LIKE` is).
-    pub fn like(self) -> &'static str {
+    /// `expr LIKE pattern`, ignoring ASCII case (SQLite's `LIKE` does). The
+    /// caller appends any `ESCAPE` clause.
+    pub fn like(self, expr: &str, pattern: &str) -> String {
         match self {
-            Self::Sqlite => "LIKE",
-            Self::Postgres => "ILIKE",
+            Self::Sqlite => format!("{expr} LIKE {pattern}"),
+            Self::Postgres => format!("{expr} ILIKE {pattern}"),
+            Self::Mariadb => format!("LOWER({expr}) LIKE LOWER({pattern})"),
         }
     }
 
@@ -81,7 +95,7 @@ impl Dialect {
     pub fn greatest(self) -> &'static str {
         match self {
             Self::Sqlite => "MAX",
-            Self::Postgres => "GREATEST",
+            Self::Postgres | Self::Mariadb => "GREATEST",
         }
     }
 
@@ -91,14 +105,40 @@ impl Dialect {
         match self {
             Self::Sqlite => format!("{expr} COLLATE NOCASE"),
             Self::Postgres => format!("lower({expr} COLLATE \"C\")"),
+            Self::Mariadb => format!("LOWER({expr})"),
         }
     }
 
     /// The 1-based position of `needle` in `haystack`, 0 when absent.
     pub fn position(self, haystack: &str, needle: &str) -> String {
         match self {
-            Self::Sqlite => format!("instr({haystack}, {needle})"),
+            Self::Sqlite | Self::Mariadb => format!("instr({haystack}, {needle})"),
             Self::Postgres => format!("strpos({haystack}, {needle})"),
+        }
+    }
+
+    /// The type of a blob column.
+    pub fn blob(self) -> &'static str {
+        match self {
+            Self::Sqlite => "BLOB",
+            Self::Postgres => "BYTEA",
+            Self::Mariadb => "LONGBLOB",
+        }
+    }
+}
+
+/// A database server Rift can keep the instance database on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    Postgres,
+    Mariadb,
+}
+
+impl Engine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Postgres => "PostgreSQL",
+            Self::Mariadb => "MariaDB",
         }
     }
 }
@@ -112,19 +152,21 @@ pub enum Url {
     Env(String),
 }
 
-/// `rift.config.database` with `backend = "postgres"`.
+/// `rift.config.database` with `backend = "postgres"` or `"mariadb"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostgresConfig {
+pub struct ServerConfig {
+    pub engine: Engine,
     pub url: Url,
     /// Certificates trusted for TLS in addition to the public CAs.
     pub ca: Option<PathBuf>,
     /// Wait for the Rift that owns the database to stop instead of failing.
     pub standby: bool,
-    /// Keep Rift's tables in this schema, created when missing.
+    /// Keep Rift's tables in this schema (PostgreSQL) or database (MariaDB),
+    /// created when missing.
     pub schema: Option<String>,
 }
 
-impl PostgresConfig {
+impl ServerConfig {
     /// The environment variable holding the URL, which managed servers must
     /// never inherit.
     pub fn url_variable(&self) -> Option<&str> {
@@ -140,40 +182,59 @@ impl PostgresConfig {
             Url::Env(name) => match std::env::var(name) {
                 Ok(url) if !url.trim().is_empty() => Ok(url),
                 _ => Err(invalid(format!(
-                    "database.url_env: {name} is not set; put the PostgreSQL connection URL in it"
+                    "database.url_env: {name} is not set; put the {} connection URL in it",
+                    self.engine.name()
                 ))),
             },
         }
     }
 
-    fn settings(&self) -> io::Result<postgres::Settings> {
+    fn postgres_settings(&self) -> io::Result<postgres::Settings> {
         let config: tokio_postgres::Config = self
             .url()?
             .parse()
             .map_err(|error| invalid(format!("database URL: {error}")))?;
         Ok(postgres::Settings {
-            label: self.label_of(&config),
+            label: self.with_schema(postgres::label(&config)),
             config,
             tls: postgres::MakeRustls::new(self.ca.as_deref())?,
             schema: self.schema.clone(),
         })
     }
 
-    fn label_of(&self, config: &tokio_postgres::Config) -> String {
-        let mut label = postgres::label(config);
+    fn mariadb_settings(&self) -> io::Result<mariadb::Settings> {
+        let url = self.url()?;
+        let label = self.label_of(&url).unwrap_or_else(|| self.describe());
+        mariadb::Settings::new(&url, self.ca.as_deref(), self.schema.clone(), label)
+    }
+
+    fn with_schema(&self, mut label: String) -> String {
         if let Some(schema) = &self.schema {
-            label.push_str(&format!(" (schema {schema})"));
+            let what = match self.engine {
+                Engine::Postgres => "schema",
+                Engine::Mariadb => "database",
+            };
+            label.push_str(&format!(" ({what} {schema})"));
         }
         label
     }
 
+    /// `url` without its password, if it parses.
+    fn label_of(&self, url: &str) -> Option<String> {
+        let label = match self.engine {
+            Engine::Postgres => postgres::label(&url.parse::<tokio_postgres::Config>().ok()?),
+            Engine::Mariadb => mariadb::label(&mariadb::options(url).ok()?),
+        };
+        Some(self.with_schema(label))
+    }
+
     /// The database for messages, without its password.
     pub fn describe(&self) -> String {
-        match self.url().ok().and_then(|url| url.parse().ok()) {
-            Some(config) => self.label_of(&config),
+        match self.url().ok().and_then(|url| self.label_of(&url)) {
+            Some(label) => label,
             None => match &self.url {
-                Url::Env(name) => format!("PostgreSQL database from {name}"),
-                Url::Literal(_) => "PostgreSQL database".to_owned(),
+                Url::Env(name) => format!("{} database from {name}", self.engine.name()),
+                Url::Literal(_) => format!("{} database", self.engine.name()),
             },
         }
     }
@@ -183,7 +244,7 @@ impl PostgresConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
     Sqlite(PathBuf),
-    Postgres(PostgresConfig),
+    Server(ServerConfig),
 }
 
 impl Location {
@@ -191,7 +252,7 @@ impl Location {
     pub fn describe(&self) -> String {
         match self {
             Self::Sqlite(path) => path.display().to_string(),
-            Self::Postgres(config) => config.describe(),
+            Self::Server(config) => config.describe(),
         }
     }
 }
@@ -242,6 +303,19 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
 enum Backend {
     Sqlite(Connection),
     Postgres(postgres::Session),
+    Mariadb(mariadb::Session),
+}
+
+/// How a server session treats the database's lock when it is held
+/// elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    /// Read-only, without the lock (`rift check --strict`).
+    None,
+    /// Take the lock, waiting up to `wait` for it.
+    Own { wait: Duration },
+    /// Wait for the lock as long as it takes (`database.standby`).
+    Standby,
 }
 
 /// One connection to the instance database, of either backend. Statements
@@ -253,6 +327,7 @@ impl std::fmt::Debug for Conn {
         match &self.0 {
             Backend::Sqlite(_) => f.write_str("Conn(SQLite)"),
             Backend::Postgres(session) => write!(f, "Conn({session:?})"),
+            Backend::Mariadb(session) => write!(f, "Conn({session:?})"),
         }
     }
 }
@@ -262,6 +337,7 @@ impl Conn {
         match self.0 {
             Backend::Sqlite(_) => Dialect::Sqlite,
             Backend::Postgres(_) => Dialect::Postgres,
+            Backend::Mariadb(_) => Dialect::Mariadb,
         }
     }
 
@@ -272,6 +348,7 @@ impl Conn {
                 .prepare_cached(sql)?
                 .execute(rusqlite::params_from_iter(params.iter()))?),
             Backend::Postgres(session) => session.execute(sql, params),
+            Backend::Mariadb(session) => session.execute(sql, params),
         }
     }
 
@@ -280,6 +357,7 @@ impl Conn {
         match &self.0 {
             Backend::Sqlite(connection) => Ok(connection.execute_batch(sql)?),
             Backend::Postgres(session) => session.execute_batch(sql),
+            Backend::Mariadb(session) => session.execute_batch(sql),
         }
     }
 
@@ -310,6 +388,7 @@ impl Conn {
                 Ok(())
             }
             Backend::Postgres(session) => session.each(sql, params, each),
+            Backend::Mariadb(session) => session.each(sql, params, each),
         }
     }
 
@@ -374,6 +453,7 @@ impl Conn {
             // One process owns the database, so there is no write lock to
             // take early.
             Backend::Postgres(session) => session.begin(),
+            Backend::Mariadb(session) => session.begin(),
         }
     }
 
@@ -383,6 +463,7 @@ impl Conn {
                 Ok(connection.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })?)
             }
             Backend::Postgres(session) => session.finish(commit),
+            Backend::Mariadb(session) => session.finish(commit),
         }
     }
 
@@ -408,7 +489,7 @@ impl Conn {
     pub(crate) fn sqlite(&self) -> Option<&Connection> {
         match &self.0 {
             Backend::Sqlite(connection) => Some(connection),
-            Backend::Postgres(_) => None,
+            Backend::Postgres(_) | Backend::Mariadb(_) => None,
         }
     }
 }
@@ -460,13 +541,13 @@ impl Database {
     pub fn connect(location: &Location) -> io::Result<Self> {
         match location {
             Location::Sqlite(path) => Self::open(path),
-            Location::Postgres(config) => {
+            Location::Server(config) => {
                 let ownership = if config.standby {
-                    postgres::Ownership::Standby
+                    Ownership::Standby
                 } else {
-                    postgres::Ownership::Own { wait: LOCK_WAIT }
+                    Ownership::Own { wait: LOCK_WAIT }
                 };
-                let database = Self::postgres(config, ownership)?;
+                let database = Self::server(config, ownership)?;
                 database.prepare(true)?;
                 Ok(database)
             }
@@ -478,19 +559,34 @@ impl Database {
     pub fn connect_read_only(location: &Location) -> io::Result<Self> {
         match location {
             Location::Sqlite(path) => Self::read_only(path),
-            Location::Postgres(config) => Self::postgres(config, postgres::Ownership::None),
+            Location::Server(config) => Self::server(config, Ownership::None),
         }
     }
 
-    fn postgres(config: &PostgresConfig, ownership: postgres::Ownership) -> io::Result<Self> {
-        let settings = config.settings()?;
-        let label = settings.label.clone();
-        let session = postgres::Session::open(Arc::new(settings), ownership)
-            .map_err(|error| io::Error::other(format!("instance database {label}: {error}")))?;
+    fn server(config: &ServerConfig, ownership: Ownership) -> io::Result<Self> {
+        let failed = |label: &str, error: Error| {
+            io::Error::other(format!("instance database {label}: {error}"))
+        };
+        let (label, backend) = match config.engine {
+            Engine::Postgres => {
+                let settings = config.postgres_settings()?;
+                let label = settings.label.clone();
+                let session = postgres::Session::open(Arc::new(settings), ownership)
+                    .map_err(|error| failed(&label, error))?;
+                (label, Backend::Postgres(session))
+            }
+            Engine::Mariadb => {
+                let settings = config.mariadb_settings()?;
+                let label = settings.label.clone();
+                let session = mariadb::Session::open(Arc::new(settings), ownership)
+                    .map_err(|error| failed(&label, error))?;
+                (label, Backend::Mariadb(session))
+            }
+        };
         Ok(Self {
             label,
             path: None,
-            connection: Mutex::new(Conn(Backend::Postgres(session))),
+            connection: Mutex::new(Conn(backend)),
             _lock: None,
         })
     }
@@ -566,9 +662,11 @@ impl Database {
     fn prepare(&self, durable: bool) -> io::Result<()> {
         let connection = self.lock();
         let Some(sqlite) = connection.sqlite() else {
-            return connection
-                .execute_batch(POSTGRES_SCHEMA)
-                .map_err(|e| self.error(e));
+            let schema = match connection.dialect() {
+                Dialect::Mariadb => MARIADB_SCHEMA,
+                _ => POSTGRES_SCHEMA,
+            };
+            return connection.execute_batch(schema).map_err(|e| self.error(e));
         };
         sqlite
             .busy_timeout(Duration::from_secs(2))
@@ -604,7 +702,7 @@ impl Database {
         Ok(())
     }
 
-    /// The SQLite file, or `None` for PostgreSQL and in-memory databases.
+    /// The SQLite file, or `None` for server and in-memory databases.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -642,13 +740,17 @@ impl Database {
         }
     }
 
-    /// For PostgreSQL: the Rift holding the database's lock, other than this
+    /// On a server: the Rift holding the database's lock, other than this
     /// connection. Always `None` for SQLite.
     pub fn owner(&self) -> io::Result<Option<String>> {
         let connection = self.lock();
         match &connection.0 {
             Backend::Sqlite(_) => Ok(None),
             Backend::Postgres(session) => session
+                .holder()
+                .map(|holder| holder.map(|holder| holder.to_string()))
+                .map_err(|e| self.error(e)),
+            Backend::Mariadb(session) => session
                 .holder()
                 .map(|holder| holder.map(|holder| holder.to_string()))
                 .map_err(|e| self.error(e)),
@@ -709,6 +811,10 @@ pub fn version(connection: &Conn, component: &str) -> Result<u32> {
                 "SELECT count(*) FROM information_schema.tables
                  WHERE table_schema = current_schema() AND table_name = 'rift_schema'"
             }
+            Dialect::Mariadb => {
+                "SELECT count(*) FROM information_schema.TABLES
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rift_schema'"
+            }
         },
         params![],
         |r| r.get(0),
@@ -735,19 +841,23 @@ pub fn has_component(connection: &Conn, component: &str) -> Result<bool> {
     version(connection, component).map(|version| version > 0)
 }
 
-/// Tests against a real PostgreSQL server, when `RIFT_TEST_POSTGRES_URL`
-/// names one: each call gets a fresh schema of its own.
+/// Tests against a real database server, when `RIFT_TEST_POSTGRES_URL` or
+/// `RIFT_TEST_MARIADB_URL` names one (PostgreSQL first): each call gets a
+/// fresh schema (PostgreSQL) or database (MariaDB) of its own.
 #[cfg(test)]
-pub(crate) fn test_postgres() -> Option<Location> {
+pub(crate) fn test_server() -> Option<Location> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let url = std::env::var("RIFT_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|url| !url.is_empty())?;
+    let variable = |name: &str| std::env::var(name).ok().filter(|url| !url.is_empty());
+    let (engine, url) = match variable("RIFT_TEST_POSTGRES_URL") {
+        Some(url) => (Engine::Postgres, url),
+        None => (Engine::Mariadb, variable("RIFT_TEST_MARIADB_URL")?),
+    };
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    Some(Location::Postgres(PostgresConfig {
+    Some(Location::Server(ServerConfig {
+        engine,
         url: Url::Literal(url),
         ca: None,
         standby: false,
@@ -759,12 +869,14 @@ pub(crate) fn test_postgres() -> Option<Location> {
     }))
 }
 
-/// [`test_postgres`], or a note that the test was skipped.
+/// [`test_server`], or a note that the test was skipped.
 #[cfg(test)]
-pub(crate) fn test_postgres_or_skip(test: &str) -> Option<Location> {
-    let location = test_postgres();
+pub(crate) fn test_server_or_skip(test: &str) -> Option<Location> {
+    let location = test_server();
     if location.is_none() {
-        println!("{test}: skipped, RIFT_TEST_POSTGRES_URL is not set");
+        println!(
+            "{test}: skipped, neither RIFT_TEST_POSTGRES_URL nor RIFT_TEST_MARIADB_URL is set"
+        );
     }
     location
 }
@@ -836,12 +948,9 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// The connection API both backends share.
+    /// The connection API every backend shares.
     fn exercise(database: &Database) {
-        let blob = match database.dialect() {
-            Dialect::Sqlite => "BLOB",
-            Dialect::Postgres => "BYTEA",
-        };
+        let blob = database.dialect().blob();
         database
             .migrate("conn_test", 1, |_, _| {
                 format!(
@@ -924,20 +1033,47 @@ mod tests {
         assert_eq!(count(&connection), 2);
         let returned: i64 = connection
             .query_row(
-                "INSERT INTO conn_test (id) VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM conn_test)) RETURNING id",
+                "INSERT INTO conn_test (id) SELECT COALESCE(MAX(id), 0) + 1 FROM conn_test RETURNING id",
                 params![],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(returned, 4);
         let like = format!(
-            "SELECT count(*) FROM conn_test WHERE name {} ?1 ESCAPE '\\'",
-            connection.dialect().like()
+            "SELECT count(*) FROM conn_test WHERE {} ESCAPE '\\'",
+            connection.dialect().like("name", "?1")
         );
         let matched: i64 = connection
             .query_row(&like, params!["N%"], |r| r.get(0))
             .unwrap();
-        assert_eq!(matched, 1, "LIKE ignores ASCII case on both backends");
+        assert_eq!(matched, 1, "LIKE ignores ASCII case on every backend");
+        // Upserts count one row whether they insert or update, and one
+        // parameter can appear twice.
+        for expected in [1, 1] {
+            let changed = connection
+                .execute(
+                    "INSERT INTO conn_test (id, name) VALUES (?1, ?2)
+                     ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+                    params![9i64, "nine"],
+                )
+                .unwrap();
+            assert_eq!(changed, expected);
+        }
+        let ignored = connection
+            .execute(
+                "INSERT INTO conn_test (id, name) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                params![9i64, "other"],
+            )
+            .unwrap();
+        assert_eq!(ignored, 0);
+        // An UPDATE counts the rows it matched, even when nothing changes.
+        let unchanged = connection
+            .execute(
+                "UPDATE conn_test SET name = ?2 WHERE id = ?1 AND name = ?2",
+                params![9i64, "nine"],
+            )
+            .unwrap();
+        assert_eq!(unchanged, 1);
     }
 
     #[test]
@@ -946,19 +1082,19 @@ mod tests {
     }
 
     #[test]
-    fn the_connection_api_works_on_postgres() {
-        let Some(location) = test_postgres_or_skip("the_connection_api_works_on_postgres") else {
+    fn the_connection_api_works_on_a_server() {
+        let Some(location) = test_server_or_skip("the_connection_api_works_on_a_server") else {
             return;
         };
         let database = Database::connect(&location).unwrap();
-        assert_eq!(database.dialect(), Dialect::Postgres);
+        assert_ne!(database.dialect(), Dialect::Sqlite);
         assert!(database.path().is_none());
         exercise(&database);
     }
 
     #[test]
-    fn one_rift_owns_a_postgres_schema() {
-        let Some(location) = test_postgres_or_skip("one_rift_owns_a_postgres_schema") else {
+    fn one_rift_owns_a_server_database() {
+        let Some(location) = test_server_or_skip("one_rift_owns_a_server_database") else {
             return;
         };
         let database = Database::connect(&location).unwrap();
@@ -984,24 +1120,26 @@ mod tests {
 
     #[test]
     fn a_standby_takes_over_when_the_owner_stops() {
-        let Some(Location::Postgres(mut config)) =
-            test_postgres_or_skip("a_standby_takes_over_when_the_owner_stops")
+        let Some(Location::Server(mut config)) =
+            test_server_or_skip("a_standby_takes_over_when_the_owner_stops")
         else {
             return;
         };
-        let owner = Database::connect(&Location::Postgres(config.clone())).unwrap();
+        let owner = Database::connect(&Location::Server(config.clone())).unwrap();
         config.standby = true;
-        let standby = std::thread::spawn(move || Database::connect(&Location::Postgres(config)));
+        let standby = std::thread::spawn(move || Database::connect(&Location::Server(config)));
         std::thread::sleep(Duration::from_millis(1500));
         assert!(!standby.is_finished(), "the standby waits");
         drop(owner);
         let database = standby.join().unwrap().unwrap();
-        assert_eq!(database.dialect(), Dialect::Postgres);
+        assert_ne!(database.dialect(), Dialect::Sqlite);
     }
 
     #[test]
     fn dialect_spellings() {
-        assert_eq!(Dialect::Postgres.like(), "ILIKE");
+        assert_eq!(Dialect::Postgres.like("a", "?1"), "a ILIKE ?1");
+        assert_eq!(Dialect::Mariadb.like("a", "?1"), "LOWER(a) LIKE LOWER(?1)");
+        assert_eq!(Dialect::Mariadb.position("a", "?1"), "instr(a, ?1)");
         assert_eq!(Dialect::Sqlite.nocase("x"), "x COLLATE NOCASE");
         assert_eq!(Dialect::Postgres.position("a", "?1"), "strpos(a, ?1)");
     }

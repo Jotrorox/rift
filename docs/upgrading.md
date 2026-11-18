@@ -98,8 +98,9 @@ start, and there is no downgrade.
 - Where the path differs, use the configured `instance_database`. The `.lock`
   file beside it holds no data and needs no backup.
 - The [changelog](../CHANGELOG.md) names each release that changes the schema.
-- With the instance database in [PostgreSQL](database.md), take a `pg_dump`
-  instead (it works while Rift runs); rolling back means restoring it.
+- With the instance database in [PostgreSQL or MariaDB](database.md), take a
+  `pg_dump` or `mariadb-dump --single-transaction` instead (it works while
+  Rift runs); rolling back means restoring it.
 
 ## Upgrade a container
 

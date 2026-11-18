@@ -138,7 +138,7 @@ the backend's next command tree.
 
 - **Database.** Everything lives in the instance database, in tables prefixed
   `perm_`: the `instance_database` file (`rift.sqlite3` beside the
-  configuration by default) or a [PostgreSQL database](database.md). Each part
+  configuration by default) or a [PostgreSQL or MariaDB database](database.md). Each part
   records its schema version in `rift_schema`. Without a configuration file
   (a bare `rift <listen> <backend>`), the store is in memory.
 - **Integrity.** For a file, startup runs `PRAGMA integrity_check` and refuses

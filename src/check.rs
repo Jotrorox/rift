@@ -313,7 +313,7 @@ pub fn strict(config: &Config, path: &Path) -> Report {
                 rift::database::Location::Sqlite(_) => format!(
                     "instance database {described} does not exist yet; startup will create it"
                 ),
-                rift::database::Location::Postgres(_) => format!(
+                rift::database::Location::Server(_) => format!(
                     "instance database {described} connects and has no Rift tables yet; startup will create them"
                 ),
             });
