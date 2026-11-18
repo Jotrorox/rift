@@ -589,6 +589,62 @@ backend also hands the server back to the configuration; like every other
 change to a named server's definition, that one needs a restart. Moving the
 server back to the node the configuration names forgets the move too.
 
+### Even out the nodes
+
+Persistent instances stay where they were created, so nodes drift apart: one
+fills up while a newer one sits empty. `rift admin node plan` suggests moves
+that even them out:
+
+```sh
+rift admin node plan               # nodes may be 20 points apart
+rift admin node plan --spread 10   # or as far apart as you choose
+```
+
+```json
+{
+  "balanced": false, "max_spread_percent": 20.0,
+  "spread_percent": 75.0, "planned_spread_percent": 25.0,
+  "nodes": [
+    {"name": "node1", "state": "online", "schedule": "active",
+     "memory_used_percent": 75.0, "planned_memory_used_percent": 50.0,
+     "instances": 3, "planned_instances": 2, "load_per_cpu": 0.4,
+     "disk_free_mb": 81234, "warnings": []}
+  ],
+  "moves": [
+    {"server": "lobby-1", "group": "lobby", "from": "node1", "to": "node3",
+     "memory_mb": 2048, "players": 0, "command": "rift admin move lobby-1 node3"}
+  ],
+  "notes": ["the remaining spread cannot be narrowed by moving whole servers"]
+}
+```
+
+**It only suggests.** Nothing moves until you run the `command` of a move;
+Rift never moves a server on its own. Run the moves in the order listed: each
+one counts on the room the earlier ones leave.
+
+- A node's memory use is the larger of what is allocated of its `memory_mb`
+  and what its agent [measures](#host-resources) in use on the host. A node
+  with neither, or one that is not online, is left out and named in `notes`.
+- While the busiest and the least used node are more than the spread apart,
+  the plan moves a server off the busiest node it can to a less used one,
+  picking the move that leaves the busier of the two lowest. A move must
+  lower that node by at least one point, and the plan stops after 20 moves.
+- Only persistent instances and named servers move. An instance counts with
+  its group's `memory_mb`, a named server with its `memory_limit`; a named
+  server without one is left where it is. Disposable instances are replaced
+  anyway, and new ones go to the node with the most free memory.
+- Every suggested move passes the same checks as `rift admin move` would now:
+  the group's `nodes`, cordons, free slots, memory, free disk and agent
+  features. When nothing fits, `notes` says why.
+- `players` shows who would have to leave first; a move needs an empty
+  server. Load and disk are reported per node with `warnings` (a load above
+  one process per CPU, free disk below `min_free_disk_mb`), but the plan
+  balances memory only, and the copy also needs room for the server's folder.
+
+Over HTTP, `GET /api/nodes/plan` (or `?spread=10`) returns the same plan. It
+needs the `servers` permission and an operator who is not restricted to
+groups.
+
 ## Failure behavior
 
 | Situation | What happens |
