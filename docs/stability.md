@@ -110,6 +110,14 @@ servers in CI. Support for a new Minecraft release arrives in a patch or minor
 release. Dropping a Minecraft version, dropping a platform or raising the
 minimum operating system version happens only in a minor release.
 
-Release executables are built for Linux x86_64, macOS aarch64 and Windows
-x86_64. Building from source needs the Rust toolchain pinned in
+Each release ships these platforms:
+
+- Linux x86_64 and aarch64, each as a glibc build and a statically linked
+  musl build (see [which Linux build](install.md#which-linux-build))
+- macOS aarch64
+- Windows x86_64
+- a container image for `linux/amd64` and `linux/arm64` (see
+  [run in a container](deployment.md#run-in-a-container))
+
+Building from source needs the Rust toolchain pinned in
 `rust-toolchain.toml`, which may move in any release.
