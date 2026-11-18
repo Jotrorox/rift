@@ -249,8 +249,14 @@ pub(crate) fn check(
         }
     }
     if source_online && !snapshot.nodes.online(&from) {
+        // Built-in backups cover persistent instances only.
+        let restore = if registration.is_some() {
+            format!("run: rift admin restore {instance} --node {to}; or ")
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "node {from} is {}, so the folder of {instance} cannot be copied from it. If the node is gone for good, restore {} on node {to} from a backup and run: rift admin move {instance} {to} --no-copy",
+            "node {from} is {}, so the folder of {instance} cannot be copied from it. If the node is gone for good, {restore}restore {} on node {to} from a backup of your own and run: rift admin move {instance} {to} --no-copy",
             snapshot.nodes.reachability(&from).as_str(),
             directory.display()
         ));

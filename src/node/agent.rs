@@ -250,6 +250,8 @@ const MAX_EXITS: usize = 64;
 /// without being registered, covering the controller's creation window.
 const PREPARE_GRACE: Duration = Duration::from_secs(600);
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(30);
+/// How long a backup waits for a running server to confirm `save-all flush`.
+const BACKUP_FLUSH_TIMEOUT: Duration = Duration::from_secs(60);
 /// An upload whose next part does not arrive in time is abandoned and its
 /// staging file deleted.
 const UPLOAD_IDLE: Duration = Duration::from_secs(120);
@@ -267,6 +269,8 @@ pub struct Agent {
     changed: Notify,
     /// Serializes filesystem work: prepare, remove and reconcile.
     storage: Mutex<()>,
+    /// One backup snapshot at a time, which may take minutes to copy.
+    backups: Mutex<()>,
     prepared: StdMutex<HashMap<String, std::time::Instant>>,
     /// Cached template files by path: size, modification time and SHA-256.
     hashes: StdMutex<HashMap<PathBuf, (u64, SystemTime, String)>>,
@@ -325,6 +329,7 @@ impl Agent {
             exits: StdMutex::new(VecDeque::new()),
             changed: Notify::new(),
             storage: Mutex::new(()),
+            backups: Mutex::new(()),
             prepared: StdMutex::new(HashMap::new()),
             hashes: StdMutex::new(HashMap::new()),
             http,
@@ -590,11 +595,7 @@ impl Agent {
                         "console command must contain 1..=4096 bytes without control characters",
                     ));
                 }
-                let mut processes = self.processes.lock().await;
-                let process = processes.get_mut(&server).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotConnected, "managed server is not running")
-                })?;
-                crate::managed::write_console(&mut process.child, &command).await?;
+                self.console(&server, &command).await?;
                 Ok(json!({"sent": true}))
             }
             Command::Logs {
@@ -670,10 +671,16 @@ impl Agent {
                 directory,
                 path,
                 offset,
+                snapshot,
             } => {
                 check_name(&server)?;
-                self.check_stopped(&server).await?;
-                let base = self.directory(&directory)?;
+                // A snapshot is a copy: its server may run meanwhile.
+                let base = if snapshot {
+                    self.directory(&super::backup::staging(&server, &directory))?
+                } else {
+                    self.check_stopped(&server).await?;
+                    self.directory(&directory)?
+                };
                 tokio::task::spawn_blocking(move || {
                     super::transfer::read_chunk(&base, &path, offset)
                 })
@@ -681,6 +688,17 @@ impl Agent {
                 .map_err(io::Error::other)?
             }
             Command::Receive(receive) => self.receive(receive).await,
+            Command::Backup(backup) => self.backup(backup).await,
+            Command::ReleaseBackup { server, directory } => {
+                check_name(&server)?;
+                let staging = self.directory(&super::backup::staging(&server, &directory))?;
+                let _backups = self.backups.lock().await;
+                let released =
+                    tokio::task::spawn_blocking(move || super::backup::release(&staging))
+                        .await
+                        .map_err(io::Error::other)??;
+                Ok(json!({"released": released}))
+            }
             Command::Discard { server, directory } => {
                 check_name(&server)?;
                 let _storage = self.storage.lock().await;
@@ -739,6 +757,98 @@ impl Agent {
         Ok(reply)
     }
 
+    /// Write one line to a running server's console.
+    async fn console(&self, server: &str, line: &str) -> io::Result<()> {
+        let mut processes = self.processes.lock().await;
+        let process = processes.get_mut(server).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "managed server is not running")
+        })?;
+        crate::managed::write_console(&mut process.child, line).await
+    }
+
+    /// Copy a server directory into its snapshot folder; see
+    /// [`super::backup`]. A running server stops saving for the copy.
+    async fn backup(&self, backup: protocol::Backup) -> io::Result<Value> {
+        check_name(&backup.server)?;
+        let base = self.directory(&backup.directory)?;
+        let staging = self.directory(&super::backup::staging(&backup.server, &backup.directory))?;
+        let _backups = self.backups.lock().await;
+        let flushed = backup.save_commands && self.flush(&backup.server, &base).await?;
+        let root = self.root.clone();
+        let copied = match tokio::task::spawn_blocking(move || {
+            super::backup::snapshot(&base, &staging, super::host::free_disk_mb(&root))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(io::Error::other(error)),
+        };
+        if flushed && let Err(error) = self.console(&backup.server, "save-on").await {
+            log_warn!(
+                "could not send save-on to {} after its backup snapshot: {error}",
+                backup.server
+            );
+        }
+        let mut reply = copied?;
+        reply["flushed"] = json!(flushed);
+        Ok(reply)
+    }
+
+    /// Send `save-off` and `save-all flush` to `server` if it runs here, and
+    /// wait until it logs that the world is saved. Returns whether it did;
+    /// `false` means the server is not running, so its files hold still.
+    async fn flush(&self, server: &str, base: &Path) -> io::Result<bool> {
+        const CONFIRMATION: &str = "Saved the game";
+        let log = base.join(crate::managed::LOG_FILE);
+        let start = {
+            let log = log.clone();
+            tokio::task::spawn_blocking(move || super::backup::length(&log))
+                .await
+                .map_err(io::Error::other)?
+        };
+        if !self.processes.lock().await.contains_key(server) {
+            return Ok(false);
+        }
+        let sent = async {
+            self.console(server, "save-off").await?;
+            self.console(server, "save-all flush").await
+        };
+        if let Err(error) = sent.await {
+            let _ = self.console(server, "save-on").await;
+            return Err(io::Error::new(
+                error.kind(),
+                format!("could not send save-off and save-all flush to {server}: {error}"),
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + BACKUP_FLUSH_TIMEOUT;
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let log = log.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                super::backup::logged_since(&log, start, CONFIRMATION)
+            })
+            .await
+            .map_err(io::Error::other)??;
+            if saved {
+                return Ok(true);
+            }
+            if !self.processes.lock().await.contains_key(server) {
+                // It stopped meanwhile; a stopped server's files hold still.
+                return Ok(false);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = self.console(server, "save-on").await;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{server} did not log \"{CONFIRMATION}\" within {} s of save-all flush; set backups.save_commands = false for servers without these commands",
+                        BACKUP_FLUSH_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        }
+    }
+
     /// A move only reads or writes the directory of a server that is not
     /// running here.
     async fn check_stopped(&self, server: &str) -> io::Result<()> {
@@ -771,7 +881,13 @@ impl Agent {
             self.check_stopped(&receive.server).await?;
         }
         tokio::task::spawn_blocking(move || {
-            super::transfer::receive_step(&receive.server, &staging, &target, &receive.step)
+            super::transfer::apply_step(
+                &receive.server,
+                &staging,
+                &target,
+                &receive.step,
+                receive.replace,
+            )
         })
         .await
         .map_err(io::Error::other)?

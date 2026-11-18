@@ -437,6 +437,9 @@ fn service_group_commands_share_the_servers_permission() {
         json!(["groups"]),
         json!(["create", "lobby"]),
         json!(["remove", "lobby-1"]),
+        json!(["backup", "lobby-1"]),
+        json!(["backups"]),
+        json!(["restore", "lobby-1", "--node", "node2"]),
     ] {
         let value = json!({"token":secret,"args":args});
         assert!(request(&value, &settings, secret).is_ok());
@@ -509,6 +512,56 @@ fn plugin_restarts_need_plugins_logs_need_logs_and_reads_need_status() {
         audited(&args(&["drain", "lobby", "on"])),
         ("drain".to_owned(), String::new())
     );
+    assert_eq!(
+        audited(&args(&["restore", "world-1", "--node", "node2"])),
+        ("restore".to_owned(), "world-1".to_owned())
+    );
+    assert_eq!(
+        audited(&args(&["backups", "forget", "world-1", "all"])),
+        ("backups forget".to_owned(), "world-1".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn backup_commands_need_a_backups_table() {
+    let snapshot = Arc::new(
+        Snapshot::new(
+            Config::from_addresses("127.0.0.1:0", "127.0.0.1:1").unwrap(),
+            None,
+        )
+        .unwrap(),
+    );
+    let metrics = Metrics::default();
+    let (commands, _receiver) = mpsc::channel(1);
+    let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    for command in [
+        &["backup", "world-1"][..],
+        &["backups"],
+        &["backups", "world-1"],
+        &["backups", "forget", "world-1", "all"],
+        &["restore", "world-1"],
+    ] {
+        let error = execute(
+            &args(command),
+            snapshot.clone(),
+            &metrics,
+            &commands,
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("backups are not configured"), "{error}");
+    }
+    let error = execute(
+        &args(&["restore", "world-1", "--force"]),
+        snapshot,
+        &metrics,
+        &commands,
+        "test",
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("usage: restore"), "{error}");
 }
 
 #[tokio::test]

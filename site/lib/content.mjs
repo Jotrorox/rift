@@ -37,6 +37,7 @@ export const DOCS = [
   page('Servers', 'server-limits', 'Isolation and memory limits', 'Confine server processes to their directory and cap their memory on Linux.'),
   page('Servers', 'bus-logins', 'Bus logins for servers', 'A message bus login for every managed server and group instance.'),
   page('Servers', 'nodes', 'Multiple hosts', 'Game servers on more machines with rift node agents, placement and failure handling.'),
+  page('Servers', 'backups', 'Backups', 'Scheduled snapshots of persistent instances on nodes to a folder or S3, and restores onto any node.'),
 
   page('Web', 'http', 'Web dashboard', 'The bundled dashboard, its tokens and operators, and browser-based configuration.'),
   page('Web', 'status-page', 'Status page', 'A public, read-only status site for your network.'),

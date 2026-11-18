@@ -76,6 +76,10 @@ Prefix each command with `rift admin`.
 | `create <group>` | `servers` | Allocates a port and registers a stopped backend in the group |
 | `remove <instance>` | `servers` | Removes an instance after child cleanup; refuses while it has players or pending attachments |
 | `move <server> <node> [--keep-source] [--no-copy]` | `servers` | [Moves a persistent instance or a named server](nodes.md#move-a-persistent-instance-to-another-node) and its folder to another node; returns when the move has finished |
+| `backup <instance>` | `servers` | Takes a [backup](backups.md) snapshot of a persistent instance on a node now |
+| `backups [instance]` | `servers` | Lists the backed-up instances, or one instance's snapshots |
+| `backups forget <instance> <snapshot>\|all` | `servers` | Deletes snapshots and the files only they used |
+| `restore <instance> [snapshot] [--node <node>]` | `servers` | [Restores an instance](backups.md#restore-an-instance) from its newest or a given snapshot, in place or onto another node; returns when it has finished |
 | `group start <group>`, `group stop <group>` | `servers` | Starts or stops a [whole group](service-groups.md#start-stop-and-dev-mode-for-a-whole-group) |
 | `group mode <group> active\|dev` | `servers` | Sets the group's mode |
 | `nodes` | `servers` | Lists [node agents](nodes.md) |

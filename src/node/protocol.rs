@@ -73,6 +73,9 @@ pub mod feature {
     /// [`Command::Upload`](super::Command::Upload), for files over
     /// [`FILE_PART`](super::FILE_PART).
     pub const FILE_PARTS: &str = "file_parts";
+    /// `backup` and `release_backup`, `read` with `snapshot`, and `receive`
+    /// with `replace`, for built-in backups and `rift admin restore`.
+    pub const BACKUP: &str = "backup";
 }
 
 /// Every feature this build's agent applies and its controller may need.
@@ -84,6 +87,7 @@ pub const FEATURES: &[&str] = &[
     feature::MOVE,
     feature::FORWARDING_SECRET,
     feature::FILE_PARTS,
+    feature::BACKUP,
 ];
 
 /// A [`Start`] field that an agent without `feature` would silently drop.
@@ -185,6 +189,10 @@ pub enum Command {
         directory: PathBuf,
         path: String,
         offset: u64,
+        /// Read from the snapshot folder of a [`Command::Backup`] instead;
+        /// the server may be running.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        snapshot: bool,
     },
     /// `rift admin move`, target side: build the moved directory.
     Receive(Receive),
@@ -196,6 +204,31 @@ pub enum Command {
     /// Fill the agent's template and software caches ahead of time, so the
     /// next `prepare` copies from disk; see [`Warm`].
     Warm(Warm),
+    /// Built-in backups: copy a server directory into a snapshot folder next
+    /// to it and hash every file; see [`Backup`]. The controller then reads
+    /// the snapshot with `read` and `snapshot`, and releases it.
+    Backup(Backup),
+    /// Delete the snapshot folder of a [`Command::Backup`].
+    ReleaseBackup {
+        server: String,
+        directory: PathBuf,
+    },
+}
+
+/// A [`Command::Backup`]. The agent copies `directory` into a snapshot folder
+/// next to it, with a manifest of every folder and file and its SHA-256
+/// ([`crate::backup::Entry`]) as [`crate::node::backup::MANIFEST`] in the
+/// snapshot folder. It replies with `files`, `folders`, `bytes`, `flushed`
+/// and the `skipped` symlinks and special files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backup {
+    pub server: String,
+    pub directory: PathBuf,
+    /// If the server is running, send `save-off` and `save-all flush` and
+    /// wait until it logs that the world is saved before copying, and
+    /// `save-on` after.
+    #[serde(default)]
+    pub save_commands: bool,
 }
 
 /// The templates an agent should cache now. Agents from before this command
@@ -247,6 +280,11 @@ pub struct Receive {
     /// The final directory, relative to the agent's `--root`.
     pub directory: PathBuf,
     pub step: ReceiveStep,
+    /// `rift admin restore` in place: `begin` accepts an existing directory
+    /// and `commit` swaps it for the staging folder. Agents without
+    /// [`feature::BACKUP`] ignore it and refuse the existing directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -820,6 +858,7 @@ mod tests {
                     mode: 0o644,
                 }),
             },
+            replace: false,
         });
         let text = serde_json::to_string(&command).unwrap();
         assert!(
@@ -857,6 +896,52 @@ mod tests {
         assert_eq!(value["entries"][0]["folder"], true);
         assert!(value["entries"][1].get("folder").is_none());
         assert_eq!(serde_json::from_value::<Tree>(value).unwrap(), tree);
+    }
+
+    #[test]
+    fn backup_commands_round_trip_and_stay_optional_for_moves() {
+        let backup = Command::Backup(Backup {
+            server: "survival-1".into(),
+            directory: "local/services/survival-1".into(),
+            save_commands: true,
+        });
+        let text = serde_json::to_string(&backup).unwrap();
+        assert!(
+            text.starts_with(r#"{"op":"backup","server":"survival-1","#),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<Command>(&text).unwrap(), backup);
+        let release = r#"{"op":"release_backup","server":"survival-1","directory":"d"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Command>(release).unwrap(),
+            Command::ReleaseBackup { .. }
+        ));
+        // Moves send neither flag, so older agents see the same messages.
+        let read = Command::Read {
+            server: "lobby-1".into(),
+            directory: "d".into(),
+            path: "level.dat".into(),
+            offset: 0,
+            snapshot: false,
+        };
+        assert!(!serde_json::to_string(&read).unwrap().contains("snapshot"));
+        let begin = Command::Receive(Receive {
+            server: "lobby-1".into(),
+            directory: "d".into(),
+            step: ReceiveStep::Begin,
+            replace: false,
+        });
+        assert!(!serde_json::to_string(&begin).unwrap().contains("replace"));
+        let replace = r#"{"op":"receive","server":"lobby-1","directory":"d","step":{"action":"commit"},"replace":true}"#;
+        assert!(matches!(
+            serde_json::from_str::<Command>(replace).unwrap(),
+            Command::Receive(Receive { replace: true, .. })
+        ));
+        let snapshot = r#"{"op":"read","server":"lobby-1","directory":"d","path":"a","offset":0,"snapshot":true}"#;
+        assert!(matches!(
+            serde_json::from_str::<Command>(snapshot).unwrap(),
+            Command::Read { snapshot: true, .. }
+        ));
     }
 
     #[test]

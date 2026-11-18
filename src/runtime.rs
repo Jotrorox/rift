@@ -3227,6 +3227,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(network_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(server_states.run(receiver.clone()));
+    background.spawn(crate::backups::schedule(receiver.clone()));
     // Keep visibility rules current as permissions change.
     background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is

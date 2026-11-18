@@ -190,6 +190,7 @@ async fn read(
         directory: directory.into(),
         path: path.into(),
         offset,
+        snapshot: false,
     };
     let mut reply = nodes.request(node, &command, WAIT).await?;
     match (reply["content"].take(), reply["size"].as_u64()) {
@@ -207,10 +208,24 @@ async fn receive(
     directory: &Path,
     step: ReceiveStep,
 ) -> io::Result<Value> {
+    send_step(nodes, node, server, directory, step, false).await
+}
+
+/// One [`Command::Receive`] step on `node`. `replace` is for a restore in
+/// place: the existing directory is swapped out on commit.
+pub async fn send_step(
+    nodes: &Nodes,
+    node: &str,
+    server: &str,
+    directory: &Path,
+    step: ReceiveStep,
+    replace: bool,
+) -> io::Result<Value> {
     let command = Command::Receive(Receive {
         server: server.into(),
         directory: directory.into(),
         step,
+        replace,
     });
     nodes.request(node, &command, WAIT).await
 }
@@ -350,13 +365,34 @@ pub(crate) fn read_chunk(base: &Path, path: &str, offset: u64) -> io::Result<Val
     Ok(json!({"content": protocol::encode_base64(&buffer), "size": size}))
 }
 
-/// Agent side of [`Command::Receive`], with `staging` and `target` already
-/// resolved below the agent's root.
+/// [`apply_step`] without [`Receive::replace`].
+#[cfg(test)]
 pub(crate) fn receive_step(
     server: &str,
     staging: &Path,
     target: &Path,
     step: &ReceiveStep,
+) -> io::Result<Value> {
+    apply_step(server, staging, target, step, false)
+}
+
+/// The folder an in-place restore moves the old directory to while it puts
+/// the restored one in place; deleted right after.
+fn replaced(server: &str, target: &Path) -> PathBuf {
+    target
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join(format!(".rift-replaced-{server}"))
+}
+
+/// Agent side of [`Command::Receive`], with `staging` and `target` already
+/// resolved below the agent's root.
+pub(crate) fn apply_step(
+    server: &str,
+    staging: &Path,
+    target: &Path,
+    step: &ReceiveStep,
+    replace: bool,
 ) -> io::Result<Value> {
     let staged = || -> io::Result<()> {
         if exists(staging)? {
@@ -371,7 +407,8 @@ pub(crate) fn receive_step(
     match step {
         ReceiveStep::Begin => {
             let mut replaced = false;
-            if exists(target)? {
+            // A restore in place keeps the existing directory until commit.
+            if !replace && exists(target)? {
                 if moved_server(target).as_deref() != Some(server) {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -452,7 +489,16 @@ pub(crate) fn receive_step(
                 return Ok(json!({"committed": true}));
             }
             staged()?;
-            if exists(target)? {
+            let old = replaced(server, target);
+            if replace {
+                // Left behind by a commit that stopped half way.
+                if exists(&old)? {
+                    fs::remove_dir_all(&old)?;
+                }
+                if exists(target)? {
+                    fs::rename(target, &old)?;
+                }
+            } else if exists(target)? {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("{} appeared during the move", target.display()),
@@ -465,6 +511,9 @@ pub(crate) fn receive_step(
             sync_directory(staging)?;
             fs::rename(staging, target)?;
             sync_directory(parent)?;
+            if replace && exists(&old)? {
+                fs::remove_dir_all(&old)?;
+            }
             Ok(json!({"committed": true}))
         }
         ReceiveStep::Finish => match fs::remove_file(target.join(MOVE_MARKER)) {
