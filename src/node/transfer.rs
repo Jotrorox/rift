@@ -71,7 +71,7 @@ pub type Progress = Mutex<Copied>;
 
 fn update(progress: &Progress, change: impl FnOnce(&mut Copied)) -> Copied {
     let mut copied = progress.lock().unwrap_or_else(|error| error.into_inner());
-    change(&mut *copied);
+    change(&mut copied);
     *copied
 }
 
