@@ -571,6 +571,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
             .route("/api/nodes/warm", post(warm_templates))
+            .route("/api/nodes/plan", get(node_plan))
             .route("/api/plugins", get(plugin_list))
             .route("/api/plugins/{name}", get(plugin_status))
             .route("/api/plugins/{name}/logs", get(plugin_logs))
@@ -888,7 +889,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "files", ..] | ["api", "template-sources", ..] => "files",
                 ["api", "templates", _, "download"]
                 | ["api", "software", ..]
-                | ["api", "nodes", "warm"] => "servers",
+                | ["api", "nodes", "warm" | "plan"] => "servers",
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
@@ -1352,7 +1353,7 @@ async fn player_action(
     match result {
         Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
         Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),
-        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
     }
 }
 async fn managed_servers(
@@ -1370,6 +1371,22 @@ async fn service_groups(
 
 async fn nodes(State(app): State<App>) -> Json<Value> {
     Json(admin::nodes(&app.snapshot()))
+}
+
+/// Suggested moves that even out the nodes; `?spread=<percent>` sets how far
+/// apart they may be. Nothing moves.
+async fn node_plan(State(app): State<App>, RawQuery(query): RawQuery) -> Response {
+    let spread = match query.as_deref() {
+        None | Some("") => Ok(crate::rebalance::DEFAULT_SPREAD),
+        Some(query) => query.strip_prefix("spread=").map_or_else(
+            || Err("expected spread=<percent>".to_owned()),
+            crate::rebalance::parse_spread,
+        ),
+    };
+    match spread {
+        Ok(spread) => Json(crate::rebalance::plan(&app.snapshot(), spread)).into_response(),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
 }
 
 async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
@@ -2621,7 +2638,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/warm","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

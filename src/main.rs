@@ -36,6 +36,7 @@ mod moving;
 mod network;
 mod node_init;
 mod operator;
+mod rebalance;
 mod runtime;
 mod scaling;
 mod status;

@@ -14,6 +14,13 @@ and are listed under **SDKs**.
 
 ### Added
 
+- `rift admin node plan` suggests moves that even out memory across nodes,
+  from their `memory_mb` and the host memory their agents measure. Each move
+  is a `rift admin move` command that passes the checks of a real move, with
+  the players who would have to leave; `--spread <percent>` sets how far
+  apart nodes may be (20 points by default). It only suggests: Rift still
+  never moves a server on its own. Also at `GET /api/nodes/plan`. See
+  [docs/nodes.md](docs/nodes.md#even-out-the-nodes).
 - The instance database can live in PostgreSQL instead of the SQLite file:
   `rift.config.database = { backend = "postgres" }` with the connection URL in
   `RIFT_DATABASE_URL` (or `url_env`), optional `ca` for TLS and `schema` to

@@ -782,6 +782,10 @@ pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Resu
 /// plugin name, or the command alone.
 pub(crate) fn audited(args: &[String]) -> (String, String) {
     match args {
+        // A plan changes nothing and names no node.
+        [command, action, ..] if command == "node" && action == "plan" => {
+            ("node plan".into(), String::new())
+        }
         [command, action, rest @ ..]
             if command == "plugins" || command == "group" || command == "node" =>
         {
@@ -920,6 +924,9 @@ pub(crate) async fn execute(
         [command, action, group, mode] if command == "group" && action == "mode" => {
             crate::groups::set_mode(&snapshot, group, mode).map_err(|error| error.message)
         }
+        [command, action, rest @ ..] if command == "node" && action == "plan" => {
+            crate::rebalance::parse(rest).map(|spread| crate::rebalance::plan(&snapshot, spread))
+        }
         [command, action, node] if command == "node" => {
             crate::cordon::apply(&snapshot, node, action).map_err(|error| error.message)
         }
@@ -928,7 +935,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <server> <node> [--no-copy] [--keep-source] | move <server> --cancel | backup <instance> | backups [instance] | backups forget <instance> <snapshot>|all | restore <instance> [snapshot] [--node <node>] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <server> <node> [--no-copy] [--keep-source] | move <server> --cancel | backup <instance> | backups [instance] | backups forget <instance> <snapshot>|all | restore <instance> [snapshot] [--node <node>] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | node plan [--spread <percent>] | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -1044,7 +1051,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <server> <node> [--no-copy] [--keep-source]|move <server> --cancel|backup <instance>|backups [instance]|backups forget <instance> <snapshot>|all|restore <instance> [snapshot] [--node <node>]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <server> <node> [--no-copy] [--keep-source]|move <server> --cancel|backup <instance>|backups [instance]|backups forget <instance> <snapshot>|all|restore <instance> [snapshot] [--node <node>]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|node plan [--spread <percent>]|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {

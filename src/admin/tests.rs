@@ -509,6 +509,14 @@ fn plugin_restarts_need_plugins_logs_need_logs_and_reads_need_status() {
         ("plugins list".to_owned(), String::new())
     );
     assert_eq!(
+        audited(&args(&["node", "plan", "--spread", "30"])),
+        ("node plan".to_owned(), String::new())
+    );
+    assert_eq!(
+        audited(&args(&["node", "drain", "node2"])),
+        ("node drain".to_owned(), "node2".to_owned())
+    );
+    assert_eq!(
         audited(&args(&["drain", "lobby", "on"])),
         ("drain".to_owned(), String::new())
     );
