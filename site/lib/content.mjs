@@ -75,7 +75,8 @@ export const DOCS = [
 
   page('Reference', 'network-protocol', 'Network protocol', 'Supported releases, login, forwarding and backend switching for Java 1.8.9 through 26.3.'),
   page('Reference', 'translation-internals', 'How translation works', 'The translation pipeline, its data sources and how it is verified.'),
-  page('Reference', 'stability', 'Stability and versioning', 'Release channels, what a version number promises and how the database upgrades.'),
+  page('Reference', 'clustering', 'Clustering (design)', 'The plan for several active proxies: Raft-replicated state, shared presence and a federated bus.'),
+  page('Reference', 'stability','Stability and versioning', 'Release channels, what a version number promises and how the database upgrades.'),
   page('Reference', 'performance', 'Performance', 'CPU, memory and latency against Velocity, with reproducible runs.'),
 ];
 
