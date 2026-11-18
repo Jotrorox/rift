@@ -20,6 +20,7 @@ extern crate rift;
 
 mod admin;
 mod admission;
+mod backups;
 mod bungee_runtime;
 mod check;
 mod control;

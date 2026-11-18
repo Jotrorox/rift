@@ -14,6 +14,20 @@ and are listed under **SDKs**.
 
 ### Added
 
+- Built-in backups of persistent instances on nodes. With
+  `rift.config.backups` set, Rift snapshots each such instance every
+  `interval_ms` (6 hours by default) into a folder on the proxy host or an S3
+  bucket (`backups.s3`, also MinIO, R2 and other S3-compatible services) and
+  keeps the newest `keep` snapshots. Files are stored by SHA-256, so after the
+  first snapshot only changed files are uploaded. A running server's world is
+  flushed with `save-off` and `save-all flush` and copied on its node first,
+  so saving pauses only for that local copy. `rift admin backup <instance>`
+  takes a snapshot now, `rift admin backups [instance]` lists them,
+  `rift admin backups forget` deletes them, and
+  `rift admin restore <instance> [snapshot] [--node <node>]` restores an
+  instance in place or onto another node, which recovers the instances of a
+  dead node in one command. Agents need the new `backup` feature: upgrade them
+  together with the controller. See [backups](docs/backups.md).
 - `tab_list.names = "all"` gives the entries backends list themselves the
   same rank names and order as Rift's own entries for players on other
   servers, so a backend without a tab plugin (such as Pumpkin) shows

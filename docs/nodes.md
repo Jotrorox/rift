@@ -475,9 +475,16 @@ gigabyte on a slow link.
 
 ### Recover the instances of a dead node
 
-A copy needs the old node online. If it is gone for good, restore each
-instance folder from a backup onto a new node, below the agent's `--root` at
-the same path (`local/services/<instance>`), then:
+A copy needs the old node online. If it is gone for good and you use
+[built-in backups](backups.md), restore each instance onto another node from
+its newest snapshot:
+
+```sh
+rift admin restore lobby-3 --node node2
+```
+
+With backups of your own, restore each instance folder onto a new node, below
+the agent's `--root` at the same path (`local/services/<instance>`), then:
 
 ```sh
 rift admin move lobby-3 node2 --no-copy
@@ -498,7 +505,7 @@ yourself and change their `node` and backend in the configuration.
 | --- | --- |
 | The controller connection drops | The agent **keeps its servers running** and reconnects. On every (re)connection the controller sends its instance list: the agent stops servers no longer assigned to it and deletes unassigned disposable directories. |
 | The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop saved before the restart still wins. Local servers stop, unless they have [`keep_running`](kept-servers.md). |
-| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. [Move them](#recover-the-instances-of-a-dead-node) yourself if the node does not come back. Recovery waits for the node instead of spending restart retries. |
+| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. [Restore or move them](#recover-the-instances-of-a-dead-node) yourself if the node does not come back. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
 | The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. |
@@ -591,7 +598,8 @@ controller checks them before it starts a server there:
 
 [Moves](#move-a-persistent-instance-to-another-node) need the `move` feature on
 both agents (only the new one with `--no-copy`); an older agent refuses the
-move before the instance is stopped.
+move before the instance is stopped. [Backups](backups.md) and restores in
+place need the `backup` feature.
 
 A refused server shows the reason as its last error, and service groups place
 new instances only on nodes whose agent can run them. Agents from 0.1.0 and
@@ -621,7 +629,7 @@ Agents and the controller exchange JSON over the existing bus:
 
 | Subject | Direction | Purpose |
 | --- | --- | --- |
-| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, `warm`, and for moves `tree`, `read`, `receive` and `discard` |
+| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, `warm`, for moves `tree`, `read`, `receive` and `discard`, and for [backups](backups.md) `backup` and `release_backup` |
 | `rift.node.<n>.state` | agent → controller | Process list and [host resources](#host-resources) every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as

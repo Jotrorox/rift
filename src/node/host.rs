@@ -81,6 +81,11 @@ fn load() -> Option<f64> {
     None
 }
 
+/// Unprivileged-free space of the file system holding `root`, in MiB.
+pub(crate) fn free_disk_mb(root: &Path) -> Option<u64> {
+    disk(root).map(|(_, free)| free)
+}
+
 /// Total and unprivileged-free space of the file system holding `root`, in MiB.
 #[cfg(unix)]
 fn disk(root: &Path) -> Option<(u64, u64)> {

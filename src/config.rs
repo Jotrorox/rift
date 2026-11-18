@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use backups::{BackupTarget, Backups, DEFAULT_BACKUP_DIRECTORY, S3Target};
 pub use managed::{
     InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
 };
@@ -32,6 +33,7 @@ pub use status::{
 };
 pub use templates::ServerTemplate;
 
+mod backups;
 mod managed;
 mod messaging;
 mod nodes;
@@ -117,6 +119,8 @@ pub struct Config {
     /// `players = { record_ip }`: whether the player directory remembers
     /// the address a player last joined from. Default `true`.
     pub record_ip: bool,
+    /// `backups`: snapshots of persistent instances on nodes.
+    pub backups: Option<Backups>,
 }
 
 /// Protocol translation between players and backends on different Minecraft
@@ -635,6 +639,20 @@ impl Config {
         for (name, node) in &self.nodes {
             variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
         }
+        if let Some(Backups {
+            target: BackupTarget::S3(s3),
+            ..
+        }) = &self.backups
+        {
+            variables.push((
+                "backups.s3.access_key_env".into(),
+                s3.access_key_env.clone(),
+            ));
+            variables.push((
+                "backups.s3.secret_key_env".into(),
+                s3.secret_key_env.clone(),
+            ));
+        }
         if let Some(web) = &self.web {
             variables.extend(web.token_variables());
         }
@@ -712,6 +730,7 @@ impl Config {
             shutdown_timeout: Duration::from_secs(30),
             text: std::sync::Arc::default(),
             record_ip: true,
+            backups: None,
         };
         config.validate()?;
         Ok(config)
@@ -885,6 +904,7 @@ impl Config {
                     "shutdown_timeout_ms",
                     "text",
                     "players",
+                    "backups",
                 ],
                 "config",
             )?;
@@ -921,6 +941,7 @@ impl Config {
             let template_sources = templates::parse_sources(&root)?;
             let service_groups = services::parse(&lua, &root, directory)?;
             let nodes = nodes::parse(&root)?;
+            let backups = backups::parse(&root, directory, &service_groups)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
                 .map_err(|e| e.to_string())?
@@ -1265,6 +1286,7 @@ impl Config {
                 shutdown_timeout,
                 text,
                 record_ip,
+                backups,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
