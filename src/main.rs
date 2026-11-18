@@ -24,6 +24,7 @@ mod bungee_runtime;
 mod check;
 mod control;
 mod cordon;
+mod database_cli;
 mod dev;
 mod events;
 mod groups;
@@ -67,6 +68,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     rift dev [options] (development proxy for plugin authors; see rift dev --help)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift node init <name> [--address <host>] (print a node's token, systemd unit and setup checks; see rift node init --help)\n\
+    rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL; see rift database --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\
@@ -139,6 +141,9 @@ fn main() -> ExitCode {
 async fn start(args: Vec<String>) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "admin") {
         return crate::admin::client(&args[1..]).await;
+    }
+    if args.first().is_some_and(|arg| arg == "database") {
+        return database_cli::run(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "node") {
         if args.get(1).is_some_and(|arg| arg == "init") {

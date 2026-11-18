@@ -723,6 +723,46 @@ jobs:
       - name: Log a bot in through a local session server
         run: cargo test --locked --features test-session-server --test session_server
 
+  postgres:
+    name: PostgreSQL backend
+    # Every other job tests the instance database on SQLite; this one runs the
+    # database-backed tests again against a real server. They skip themselves
+    # without RIFT_TEST_POSTGRES_URL, so the other jobs need no server.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rift
+          POSTGRES_PASSWORD: rift-ci
+          POSTGRES_DB: rift
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rift -d rift"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RIFT_TEST_POSTGRES_URL: postgres://rift:rift-ci@127.0.0.1:5432/rift?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          shared-key: test-debug-ubuntu-24.04
+          cache-bin: false
+          # Only the debug test job saves the shared cache.
+          save-if: false
+      - name: Test the database-backed components on PostgreSQL
+        # Filters match module paths; config::database:: is covered by database::.
+        run: >-
+          cargo test --locked -p rift --lib --
+          database:: instance_store:: directory:: permissions:: extensions::storage::
+          --test-threads=1
+
   build-linux:
     name: Build shared Linux test executable
     runs-on: ubuntu-24.04
@@ -1212,7 +1252,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, changes, pumpkin-adapter, test, test-release, package, test-session-server, java, build-linux, minecraft, compatibility, translation, benchmark]
+    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, changes, pumpkin-adapter, test, test-release, package, test-session-server, postgres, java, build-linux, minecraft, compatibility, translation, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

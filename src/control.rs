@@ -72,6 +72,11 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
     if config.instance_database != previous.instance_database {
         return Err("instance_database: changing the database path requires a restart".into());
     }
+    if config.database != previous.database {
+        return Err(
+            "database: changing the database backend or its settings requires a restart".into(),
+        );
+    }
     if config.listeners != previous.listeners {
         return Err("gameplay listener changes require a restart".into());
     }
@@ -307,6 +312,18 @@ mod tests {
             live_compatible(&moved_database, &previous)
                 .unwrap_err()
                 .contains("instance_database")
+        );
+        let mut postgres = previous.clone();
+        postgres.database = Some(rift::database::PostgresConfig {
+            url: rift::database::Url::Env("RIFT_DATABASE_URL".into()),
+            ca: None,
+            standby: false,
+            schema: None,
+        });
+        assert!(
+            live_compatible(&postgres, &previous)
+                .unwrap_err()
+                .contains("database")
         );
         assert_eq!(
             reload(

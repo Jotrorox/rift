@@ -1,4 +1,4 @@
-//! The proxy's permission authority: the SQLite store in the shared database
+//! The proxy's permission authority: the store in the shared database
 //! ([`store`]), compile cache, revisions and change fan-out ([`authority`]),
 //! the change log ([`audit`]), LuckPerms import and export ([`import`]), the
 //! Lua `rift.permissions` module ([`lua`]), the `/perms` grammar shared by
@@ -42,22 +42,26 @@ pub fn backend_grants() -> (Vec<String>, Vec<String>) {
 /// Extension commands whose permission is neither registered by a backend
 /// nor granted (`true`, directly or by a covering wildcard) by any node in
 /// the store at `database` or in `extensions.groups`. Reads the database
-/// read-only; a missing file or a store without permission tables counts as
-/// empty. For `rift check --strict`.
+/// read-only; a missing SQLite file or a store without permission tables
+/// counts as empty. For `rift check --strict`.
 pub fn ungranted_command_permissions(
-    database: Option<&std::path::Path>,
+    database: Option<&crate::database::Location>,
     groups: &std::collections::BTreeMap<String, rift_permissions::Group>,
     commands: &[(String, String)],
 ) -> io::Result<Vec<(String, String)>> {
-    let opened = database
-        .filter(|path| path.exists())
-        .map(crate::database::Database::read_only)
-        .transpose()?;
+    use crate::database::{Database, Location, params};
+    let opened = match database {
+        Some(Location::Sqlite(path)) if !path.exists() => None,
+        Some(location) => Some(Database::connect_read_only(location)?),
+        None => None,
+    };
     let connection = opened.as_ref().map(|database| database.lock());
+    // Outside a transaction, so a failed query (no such table) affects only
+    // itself, on PostgreSQL too.
     let in_store = |sql: &str, key: &str| -> bool {
         connection
             .as_ref()
-            .is_some_and(|connection| connection.query_row(sql, [key], |_| Ok(())).is_ok())
+            .is_some_and(|connection| connection.query_row(sql, params![key], |_| Ok(())).is_ok())
     };
     let configured = |pattern: &str| {
         groups.values().flat_map(|group| &group.nodes).any(|node| {
@@ -154,8 +158,8 @@ impl From<rift_permissions::Error> for PermError {
     }
 }
 
-impl From<rusqlite::Error> for PermError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<crate::database::Error> for PermError {
+    fn from(error: crate::database::Error) -> Self {
         Self::Storage(error.to_string())
     }
 }

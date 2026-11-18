@@ -136,12 +136,13 @@ the backend's next command tree.
 
 ## Storage and revisions
 
-- **File.** Everything lives in the `instance_database` file (`rift.sqlite3`
-  beside the configuration by default), in tables prefixed `perm_`. Each part
+- **Database.** Everything lives in the instance database, in tables prefixed
+  `perm_`: the `instance_database` file (`rift.sqlite3` beside the
+  configuration by default) or a [PostgreSQL database](database.md). Each part
   records its schema version in `rift_schema`. Without a configuration file
   (a bare `rift <listen> <backend>`), the store is in memory.
-- **Integrity.** Startup runs `PRAGMA integrity_check` and refuses to start on
-  a damaged file.
+- **Integrity.** For a file, startup runs `PRAGMA integrity_check` and refuses
+  to start on a damaged one.
 - **Revisions.** Every write is one transaction that also appends one row to
   `perm_change`. The row's number is the new revision; it is stored, so it
   keeps increasing across restarts. A write that changes nothing creates no

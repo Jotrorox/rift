@@ -79,7 +79,9 @@ configuration is not writable.
 
 `rift check` does not open the database; run
 `sudo -u rift rift check --strict /etc/rift/rift.lua` to verify that it opens
-or can be created.
+or can be created. With the instance database in
+[PostgreSQL](database.md), put `RIFT_DATABASE_URL` in the unit's
+environment file instead; the SQLite file is then not used.
 
 Point `software_cache`, `template_storage` and server directories at paths
 below the state directory, or add them with `ReadWritePaths=`. The
