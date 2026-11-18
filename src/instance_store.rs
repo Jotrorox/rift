@@ -1,7 +1,7 @@
 //! Durable instance registrations and filesystem intents, kept in the
 //! instance database (SQLite, PostgreSQL or MariaDB).
 use crate::{
-    config::{Config, GroupMode, GroupState, NodeSchedule, ServiceInstance},
+    config::{Config, GroupMode, GroupState, MovedServer, NodeSchedule, ServiceInstance},
     database::{self, Database, Dialect, Location, OptionalExtension, params},
     provisioning::{self, Plan},
 };
@@ -94,6 +94,33 @@ const NODES_POSTGRES: &str = r#"CREATE TABLE node_schedules (
 const NODES_MARIADB: &str = "CREATE TABLE node_schedules (
     name VARCHAR(255) PRIMARY KEY NOT NULL,
     schedule VARCHAR(16) NOT NULL CHECK(schedule IN ('cordoned','draining'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
+
+/// Where `rift admin move` put servers of `managed_servers`, in a component
+/// of its own; older releases ignore the table and run the servers where the
+/// configuration says.
+const MOVED_COMPONENT: &str = "moved_servers";
+const MOVED_SCHEMA_VERSION: u32 = 1;
+const MOVED_V1: &str = "CREATE TABLE moved_servers (
+    name TEXT PRIMARY KEY NOT NULL,
+    configured_node TEXT NOT NULL,
+    configured_backend TEXT NOT NULL,
+    node TEXT NOT NULL,
+    port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535)
+) STRICT;";
+const MOVED_POSTGRES: &str = r#"CREATE TABLE moved_servers (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    configured_node TEXT COLLATE "C" NOT NULL,
+    configured_backend TEXT COLLATE "C" NOT NULL,
+    node TEXT COLLATE "C" NOT NULL,
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
+);"#;
+const MOVED_MARIADB: &str = "CREATE TABLE moved_servers (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    configured_node VARCHAR(255) NOT NULL,
+    configured_backend TEXT NOT NULL,
+    node VARCHAR(255) NOT NULL,
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
@@ -295,6 +322,9 @@ impl Store {
         database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |dialect, _| {
             ddl(dialect, [NODES_V1, NODES_POSTGRES, NODES_MARIADB])
         })?;
+        database.migrate(MOVED_COMPONENT, MOVED_SCHEMA_VERSION, |dialect, _| {
+            ddl(dialect, [MOVED_V1, MOVED_POSTGRES, MOVED_MARIADB])
+        })?;
         Ok(Self { database })
     }
 
@@ -371,6 +401,10 @@ impl Store {
             }
         }
         let mut candidate = config.clone();
+        let moved = self.moved_servers()?;
+        candidate
+            .restore_moved_servers(&moved)
+            .map_err(|e| self.error(format!("configuration conflict: {e}")))?;
         candidate
             .restore_instances(
                 records
@@ -380,6 +414,18 @@ impl Store {
                     .collect(),
             )
             .map_err(|e| self.error(format!("configuration conflict: {e}")))?;
+        for (name, entry) in &moved {
+            match candidate.moved_servers.get(name) {
+                Some(_) => crate::log_info!(
+                    "managed_servers.{name} runs on node {} since rift admin move; the configuration still names node {}",
+                    entry.node,
+                    entry.configured_node
+                ),
+                None => crate::log_info!(
+                    "managed_servers.{name}: the configuration changed since rift admin move, so it decides the node again"
+                ),
+            }
+        }
         for record in &records {
             let definition = &record.definition;
             let directory = &definition.plan.directory;
@@ -501,6 +547,7 @@ impl Store {
                 ))
             })?;
         }
+        self.retain_moved_servers(&candidate.moved_servers)?;
         *config = candidate;
         Ok(())
     }
@@ -843,6 +890,66 @@ impl Store {
             )
         };
         result.map_err(|e| self.error(e))?;
+        Ok(())
+    }
+
+    /// The servers of `managed_servers` that `rift admin move` moved.
+    pub fn moved_servers(&self) -> io::Result<BTreeMap<String, MovedServer>> {
+        let rows = self
+            .database
+            .lock()
+            .query_map(
+                "SELECT name,configured_node,configured_backend,node,port FROM moved_servers ORDER BY name",
+                params![],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        MovedServer {
+                            configured_node: row.get(1)?,
+                            configured_backend: row.get(2)?,
+                            node: row.get(3)?,
+                            port: row.get(4)?,
+                        },
+                    ))
+                },
+            )
+            .map_err(|e| self.error(e))?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Record where named server `name` runs since its move; `None` forgets
+    /// the move, once the server is back where the configuration has it.
+    pub fn set_moved_server(&self, name: &str, moved: Option<&MovedServer>) -> io::Result<()> {
+        let connection = self.database.lock();
+        let result = match moved {
+            None => connection.execute("DELETE FROM moved_servers WHERE name=?1", params![name]),
+            Some(moved) => connection.execute(
+                "INSERT INTO moved_servers (name,configured_node,configured_backend,node,port)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(name) DO UPDATE SET configured_node=excluded.configured_node,
+                    configured_backend=excluded.configured_backend, node=excluded.node,
+                    port=excluded.port",
+                params![
+                    name,
+                    moved.configured_node,
+                    moved.configured_backend,
+                    moved.node,
+                    moved.port
+                ],
+            ),
+        };
+        result.map_err(|e| self.error(e))?;
+        Ok(())
+    }
+
+    /// Forget the moves that no longer apply, because the configuration
+    /// changed the node or backend of their servers, or dropped them.
+    pub fn retain_moved_servers(&self, applied: &BTreeMap<String, MovedServer>) -> io::Result<()> {
+        for name in self.moved_servers()?.keys() {
+            if !applied.contains_key(name) {
+                self.set_moved_server(name, None)?;
+            }
+        }
         Ok(())
     }
 

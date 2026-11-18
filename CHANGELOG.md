@@ -36,7 +36,20 @@ and are listed under **SDKs**.
   `standby = true` for a waiting second controller, `rift database copy` to
   and from SQLite, and `rift check --strict`. See
   [docs/database.md](docs/database.md#use-mariadb).
-
+- Built-in backups of persistent instances on nodes. With
+  `rift.config.backups` set, Rift snapshots each such instance every
+  `interval_ms` (6 hours by default) into a folder on the proxy host or an S3
+  bucket (`backups.s3`, also MinIO, R2 and other S3-compatible services) and
+  keeps the newest `keep` snapshots. Files are stored by SHA-256, so after the
+  first snapshot only changed files are uploaded. A running server's world is
+  flushed with `save-off` and `save-all flush` and copied on its node first,
+  so saving pauses only for that local copy. `rift admin backup <instance>`
+  takes a snapshot now, `rift admin backups [instance]` lists them,
+  `rift admin backups forget` deletes them, and
+  `rift admin restore <instance> [snapshot] [--node <node>]` restores an
+  instance in place or onto another node, which recovers the instances of a
+  dead node in one command. Agents need the new `backup` feature: upgrade them
+  together with the controller. See [backups](docs/backups.md).
 - `tab_list.names = "all"` gives the entries backends list themselves the
   same rank names and order as Rift's own entries for players on other
   servers, so a backend without a tab plugin (such as Pumpkin) shows
@@ -51,6 +64,14 @@ and are listed under **SDKs**.
   node died; `--keep-source` keeps the old folder. Instances never move
   automatically. Both agents must advertise the new `move` feature: upgrade them
   together with the controller.
+- `rift admin move <server> <node>` also moves named servers of
+  `managed_servers`, folder included. The server keeps its port, and the move
+  is refused when that port is taken on the new node. The configuration file
+  is not edited: the instance database remembers the new node and backend
+  across reloads and restarts until the configuration changes the server's
+  `node` or backend, for example to the new values. `rift admin servers`
+  shows the node the configuration still names as `configured_node`. See
+  [docs/nodes.md](docs/nodes.md#move-a-named-server).
 
 ### Nodes
 
@@ -119,6 +140,9 @@ and are listed under **SDKs**.
   ignore it.
 - New component `extension_store` (table `extension_entries`), created only
   with `extensions.storage = { database = true }`. Older releases ignore it.
+- New component `moved_servers`, schema 1: where `rift admin move` put named
+  servers. Older releases ignore it and run those servers where the
+  configuration says, without their folder there.
 
 ## [0.1.0] - 2026-11-16
 

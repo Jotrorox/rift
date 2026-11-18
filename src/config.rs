@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use backups::{BackupTarget, Backups, DEFAULT_BACKUP_DIRECTORY, S3Target};
 pub use managed::{
     InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
 };
@@ -25,13 +26,15 @@ pub use nodes::{
 };
 pub use permissions::PermissionsConfig;
 pub use services::{
-    Balance, GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+    Balance, GroupMode, GroupState, InstanceStorage, MovedServer, ServiceGroup, ServiceInstance,
+    ServiceScaling,
 };
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
 };
 pub use templates::ServerTemplate;
 
+mod backups;
 mod database;
 mod managed;
 mod messaging;
@@ -68,6 +71,10 @@ pub struct Config {
     pub template_sources: BTreeMap<String, crate::template_source::TemplateSource>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
+    /// Servers of `managed_servers` that `rift admin move` put on another
+    /// node than the Lua configuration names; their definitions and backends
+    /// above already show where they run.
+    pub moved_servers: BTreeMap<String, MovedServer>,
     /// Hosts running `rift node`; servers without a node run on this host.
     pub nodes: BTreeMap<String, NodeConfig>,
     /// The SQLite file of the instance database, unless `database` puts it
@@ -123,6 +130,8 @@ pub struct Config {
     /// `players = { record_ip }`: whether the player directory remembers
     /// the address a player last joined from. Default `true`.
     pub record_ip: bool,
+    /// `backups`: snapshots of persistent instances on nodes.
+    pub backups: Option<Backups>,
 }
 
 /// Protocol translation between players and backends on different Minecraft
@@ -648,6 +657,20 @@ impl Config {
         for (name, node) in &self.nodes {
             variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
         }
+        if let Some(Backups {
+            target: BackupTarget::S3(s3),
+            ..
+        }) = &self.backups
+        {
+            variables.push((
+                "backups.s3.access_key_env".into(),
+                s3.access_key_env.clone(),
+            ));
+            variables.push((
+                "backups.s3.secret_key_env".into(),
+                s3.secret_key_env.clone(),
+            ));
+        }
         if let Some(web) = &self.web {
             variables.extend(web.token_variables());
         }
@@ -689,6 +712,7 @@ impl Config {
             template_sources: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
+            moved_servers: BTreeMap::new(),
             nodes: BTreeMap::new(),
             instance_database: PathBuf::from("rift.sqlite3"),
             database: None,
@@ -726,6 +750,7 @@ impl Config {
             shutdown_timeout: Duration::from_secs(30),
             text: std::sync::Arc::default(),
             record_ip: true,
+            backups: None,
         };
         config.validate()?;
         Ok(config)
@@ -900,6 +925,7 @@ impl Config {
                     "shutdown_timeout_ms",
                     "text",
                     "players",
+                    "backups",
                 ],
                 "config",
             )?;
@@ -936,6 +962,7 @@ impl Config {
             let template_sources = templates::parse_sources(&root)?;
             let service_groups = services::parse(&lua, &root, directory)?;
             let nodes = nodes::parse(&root)?;
+            let backups = backups::parse(&root, directory, &service_groups)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
                 .map_err(|e| e.to_string())?
@@ -1245,6 +1272,7 @@ impl Config {
                 template_sources,
                 service_groups,
                 instances: BTreeMap::new(),
+                moved_servers: BTreeMap::new(),
                 nodes,
                 instance_database,
                 database,
@@ -1282,10 +1310,13 @@ impl Config {
                 shutdown_timeout,
                 text,
                 record_ip,
+                backups,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
         if let Some(previous) = previous {
+            services::restore_moved(&mut config, &previous.moved_servers)
+                .map_err(|error| invalid(format!("{name}: {error}")))?;
             services::restore_instances(&mut config, previous)
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }

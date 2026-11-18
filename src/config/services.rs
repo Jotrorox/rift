@@ -161,6 +161,30 @@ pub struct ServiceInstance {
     pub node: Option<String>,
 }
 
+/// Where `rift admin move` put a server of `managed_servers`. The instance
+/// database remembers it over the Lua configuration, but only while the
+/// configuration still names the node and backend the server had before its
+/// first move: changing either there hands the server back to the
+/// configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedServer {
+    /// The node the Lua configuration names.
+    pub configured_node: String,
+    /// The backend address the Lua configuration names.
+    pub configured_backend: String,
+    /// The node the server runs on since its move.
+    pub node: String,
+    /// The port of its backend on that node.
+    pub port: u16,
+}
+
+impl MovedServer {
+    /// Whether the move only restates what the configuration says.
+    fn configured(&self, address: &str) -> bool {
+        self.node == self.configured_node && address == self.configured_backend
+    }
+}
+
 pub(super) fn parse(
     lua: &mlua::Lua,
     root: &Table,
@@ -767,6 +791,42 @@ pub(super) fn restore_instances(config: &mut Config, previous: &Config) -> Resul
     Ok(())
 }
 
+/// Put the servers of `managed_servers` that `rift admin move` moved on
+/// their new nodes. A move whose server the configuration no longer defines,
+/// or now gives another node or backend, no longer applies.
+pub(super) fn restore_moved(
+    config: &mut Config,
+    moved: &BTreeMap<String, MovedServer>,
+) -> Result<(), String> {
+    for (name, entry) in moved {
+        let Some(backend) = config.backends.get(name) else {
+            continue;
+        };
+        let applies = config.managed_servers.get(name).is_some_and(|server| {
+            server.node.as_deref() == Some(entry.configured_node.as_str())
+                && backend.address() == entry.configured_backend
+        });
+        if !applies {
+            continue;
+        }
+        let node = config.nodes.get(&entry.node).ok_or_else(|| {
+            format!(
+                "managed_servers.{name}: runs on node {:?} since rift admin move, which is not configured; keep that node, or set the node and backend of the server in the configuration",
+                entry.node
+            )
+        })?;
+        let backend = backend
+            .at(&node.backend_address(entry.port))
+            .map_err(|error| format!("managed_servers.{name}: {error}"))?;
+        config.backends.insert(name.clone(), backend);
+        if let Some(server) = config.managed_servers.get_mut(name) {
+            server.node = Some(entry.node.clone());
+        }
+        config.moved_servers.insert(name.clone(), entry.clone());
+    }
+    Ok(())
+}
+
 impl Config {
     /// Restore all durable registrations together before validating references.
     pub fn restore_instances(
@@ -861,6 +921,76 @@ impl Config {
         Ok(())
     }
 
+    /// Restore the moves of named servers kept in the instance database
+    /// before validating, like [`restore_instances`](Self::restore_instances).
+    pub fn restore_moved_servers(
+        &mut self,
+        moved: &BTreeMap<String, MovedServer>,
+    ) -> io::Result<()> {
+        let mut candidate = self.clone();
+        restore_moved(&mut candidate, moved).map_err(invalid)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Put named server `name` of `managed_servers` on node `node`, with the
+    /// same backend port. Moving it back to where the configuration has it
+    /// forgets the move.
+    pub fn move_named_server(&mut self, name: &str, node: &str) -> io::Result<()> {
+        if self.instances.contains_key(name) {
+            return Err(invalid(format!("{name} is a service instance")));
+        }
+        let from = self
+            .managed_servers
+            .get(name)
+            .ok_or_else(|| invalid(format!("unknown managed server {name:?}")))?
+            .node
+            .clone()
+            .ok_or_else(|| invalid(format!("managed_servers.{name} runs on this host")))?;
+        let backend = self
+            .backends
+            .get(name)
+            .ok_or_else(|| invalid(format!("managed_servers.{name}: unknown backend")))?;
+        let port = backend
+            .address()
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .ok_or_else(|| invalid(format!("managed_servers.{name}: backend has no port")))?;
+        let address = self
+            .nodes
+            .get(node)
+            .ok_or_else(|| invalid(format!("unknown node {node:?}")))?
+            .backend_address(port);
+        let entry = match self.moved_servers.get(name) {
+            Some(earlier) => MovedServer {
+                node: node.to_owned(),
+                port,
+                ..earlier.clone()
+            },
+            None => MovedServer {
+                configured_node: from,
+                configured_backend: backend.address().to_owned(),
+                node: node.to_owned(),
+                port,
+            },
+        };
+        let mut candidate = self.clone();
+        candidate
+            .backends
+            .insert(name.to_owned(), backend.at(&address)?);
+        if let Some(server) = candidate.managed_servers.get_mut(name) {
+            server.node = Some(node.to_owned());
+        }
+        if entry.configured(&address) {
+            candidate.moved_servers.remove(name);
+        } else {
+            candidate.moved_servers.insert(name.to_owned(), entry);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Re-register an instance on another node and port, keeping everything
     /// captured at its creation (group, template, storage).
     pub fn move_instance(&mut self, name: &str, node: &str, port: u16) -> io::Result<()> {
@@ -917,6 +1047,111 @@ mod tests {
             )),
             "scaling.lua",
         )
+    }
+
+    fn named_source(node: &str, backend: &str) -> String {
+        format!(
+            "rift.config.listeners.public='127.0.0.1:0'
+rift.config.backends.survival='{backend}'
+rift.config.backends.creative='10.0.0.12:25570'
+rift.config.routes.public='survival'
+rift.config.messaging={{listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}}
+rift.config.nodes.node1={{address='10.0.0.11'}}
+rift.config.nodes.node2={{address='10.0.0.12'}}
+rift.config.nodes.node3={{address='10.0.0.13'}}
+rift.config.nodes.node4={{address='10.0.0.14'}}
+rift.config.managed_servers.survival={{node='{node}',directory='survival',command={{'java'}}}}
+rift.config.managed_servers.creative={{node='node2',directory='creative',command={{'java'}}}}"
+        )
+    }
+
+    #[test]
+    fn named_servers_stay_moved_until_the_configuration_changes_their_node() {
+        let original = named_source("node1", "10.0.0.11:25570");
+        let mut config = Config::from_lua(&original, "moved.lua").unwrap();
+        // creative already listens on port 25570 of node2.
+        let error = config.move_named_server("survival", "node2").unwrap_err();
+        assert!(
+            error.to_string().contains("backend address conflicts"),
+            "{error}"
+        );
+        assert!(config.moved_servers.is_empty());
+        assert_eq!(config.backends["survival"].address(), "10.0.0.11:25570");
+
+        config.move_named_server("survival", "node3").unwrap();
+        assert_eq!(
+            config.managed_servers["survival"].node.as_deref(),
+            Some("node3")
+        );
+        assert_eq!(config.backends["survival"].address(), "10.0.0.13:25570");
+        assert_eq!(
+            config.moved_servers["survival"],
+            MovedServer {
+                configured_node: "node1".into(),
+                configured_backend: "10.0.0.11:25570".into(),
+                node: "node3".into(),
+                port: 25570,
+            }
+        );
+        assert!(config.move_named_server("survival", "nowhere").is_err());
+        assert!(config.move_named_server("unknown", "node3").is_err());
+
+        // Reloading the same configuration keeps the move.
+        let reloaded = Config::from_lua_with_instances(&original, "moved.lua", &config).unwrap();
+        assert_eq!(reloaded.moved_servers, config.moved_servers);
+        assert_eq!(reloaded.managed_servers, config.managed_servers);
+        assert_eq!(reloaded.backends, config.backends);
+        // So does a restart, which restores the move from the database.
+        let mut restarted = Config::from_lua(&original, "moved.lua").unwrap();
+        restarted
+            .restore_moved_servers(&config.moved_servers)
+            .unwrap();
+        assert_eq!(restarted.managed_servers, config.managed_servers);
+        assert_eq!(restarted.backends, config.backends);
+
+        // Writing the move into the configuration forgets it, with the same
+        // definition, so a reload can apply it.
+        let updated = Config::from_lua_with_instances(
+            &named_source("node3", "10.0.0.13:25570"),
+            "moved.lua",
+            &config,
+        )
+        .unwrap();
+        assert!(updated.moved_servers.is_empty());
+        assert_eq!(updated.managed_servers, config.managed_servers);
+        assert_eq!(updated.backends, config.backends);
+        // Any other node or backend there wins too.
+        let changed = Config::from_lua_with_instances(
+            &named_source("node1", "10.0.0.11:25580"),
+            "moved.lua",
+            &config,
+        )
+        .unwrap();
+        assert!(changed.moved_servers.is_empty());
+        assert_eq!(changed.backends["survival"].address(), "10.0.0.11:25580");
+        // The node it moved to must stay while the move applies.
+        let without = original.replace("rift.config.nodes.node3={address='10.0.0.13'}\n", "");
+        assert_ne!(without, original);
+        let error = Config::from_lua_with_instances(&without, "moved.lua", &config).unwrap_err();
+        assert!(
+            error.to_string().contains("since rift admin move"),
+            "{error}"
+        );
+
+        // A second move remembers what the configuration says; moving back
+        // there forgets the move.
+        config.move_named_server("survival", "node4").unwrap();
+        assert_eq!(config.moved_servers["survival"].configured_node, "node1");
+        assert_eq!(config.moved_servers["survival"].node, "node4");
+        config.move_named_server("survival", "node1").unwrap();
+        assert!(config.moved_servers.is_empty());
+        assert_eq!(config.backends["survival"].address(), "10.0.0.11:25570");
+        assert_eq!(
+            config.managed_servers,
+            Config::from_lua(&original, "moved.lua")
+                .unwrap()
+                .managed_servers
+        );
     }
 
     #[test]
