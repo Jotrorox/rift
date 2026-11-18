@@ -68,7 +68,7 @@ plugin and reload again.
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
 | `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition. A server with `keep_running` survives that restart with the process it has; stop and start it to apply a changed command or environment |
 | `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
-| `instance_database` | Bundled SQLite file, default `rift.sqlite3` beside the config; restores registrations before scaling. Path changes require a restart |
+| `instance_database`, `database` | Bundled SQLite file, default `rift.sqlite3` beside the config, or a [PostgreSQL database](database.md); restores registrations before scaling. Changing the path or backend requires a restart |
 | `nodes` | Apply live: added nodes may log in, removed ones lose their session, and labels, `memory_mb`, `max_instances` and `token_env` change in place. A node that still runs servers cannot be removed or change its `address`. See [change nodes while Rift runs](nodes.md#change-nodes-while-rift-runs) |
 | `messaging` | Restart required; agents keep their servers running while the controller restarts and are adopted again. See [multiple hosts](nodes.md) |
 | Runtime service instances | SQLite preserves names, groups, nodes, ports, storage ownership and explicit stops across reloads and proxy restarts |

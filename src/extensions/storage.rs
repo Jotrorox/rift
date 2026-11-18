@@ -1,9 +1,13 @@
 //! Bounded host-owned state, shared by every callback in an extension runtime.
 //!
-//! A configured store is a bundled-SQLite database. Each mutation commits only
-//! the entries it changes, in WAL mode with `synchronous=FULL`, so a write costs
-//! one small append and sync instead of rewriting the store. The connection holds
-//! an exclusive lock: one runtime owns a path, and a second process fails at startup.
+//! A configured store is either a bundled-SQLite database of its own (`path`)
+//! or the table `extension_entries` in the instance database
+//! (`database = true`), which is a SQLite file or PostgreSQL. Each mutation
+//! commits only the entries it changes. A file store runs in WAL mode with
+//! `synchronous=FULL`, so a write costs one small append and sync instead of
+//! rewriting the store; its connection holds an exclusive lock: one runtime
+//! owns a path, and a second process fails at startup. The instance database
+//! has one owner already, so a store kept there needs no lock of its own.
 //!
 //! Memory mirrors committed rows. Writers are serialized and change memory only
 //! after their transaction commits; readers use the mirror and never wait for a
@@ -12,6 +16,7 @@
 //! Version 1 stores were checksummed binary snapshots. Startup converts one into
 //! a database built beside it, atomically replaces the snapshot, and keeps the
 //! original bytes in `<file>.v1-backup`.
+use crate::database::{Database, Dialect};
 use mlua::{Lua, Table, Value};
 use rusqlite::{Connection, ErrorCode, OpenFlags, params};
 use sha2::{Digest, Sha256};
@@ -45,6 +50,14 @@ const SCHEMA: &str = "CREATE TABLE entries (
     value BLOB NOT NULL,
     PRIMARY KEY (namespace, key)
 ) STRICT, WITHOUT ROWID;";
+/// The component name and schema version of `extension_entries` in the
+/// instance database.
+const SHARED_COMPONENT: &str = "extension_store";
+const SHARED_VERSION: u32 = 1;
+const SHARED_UPSERT: &str =
+    "INSERT INTO extension_entries (namespace, key, value) VALUES (?1, ?2, ?3)
+     ON CONFLICT (namespace, key) DO UPDATE SET value = excluded.value";
+const SHARED_DELETE: &str = "DELETE FROM extension_entries WHERE namespace = ?1 AND key = ?2";
 /// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
 const HOST_PREFIX: &str = "rift.";
 /// Persistent plugins' private namespaces, `plugin.<name>.<namespace>`. Each
@@ -139,9 +152,18 @@ fn entry_size((namespace, key): &Key, value: &[u8]) -> usize {
     8 + namespace.len() + key.len() + value.len()
 }
 
+/// Where a configured store keeps its entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// `path`: a SQLite file of the store's own.
+    File(PathBuf),
+    /// `database = true`: `extension_entries` in the instance database.
+    Database,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StorageConfig {
-    pub path: PathBuf,
+    pub target: Target,
     pub quotas: Quotas,
 }
 
@@ -229,20 +251,50 @@ pub(super) fn parse(value: Value) -> mlua::Result<Option<StorageConfig>> {
         Value::Table(table) => table,
         _ => return Err(mlua::Error::runtime("extensions.storage must be a table")),
     };
-    only_fields(&table, &["path", "quota"], "extensions.storage")?;
-    let Value::String(path) = table.raw_get::<Value>("path")? else {
-        return Err(mlua::Error::runtime(
-            "extensions.storage.path must be a string",
-        ));
+    only_fields(&table, &["path", "database", "quota"], "extensions.storage")?;
+    let path = match table.raw_get::<Value>("path")? {
+        Value::Nil => None,
+        Value::String(path) => {
+            let path = path.to_str()?;
+            if path.is_empty() || path.contains('\0') {
+                return Err(mlua::Error::runtime(
+                    "extensions.storage.path must be nonempty and contain no NUL bytes",
+                ));
+            }
+            Some(PathBuf::from(path.as_ref()))
+        }
+        _ => {
+            return Err(mlua::Error::runtime(
+                "extensions.storage.path must be a string",
+            ));
+        }
     };
-    let path = path.to_str()?;
-    if path.is_empty() || path.contains('\0') {
-        return Err(mlua::Error::runtime(
-            "extensions.storage.path must be nonempty and contain no NUL bytes",
-        ));
-    }
+    // `database = false` means the same as leaving it out.
+    let database = match table.raw_get::<Value>("database")? {
+        Value::Nil => false,
+        Value::Boolean(database) => database,
+        _ => {
+            return Err(mlua::Error::runtime(
+                "extensions.storage.database must be a boolean",
+            ));
+        }
+    };
+    let target = match (path, database) {
+        (Some(path), false) => Target::File(path),
+        (None, true) => Target::Database,
+        (Some(_), true) => {
+            return Err(mlua::Error::runtime(
+                "extensions.storage: set either path or database = true, not both",
+            ));
+        }
+        (None, false) => {
+            return Err(mlua::Error::runtime(
+                "extensions.storage needs path (a store file) or database = true (the instance database)",
+            ));
+        }
+    };
     Ok(Some(StorageConfig {
-        path: PathBuf::from(path.as_ref()),
+        target,
         quotas: parse_quotas(table.raw_get("quota")?)?,
     }))
 }
@@ -339,11 +391,21 @@ impl Transaction<'_> {
     }
 }
 
+/// Where commits go.
+enum Writer {
+    /// A memory-only store.
+    Memory,
+    /// The store's own SQLite file.
+    File(Connection),
+    /// `extension_entries` in the instance database.
+    Shared(Arc<Database>),
+}
+
 struct Inner {
     memory: RwLock<Memory>,
     quotas: Quotas,
-    /// Serializes writers; `None` for a memory-only store.
-    writer: Mutex<Option<Connection>>,
+    /// Serializes writers.
+    writer: Mutex<Writer>,
 }
 
 #[derive(Clone)]
@@ -353,12 +415,13 @@ fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
+fn deadline_exceeded() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "extension store deadline exceeded")
+}
+
 fn check_deadline(deadline: Instant) -> io::Result<()> {
     if Instant::now() >= deadline {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "extension store deadline exceeded",
-        ));
+        return Err(deadline_exceeded());
     }
     Ok(())
 }
@@ -414,19 +477,44 @@ fn validate_entry((namespace, key): &Key, value: &[u8]) -> io::Result<()> {
 }
 
 impl Store {
-    fn new(memory: Memory, quotas: Quotas, connection: Option<Connection>) -> Self {
+    fn new(memory: Memory, quotas: Quotas, writer: Writer) -> Self {
         Self(Arc::new(Inner {
             memory: RwLock::new(memory),
             quotas,
-            writer: Mutex::new(connection),
+            writer: Mutex::new(writer),
         }))
     }
 
-    pub(crate) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
+    /// Open the configured store, or a memory-only one for `None`.
+    /// `database` is the instance database, which the database target needs.
+    pub(crate) fn open(
+        config: Option<&StorageConfig>,
+        database: Option<&Arc<Database>>,
+    ) -> io::Result<Self> {
         let Some(config) = config else {
-            return Ok(Self::new(Memory::default(), Quotas::default(), None));
+            return Ok(Self::new(
+                Memory::default(),
+                Quotas::default(),
+                Writer::Memory,
+            ));
         };
-        let path = config.path.as_path();
+        let path = match &config.target {
+            Target::File(path) => path.as_path(),
+            Target::Database => {
+                let Some(database) = database else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "extensions.storage.database needs the instance database, which Rift opens when it runs from a configuration file",
+                    ));
+                };
+                let entries = open_shared(database)?;
+                return Ok(Self::new(
+                    Memory::new(entries)?,
+                    config.quotas.clone(),
+                    Writer::Shared(database.clone()),
+                ));
+            }
+        };
         // Inspect before opening: opening a named pipe can block indefinitely.
         // Check the open descriptor again below in case the path was replaced.
         match fs::metadata(path) {
@@ -462,11 +550,11 @@ impl Store {
         Ok(Self::new(
             Memory::new(entries)?,
             config.quotas.clone(),
-            Some(connection),
+            Writer::File(connection),
         ))
     }
 
-    fn lock(&self, deadline: Instant) -> io::Result<MutexGuard<'_, Option<Connection>>> {
+    fn lock(&self, deadline: Instant) -> io::Result<MutexGuard<'_, Writer>> {
         loop {
             check_deadline(deadline)?;
             match self.0.writer.try_lock() {
@@ -586,9 +674,11 @@ impl Store {
         };
         if !changes.is_empty() {
             check_deadline(deadline)?;
-            if let Some(connection) = writer.as_mut() {
-                commit(connection, &changes, deadline)
-                    .map_err(|error| error.into_io("cannot commit extension store change"))?;
+            match &mut *writer {
+                Writer::Memory => {}
+                Writer::File(connection) => commit(connection, &changes, deadline)
+                    .map_err(|error| error.into_io("cannot commit extension store change"))?,
+                Writer::Shared(database) => commit_shared(database, &changes, deadline)?,
             }
             // The commit is durable. Do not return a deadline error after it:
             // memory must agree with the database.
@@ -721,6 +811,91 @@ fn commit(
     check_deadline(deadline).map_err(CommitError::Io)?;
     transaction.commit()?;
     Ok(())
+}
+
+/// [`commit`] for a store in the instance database. The connection is shared
+/// with the other components, so waiting for it also stops at `deadline`.
+fn commit_shared(
+    database: &Database,
+    changes: &BTreeMap<Key, Option<Vec<u8>>>,
+    deadline: Instant,
+) -> io::Result<()> {
+    let failed = |error: crate::database::Error| {
+        database.error(format!("cannot commit extension store change: {error}"))
+    };
+    let mut connection = database
+        .lock_until(deadline)
+        .map_err(|_| deadline_exceeded())?;
+    let transaction = connection.transaction().map_err(failed)?;
+    for ((namespace, key), value) in changes {
+        let result = match value {
+            Some(value) => transaction.execute(
+                SHARED_UPSERT,
+                crate::database::params![namespace, key, value],
+            ),
+            None => transaction.execute(SHARED_DELETE, crate::database::params![namespace, key]),
+        };
+        result.map_err(failed)?;
+    }
+    check_deadline(deadline)?;
+    transaction.commit().map_err(failed)
+}
+
+fn shared_schema(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Sqlite => {
+            "CREATE TABLE extension_entries (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value BLOB NOT NULL,
+                PRIMARY KEY (namespace, key)
+            ) STRICT, WITHOUT ROWID;"
+        }
+        Dialect::Postgres => {
+            "CREATE TABLE extension_entries (
+                namespace TEXT COLLATE \"C\" NOT NULL,
+                key TEXT COLLATE \"C\" NOT NULL,
+                value BYTEA NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );"
+        }
+    }
+}
+
+/// Create or migrate `extension_entries` in the instance database.
+pub(super) fn prepare_shared(database: &Database) -> io::Result<()> {
+    database.migrate(SHARED_COMPONENT, SHARED_VERSION, |dialect, _| {
+        shared_schema(dialect).to_owned()
+    })
+}
+
+fn shared_error(database: &Database, error: impl std::fmt::Display) -> io::Error {
+    database.error(format!("extension store: {error}"))
+}
+
+/// Create `extension_entries` in the instance database if needed and load it.
+/// The connection is released before returning.
+fn open_shared(database: &Database) -> io::Result<Entries> {
+    prepare_shared(database)?;
+    let rows = database
+        .lock()
+        .query_map(
+            "SELECT namespace, key, value FROM extension_entries",
+            crate::database::params![],
+            |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| shared_error(database, e))?;
+    let mut entries = Entries::new();
+    for (key, value) in rows {
+        validate_entry(&key, &value).map_err(|e| shared_error(database, e))?;
+        entries.insert(key, value);
+    }
+    Ok(entries)
 }
 
 fn database_error(path: &Path, error: impl std::fmt::Display) -> io::Error {
@@ -1089,8 +1264,16 @@ mod tests {
         }
         fn config(&self) -> StorageConfig {
             StorageConfig {
-                path: self.0.join("state"),
+                target: Target::File(self.0.join("state")),
                 quotas: Quotas::default(),
+            }
+        }
+    }
+    impl StorageConfig {
+        fn path(&self) -> &Path {
+            match &self.target {
+                Target::File(path) => path,
+                Target::Database => panic!("not a file store"),
             }
         }
     }
@@ -1128,10 +1311,220 @@ mod tests {
         assert_eq!(
             parse(lua.load("{path='state.bin'}").eval().unwrap()).unwrap(),
             Some(StorageConfig {
-                path: "state.bin".into(),
+                target: Target::File("state.bin".into()),
                 quotas: Quotas::default(),
             })
         );
+    }
+
+    #[test]
+    fn config_keeps_the_store_in_the_instance_database_with_database_true() {
+        let lua = Lua::new();
+        for (source, message) in [
+            ("{database=false}", "needs path"),
+            ("{database=1}", "must be a boolean"),
+            ("{database='yes'}", "must be a boolean"),
+            ("{path='a', database=true}", "not both"),
+            ("{database=true, typo=1}", "unknown"),
+        ] {
+            let error = parse(lua.load(source).eval().unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{source}: {error}");
+        }
+        assert_eq!(
+            parse(
+                lua.load("{database=true, quota={entries=10}}")
+                    .eval()
+                    .unwrap()
+            )
+            .unwrap(),
+            Some(StorageConfig {
+                target: Target::Database,
+                quotas: Quotas {
+                    default: Quota {
+                        entries: 10,
+                        bytes: DEFAULT_QUOTA.bytes,
+                    },
+                    plugins: BTreeMap::new(),
+                },
+            })
+        );
+        // `database = false` is the same as leaving it out.
+        assert_eq!(
+            parse(lua.load("{path='a', database=false}").eval().unwrap())
+                .unwrap()
+                .unwrap()
+                .target,
+            Target::File("a".into())
+        );
+    }
+
+    fn shared(entries: usize) -> StorageConfig {
+        let mut quotas = Quotas::default();
+        quotas.default.entries = entries;
+        StorageConfig {
+            target: Target::Database,
+            quotas,
+        }
+    }
+
+    /// The database target on either backend: entries survive reopening
+    /// from the same database, and quotas still apply.
+    fn exercise_shared(database: &Arc<Database>) {
+        let config = shared(4);
+        let store = Store::open(Some(&config), Some(database)).unwrap();
+        lua(&store)
+            .load(
+                r#"
+            assert(rift.store.get('one', 'key') == nil)
+            rift.store.set('one', 'key', 'hello\0\255')
+            rift.store.set('two', 'key', '')
+            assert(rift.store.increment('one', 'counter', 3) == 3)
+            assert(rift.store.increment('one', 'counter', -1) == 2)
+            rift.store.set('two', 'deleted', 'value')
+            assert(rift.store.delete('two', 'deleted'))
+            assert(not rift.store.delete('two', 'deleted'))
+        "#,
+            )
+            .exec()
+            .unwrap();
+        // The script now has three of its four entries.
+        let fill = |store: &Store, count: usize| {
+            store.mutate(deadline(), |entries| {
+                for i in 0..count {
+                    entries.insert(("fill".into(), i.to_string()), Vec::new());
+                }
+                Ok(())
+            })
+        };
+        let error = fill(&store, 2).unwrap_err().to_string();
+        assert!(error.contains("exceeds 4 entries"), "{error}");
+        fill(&store, 1).unwrap();
+        store
+            .mutate(deadline(), |entries| {
+                entries.insert(("plugin.p.data".into(), "k".into()), b"v".to_vec());
+                entries.insert((MEMBER_NAMESPACE.into(), "m".into()), b"staff".to_vec());
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        // The store does not hold the connection between writes.
+        let rows: i64 = database
+            .lock()
+            .query_row(
+                "SELECT count(*) FROM extension_entries",
+                crate::database::params![],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 6);
+        let reopened = Store::open(Some(&config), Some(database)).unwrap();
+        lua(&reopened)
+            .load(
+                r#"
+            assert(rift.store.get('one', 'key') == 'hello\0\255')
+            assert(rift.store.get('two', 'key') == '')
+            assert(rift.store.get('one', 'counter') == '2')
+            assert(rift.store.get('two', 'deleted') == nil)
+        "#,
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(
+            reopened.namespace("plugin.p.data"),
+            vec![("k".to_owned(), b"v".to_vec())]
+        );
+        assert_eq!(reopened.memory().host.entries, 1);
+        // Usage is counted again on open.
+        assert!(fill(&reopened, 2).is_err());
+        assert_eq!(
+            reopened.namespace("fill"),
+            vec![("0".to_owned(), Vec::new())]
+        );
+    }
+
+    #[test]
+    fn the_store_can_live_in_the_instance_database() {
+        let database = Arc::new(Database::memory());
+        exercise_shared(&database);
+        let rows = |database: &Arc<Database>| -> Vec<(String, String)> {
+            database
+                .lock()
+                .query_map(
+                    "SELECT namespace, key FROM extension_entries ORDER BY namespace, key",
+                    crate::database::params![],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+        };
+        let before = rows(&database);
+        // A failed commit changes neither memory nor the table.
+        let store = Store::open(Some(&shared(16)), Some(&database)).unwrap();
+        database
+            .lock()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail BEFORE INSERT ON main.extension_entries WHEN NEW.key = 'fail'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        let error = store
+            .mutate(deadline(), |entries| {
+                entries.insert(("one".into(), "key".into()), b"new".to_vec());
+                entries.insert(("one".into(), "fail".into()), b"v".to_vec());
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("injected"), "{error}");
+        assert_eq!(
+            store.get("one".into(), "key".into(), deadline()).unwrap(),
+            Some(b"hello\0\xff".to_vec())
+        );
+        assert_eq!(rows(&database), before);
+        // Writers wait for the shared connection only until their deadline.
+        let held = database.lock();
+        let error = store
+            .mutate(Instant::now() + Duration::from_millis(20), |entries| {
+                entries.insert(("one".into(), "late".into()), b"v".to_vec());
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(held);
+        assert_eq!(
+            store.get("one".into(), "late".into(), deadline()).unwrap(),
+            None
+        );
+        drop(store);
+        // Invalid rows fail startup, as in a store file.
+        database
+            .lock()
+            .execute(
+                "INSERT INTO extension_entries VALUES ('n', ?1, X'')",
+                crate::database::params!["k".repeat(MAX_LABEL + 1)],
+            )
+            .unwrap();
+        assert!(Store::open(Some(&shared(16)), Some(&database)).is_err());
+    }
+
+    #[test]
+    fn the_store_can_live_in_postgres() {
+        let Some(location) =
+            crate::database::test_postgres_or_skip("the_store_can_live_in_postgres")
+        else {
+            return;
+        };
+        let database = Arc::new(Database::connect(&location).unwrap());
+        assert_eq!(database.dialect(), Dialect::Postgres);
+        exercise_shared(&database);
+    }
+
+    #[test]
+    fn the_database_target_needs_the_instance_database() {
+        let error = Store::open(Some(&shared(16)), None).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("instance database"), "{error}");
     }
 
     #[test]
@@ -1187,7 +1580,7 @@ mod tests {
     fn namespaces_binary_values_and_deletes_survive_reopening() {
         let temp = Temporary::new();
         let config = temp.config();
-        let store = Store::open(Some(&config)).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         lua(&store)
             .load(
                 r#"
@@ -1204,7 +1597,7 @@ mod tests {
             .exec()
             .unwrap();
         drop(store);
-        let reopened = Store::open(Some(&config)).unwrap();
+        let reopened = Store::open(Some(&config), None).unwrap();
         lua(&reopened)
             .load(
                 r#"
@@ -1220,7 +1613,7 @@ mod tests {
 
     #[test]
     fn concurrent_lua_callbacks_increment_without_losing_updates() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let store = store.clone();
@@ -1245,7 +1638,7 @@ mod tests {
 
     #[test]
     fn invalid_types_limits_and_integer_overflow_leave_values_unchanged() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         lua(&store)
             .load(
                 r#"
@@ -1295,7 +1688,7 @@ mod tests {
 
     #[test]
     fn increment_rejects_values_outside_luajit_exact_integer_range() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         lua(&store)
             .load(
                 r#"
@@ -1325,7 +1718,7 @@ mod tests {
 
     #[test]
     fn host_and_persistent_plugin_namespaces_are_out_of_reach_of_scripts() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         store
             .mutate(Instant::now() + Duration::from_secs(1), |entries| {
                 entries.insert(("plugin.ban.list".into(), "k".into()), b"v".to_vec());
@@ -1358,7 +1751,7 @@ mod tests {
 
     #[test]
     fn expired_operations_cannot_mutate_state() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         let lua = Lua::new();
         let api = lua.create_table().unwrap();
         let expires = Instant::now() + Duration::from_millis(10);
@@ -1380,7 +1773,7 @@ mod tests {
 
     #[test]
     fn contended_writes_stop_at_the_deadline_while_reads_continue() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         let held = store.0.writer.lock().unwrap();
         let waiting = store.clone();
         let (send, receive) = std::sync::mpsc::channel();
@@ -1404,23 +1797,23 @@ mod tests {
     fn failed_commits_change_neither_memory_nor_the_database() {
         let temp = Temporary::new();
         let config = temp.config();
-        let store = Store::open(Some(&config)).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         lua(&store)
             .load("rift.store.set('n', 'k', 'old')")
             .exec()
             .unwrap();
-        store
-            .0
-            .writer
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .execute_batch(
-                "CREATE TEMP TRIGGER fail BEFORE INSERT ON main.entries WHEN NEW.key = 'fail'
-                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-            )
-            .unwrap();
+        {
+            let writer = store.0.writer.lock().unwrap();
+            let Writer::File(connection) = &*writer else {
+                panic!("a file store");
+            };
+            connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail BEFORE INSERT ON main.entries WHEN NEW.key = 'fail'
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )
+                .unwrap();
+        }
         let result = store.mutate(deadline(), |entries| {
             entries.insert(("n".into(), "k".into()), b"new".to_vec());
             entries.insert(("n".into(), "fail".into()), b"v".to_vec());
@@ -1438,7 +1831,7 @@ mod tests {
             .unwrap();
         assert_eq!(usage.entries, 1);
         drop(store);
-        let reopened = Store::open(Some(&config)).unwrap();
+        let reopened = Store::open(Some(&config), None).unwrap();
         assert_eq!(
             reopened.namespace("n"),
             vec![
@@ -1455,13 +1848,13 @@ mod tests {
     fn a_second_runtime_cannot_open_a_store_in_use() {
         let temp = Temporary::new();
         let config = temp.config();
-        let store = Store::open(Some(&config)).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         assert_eq!(
-            Store::open(Some(&config)).err().unwrap().kind(),
+            Store::open(Some(&config), None).err().unwrap().kind(),
             io::ErrorKind::ResourceBusy
         );
         drop(store);
-        Store::open(Some(&config)).unwrap();
+        Store::open(Some(&config), None).unwrap();
     }
 
     #[test]
@@ -1477,13 +1870,13 @@ mod tests {
             ),
         ]);
         let snapshot = encode(&entries).unwrap();
-        fs::write(&config.path, &snapshot).unwrap();
-        let store = Store::open(Some(&config)).unwrap();
+        fs::write(config.path(), &snapshot).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         assert_eq!(store.memory().entries, entries);
         drop(store);
-        assert!(fs::read(&config.path).unwrap().starts_with(SQLITE_HEADER));
-        assert_eq!(fs::read(backup_path(&config.path)).unwrap(), snapshot);
-        let reopened = Store::open(Some(&config)).unwrap();
+        assert!(fs::read(config.path()).unwrap().starts_with(SQLITE_HEADER));
+        assert_eq!(fs::read(backup_path(config.path())).unwrap(), snapshot);
+        let reopened = Store::open(Some(&config), None).unwrap();
         assert_eq!(reopened.memory().entries, entries);
         assert_eq!(
             reopened
@@ -1501,7 +1894,7 @@ mod tests {
     fn checking_a_store_changes_nothing() {
         let temp = Temporary::new();
         let config = temp.config();
-        let wal = PathBuf::from(format!("{}-wal", config.path.display()));
+        let wal = PathBuf::from(format!("{}-wal", config.path().display()));
         let listing = || {
             let mut names: Vec<_> = fs::read_dir(&temp.0)
                 .unwrap()
@@ -1511,7 +1904,7 @@ mod tests {
             names
         };
 
-        assert_eq!(check_file(&config.path).unwrap(), Check::Missing);
+        assert_eq!(check_file(config.path()).unwrap(), Check::Missing);
         assert!(listing().is_empty());
 
         let entries = BTreeMap::from([
@@ -1519,43 +1912,43 @@ mod tests {
             ((MEMBER_NAMESPACE.into(), "m".into()), b"staff".to_vec()),
         ]);
         let snapshot = encode(&entries).unwrap();
-        fs::write(&config.path, &snapshot).unwrap();
+        fs::write(config.path(), &snapshot).unwrap();
         assert_eq!(
-            check_file(&config.path).unwrap(),
+            check_file(config.path()).unwrap(),
             Check::Snapshot { entries: 2 }
         );
-        assert_eq!(fs::read(&config.path).unwrap(), snapshot);
+        assert_eq!(fs::read(config.path()).unwrap(), snapshot);
         assert_eq!(listing().len(), 1, "no backup or database is written");
 
         // Leave committed writes in the WAL, as a crash would.
-        fs::remove_file(&config.path).unwrap();
-        let store = Store::open(Some(&config)).unwrap();
+        fs::remove_file(config.path()).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         lua(&store)
             .load("rift.store.set('a', 'b', 'c') rift.store.set('a', 'd', 'e')")
             .exec()
             .unwrap();
-        let before = (fs::read(&config.path).unwrap(), fs::read(&wal).unwrap());
+        let before = (fs::read(config.path()).unwrap(), fs::read(&wal).unwrap());
         let names = listing();
         assert_eq!(
-            check_file(&config.path).unwrap(),
+            check_file(config.path()).unwrap(),
             Check::Database { entries: 2 }
         );
         assert_eq!(
-            (fs::read(&config.path).unwrap(), fs::read(&wal).unwrap()),
+            (fs::read(config.path()).unwrap(), fs::read(&wal).unwrap()),
             before
         );
         assert_eq!(listing(), names);
         drop(store);
 
-        fs::remove_file(&config.path).unwrap();
-        Connection::open(&config.path)
+        fs::remove_file(config.path()).unwrap();
+        Connection::open(config.path())
             .unwrap()
             .execute_batch("CREATE TABLE entries (namespace TEXT, key TEXT, value BLOB);")
             .unwrap();
-        let error = check_file(&config.path).unwrap_err().to_string();
+        let error = check_file(config.path()).unwrap_err().to_string();
         assert!(error.contains("not a Rift extension store"), "{error}");
         assert!(
-            error.contains(&config.path.display().to_string()),
+            error.contains(&config.path().display().to_string()),
             "{error}"
         );
     }
@@ -1564,11 +1957,11 @@ mod tests {
     fn other_sqlite_databases_are_rejected() {
         let temp = Temporary::new();
         let config = temp.config();
-        Connection::open(&config.path)
+        Connection::open(config.path())
             .unwrap()
             .execute_batch("CREATE TABLE entries (namespace TEXT, key TEXT, value BLOB);")
             .unwrap();
-        let error = Store::open(Some(&config)).err().unwrap();
+        let error = Store::open(Some(&config), None).err().unwrap();
         assert!(
             error.to_string().contains("not a Rift extension store"),
             "{error}"
@@ -1579,15 +1972,15 @@ mod tests {
     fn invalid_rows_fail_startup() {
         let temp = Temporary::new();
         let config = temp.config();
-        drop(Store::open(Some(&config)).unwrap());
-        Connection::open(&config.path)
+        drop(Store::open(Some(&config), None).unwrap());
+        Connection::open(config.path())
             .unwrap()
             .execute(
                 "INSERT INTO entries VALUES ('n', ?1, X'')",
                 [&"k".repeat(MAX_LABEL + 1)],
             )
             .unwrap();
-        assert!(Store::open(Some(&config)).is_err());
+        assert!(Store::open(Some(&config), None).is_err());
     }
 
     #[test]
@@ -1602,7 +1995,7 @@ mod tests {
                 bytes: DEFAULT_QUOTA.bytes,
             },
         );
-        let store = Store::open(Some(&config)).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         let fill = |store: &Store, namespace: &str, count: usize| {
             store.mutate(deadline(), |entries| {
                 for i in 0..count {
@@ -1644,7 +2037,7 @@ mod tests {
 
         // A lowered quota does not fail startup; the owner can only shrink.
         config.quotas.default.entries = 1;
-        let store = Store::open(Some(&config)).unwrap();
+        let store = Store::open(Some(&config), None).unwrap();
         // Replacing a value keeps the entry count, so it is still allowed.
         store
             .mutate(deadline(), |entries| {
@@ -1666,7 +2059,7 @@ mod tests {
 
     #[test]
     fn host_data_has_its_own_quota() {
-        let store = Store::open(None).unwrap();
+        let store = Store::open(None, None).unwrap();
         store
             .mutate(deadline(), |entries| {
                 for i in 0..DEFAULT_QUOTA.entries {
@@ -1732,8 +2125,8 @@ mod tests {
             invalid_utf8,
             vec![0; MAX_BYTES + 1],
         ] {
-            fs::write(&config.path, bytes).unwrap();
-            assert!(Store::open(Some(&config)).is_err());
+            fs::write(config.path(), bytes).unwrap();
+            assert!(Store::open(Some(&config), None).is_err());
         }
     }
 
@@ -1744,14 +2137,14 @@ mod tests {
         let config = temp.config();
         assert!(
             std::process::Command::new("mkfifo")
-                .arg(&config.path)
+                .arg(config.path())
                 .status()
                 .unwrap()
                 .success()
         );
         let (send, receive) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            let error = Store::open(Some(&config)).err().unwrap();
+            let error = Store::open(Some(&config), None).err().unwrap();
             send.send(error.kind()).unwrap();
         });
         assert_eq!(

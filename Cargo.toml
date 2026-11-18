@@ -66,6 +66,10 @@ serde_json.workspace = true
 serde = { workspace = true, features = ["rc"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
+# database.backend = "postgres": the instance database on a PostgreSQL server.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+futures-util = { version = "0.3", default-features = false }
+webpki-roots = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 aes = { version = "0.9", features = ["zeroize"] }
 cfb8 = { version = "0.9", features = ["zeroize"] }

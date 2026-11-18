@@ -186,7 +186,7 @@ impl ExtensionScript {
     }
 
     /// Whether a reload can replace `old` with `new`: enablement, storage
-    /// path and quotas, and queue capacities are fixed until a restart.
+    /// location and quotas, and queue capacities are fixed until a restart.
     pub fn live_compatible(old: Option<&Self>, new: Option<&Self>) -> Result<(), String> {
         match (old, new) {
             (Some(old), Some(new))
@@ -196,7 +196,7 @@ impl ExtensionScript {
             }
             (None, None) => Ok(()),
             _ => Err(
-                "extension enablement, storage path and quotas, and queue capacities require a restart"
+                "extension enablement, storage location and quotas, and queue capacities require a restart"
                     .into(),
             ),
         }
@@ -204,20 +204,30 @@ impl ExtensionScript {
 
     /// Check that the durable store opens, without creating or migrating it,
     /// and describe what was found. Returns `None` for in-memory storage.
-    /// While Rift runs it holds the store, so only the path is reported.
+    /// While Rift runs it holds the store, so only the path is reported. A
+    /// store in the instance database only gets a note; files are untouched.
     pub fn check_storage(&self, running: bool) -> io::Result<Option<String>> {
         let Some(config) = &self.storage else {
             return Ok(None);
         };
-        let path = config.path.display();
+        let file = match &config.target {
+            storage::Target::File(file) => file,
+            storage::Target::Database => {
+                return Ok(Some(
+                    "extension store lives in the instance database (table extension_entries)"
+                        .to_owned(),
+                ));
+            }
+        };
+        let path = file.display();
         if running {
             return Ok(Some(format!(
                 "extension store {path} is held by the running Rift; not checked"
             )));
         }
-        Ok(Some(match storage::check_file(&config.path)? {
+        Ok(Some(match storage::check_file(file)? {
             storage::Check::Missing => {
-                crate::preflight::check_creatable(&config.path)?;
+                crate::preflight::check_creatable(file)?;
                 format!("extension store {path} does not exist yet; startup will create it")
             }
             storage::Check::Snapshot { entries } => format!(
@@ -274,9 +284,10 @@ impl ExtensionScript {
         )?;
         let mut storage = storage::parse(table.raw_get("storage")?)?;
         if let Some(storage) = &mut storage
-            && storage.path.is_relative()
+            && let storage::Target::File(path) = &mut storage.target
+            && path.is_relative()
         {
-            storage.path = source.root.join(&storage.path);
+            *path = source.root.join(&*path);
         }
         let integrations = integrations::parse(table.raw_get("integrations")?)?;
         let jobs = scheduler::parse(table.raw_get("jobs")?)?;
@@ -856,13 +867,21 @@ const MEMBERSHIPS: &str = "rift.groups";
 /// from the extension store namespace `rift.groups` as `inherit` nodes, and
 /// the grants of the removed `extensions.permissions`. The extension store is
 /// opened briefly and left unchanged, so a downgrade still finds it.
+///
+/// A store in the instance database (`database = true`) is not read: Rift
+/// versions that wrote `rift.groups` predate both the permission store and
+/// that target, so such a store never holds memberships. Reading it here
+/// would also deadlock, because [`Authority::migrate_once`] calls this while
+/// it holds the instance database's connection.
 pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
     let Some(script) = &config.extensions else {
         return Ok(Vec::new());
     };
     let mut nodes = Vec::new();
-    if let Some(storage) = &script.storage {
-        let store = storage::Store::open(Some(storage))?;
+    if let Some(storage) = &script.storage
+        && matches!(storage.target, storage::Target::File(_))
+    {
+        let store = storage::Store::open(Some(storage), None)?;
         for (key, value) in store.namespace(MEMBERSHIPS) {
             let (Ok(uuid), Ok(groups)) = (Uuid::parse(&key), std::str::from_utf8(&value)) else {
                 log_warn!("permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}");
@@ -878,6 +897,25 @@ pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
     }
     nodes.extend(script.legacy_grants.iter().flatten().cloned());
     Ok(nodes)
+}
+
+/// Create or migrate the extension store's table in `database` when the
+/// configuration keeps the store there (`extensions.storage.database`);
+/// otherwise do nothing. The store itself runs the same migration on open.
+pub fn prepare_database_storage(
+    database: &Arc<crate::database::Database>,
+    config: &Config,
+) -> io::Result<()> {
+    match config
+        .extensions
+        .as_ref()
+        .and_then(|script| script.storage.as_ref())
+    {
+        Some(storage) if storage.target == storage::Target::Database => {
+            storage::prepare_shared(database)
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Default)]
@@ -999,6 +1037,9 @@ impl Extensions {
                     .extensions
                     .as_ref()
                     .and_then(|script| script.storage.as_ref()),
+                permissions
+                    .as_ref()
+                    .map(|authority| authority.database_handle()),
             )?,
         };
         let permissions = match previous {

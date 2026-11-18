@@ -1,8 +1,8 @@
 //! Reads of the append-only `perm_change` log: the audit view and, later,
 //! the replay source of a follower proxy.
 use super::PermError;
+use crate::database::{Conn, params};
 use rift_permissions::{Actor, ChangeEvent, SubjectRef, change::Op};
-use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 
 /// Rows one query returns by default and at most.
@@ -79,10 +79,7 @@ fn event(
     })
 }
 
-pub(super) fn read(
-    connection: &Connection,
-    query: &LogQuery,
-) -> Result<Vec<ChangeEvent>, PermError> {
+pub(super) fn read(connection: &Conn, query: &LogQuery) -> Result<Vec<ChangeEvent>, PermError> {
     let limit = match query.limit {
         0 => DEFAULT_LIMIT,
         limit => limit.min(MAX_LIMIT),
@@ -93,35 +90,38 @@ pub(super) fn read(
         SubjectRef::Group(name) => format!("\"{name}\""),
     });
     let order = if query.since.is_some() { "ASC" } else { "DESC" };
-    let mut statement = connection.prepare(&format!(
+    let sql = format!(
         "SELECT revision, at, actor, ops, reason FROM perm_change
-         WHERE revision > ?1 AND (?2 IS NULL OR actor = ?2) AND (?3 IS NULL OR instr(ops, ?3) > 0)
-         ORDER BY revision {order}"
-    ))?;
-    let mut rows = statement.query(params![
-        super::store::sql_time(query.since.unwrap_or(0)),
-        query.actor.as_ref().map(ToString::to_string),
-        needle,
-    ])?;
+         WHERE revision > ?1 AND (?2 IS NULL OR actor = ?2) AND (?3 IS NULL OR {found} > 0)
+         ORDER BY revision {order}",
+        found = connection.dialect().position("ops", "?3"),
+    );
     let mut events = Vec::new();
-    while let Some(row) = rows.next()?
-        && events.len() < limit
-    {
-        let event = event(
-            row.get::<_, i64>(0)? as u64,
-            row.get::<_, i64>(1)?.max(0) as u64,
-            &row.get::<_, String>(2)?,
-            &row.get::<_, String>(3)?,
-            row.get(4)?,
-        )?;
-        if query
-            .subject
-            .as_ref()
-            .is_none_or(|subject| event.ops.iter().any(|op| touches(op, subject)))
-        {
-            events.push(event);
-        }
-    }
+    connection.each(
+        &sql,
+        params![
+            super::store::sql_time(query.since.unwrap_or(0)),
+            query.actor.as_ref().map(ToString::to_string),
+            needle,
+        ],
+        |row| -> Result<bool, PermError> {
+            let event = event(
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, i64>(1)?.max(0) as u64,
+                &row.get::<_, String>(2)?,
+                &row.get::<_, String>(3)?,
+                row.get(4)?,
+            )?;
+            if query
+                .subject
+                .as_ref()
+                .is_none_or(|subject| event.ops.iter().any(|op| touches(op, subject)))
+            {
+                events.push(event);
+            }
+            Ok(events.len() < limit)
+        },
+    )?;
     if query.since.is_none() {
         events.reverse();
     }

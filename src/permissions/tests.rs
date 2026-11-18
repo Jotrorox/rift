@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     config::{Config, PermissionsConfig},
-    database::Database,
+    database::{Database, Location, test_postgres_or_skip},
     extensions::{Action, Context, Extensions},
     messaging::Broker,
 };
@@ -12,7 +12,11 @@ use rift_permissions::{
     unix_now,
     wire::{PermissionDefault, RegisteredPermission},
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const ALICE: Uuid = Uuid::from_u128(0x0101_0101_0101_0101_0101_0101_0101_0101);
 const BOB: Uuid = Uuid::from_u128(0x0202_0202_0202_0202_0202_0202_0202_0202);
@@ -83,10 +87,63 @@ impl Drop for Scratch {
     }
 }
 
+/// Open the permission tables in the PostgreSQL schema at `location`,
+/// waiting for an earlier connection's lock to go with its session.
+fn open_postgres(location: &Location) -> Authority {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let database = loop {
+        match Database::connect(location) {
+            Ok(database) => break database,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => panic!("{error}"),
+        }
+    };
+    Authority::open(Arc::new(database), &PermissionsConfig::default()).unwrap()
+}
+
+/// An authority over a fresh PostgreSQL schema, or `None` (with a note)
+/// when `RIFT_TEST_POSTGRES_URL` is not set.
+fn postgres(test: &str) -> Option<Authority> {
+    test_postgres_or_skip(test).map(|location| open_postgres(&location))
+}
+
+/// Run the test body `$body(authority)` on an in-memory SQLite store
+/// (`$body::sqlite`) and on a fresh PostgreSQL schema (`$body::postgres`,
+/// skipped without `RIFT_TEST_POSTGRES_URL`).
+macro_rules! both_backends {
+    ($body:ident) => {
+        mod $body {
+            #[test]
+            fn sqlite() {
+                super::$body(super::authority());
+            }
+
+            #[test]
+            fn postgres() {
+                if let Some(authority) = super::postgres(concat!(stringify!($body), "::postgres")) {
+                    super::$body(authority);
+                }
+            }
+        }
+    };
+}
+
 #[test]
 fn store_round_trips_and_revisions_survive_reopening() {
     let scratch = Scratch::new("reopen");
-    let authority = scratch.open();
+    round_trip_and_reopen(&|| scratch.open());
+}
+
+#[test]
+fn store_round_trips_and_revisions_survive_reopening_on_postgres() {
+    let test = "store_round_trips_and_revisions_survive_reopening_on_postgres";
+    if let Some(location) = test_postgres_or_skip(test) {
+        round_trip_and_reopen(&|| open_postgres(&location));
+    }
+}
+
+fn round_trip_and_reopen(open: &dyn Fn() -> Authority) {
+    let authority = open();
     assert_eq!(authority.revision(), 0);
     assert!(
         authority.group("default").is_some(),
@@ -124,7 +181,7 @@ fn store_round_trips_and_revisions_survive_reopening() {
         assert!(applied.ops > 0);
     }
     drop(authority);
-    let reopened = scratch.open();
+    let reopened = open();
     assert_eq!(reopened.revision(), 7);
     let vip = reopened.group("vip").unwrap();
     assert_eq!(
@@ -159,9 +216,9 @@ fn store_round_trips_and_revisions_survive_reopening() {
     assert!(log.iter().all(|e| e.actor == Actor::Cli));
 }
 
-#[test]
-fn writes_that_change_nothing_record_nothing() {
-    let authority = authority();
+both_backends!(writes_that_change_nothing_record_nothing);
+
+fn writes_that_change_nothing_record_nothing(authority: Authority) {
     let node = perm("chat.color", true);
     let first = authority
         .apply(Actor::Cli, set(user(ALICE), node.clone()))
@@ -217,9 +274,9 @@ fn writes_that_change_nothing_record_nothing() {
     );
 }
 
-#[test]
-fn invalid_changes_and_limits_fail_without_writing() {
-    let authority = authority();
+both_backends!(invalid_changes_and_limits_fail_without_writing);
+
+fn invalid_changes_and_limits_fail_without_writing(authority: Authority) {
     authority.configure(&PermissionsConfig {
         limits: rift_permissions::Limits {
             groups: 3,
@@ -337,9 +394,9 @@ fn invalid_changes_and_limits_fail_without_writing() {
     ));
 }
 
-#[test]
-fn group_changes_invalidate_dependent_users_transitively() {
-    let authority = authority();
+both_backends!(group_changes_invalidate_dependent_users_transitively);
+
+fn group_changes_invalidate_dependent_users_transitively(authority: Authority) {
     for change in [
         create("mod", 0),
         create("staff", 0),
@@ -394,9 +451,10 @@ fn group_changes_invalidate_dependent_users_transitively() {
     assert_eq!(authority.compiled(ALICE).revision, authority.revision());
 }
 
-#[test]
-fn committed_changes_notify_with_fresh_subjects_for_online_players() {
-    let authority = Arc::new(authority());
+both_backends!(committed_changes_notify_with_fresh_subjects_for_online_players);
+
+fn committed_changes_notify_with_fresh_subjects_for_online_players(authority: Authority) {
+    let authority = Arc::new(authority);
     let mut notifications = authority.subscribe();
     authority.join(ALICE, "Alice", "lobby", None);
     let Ok(Notification::Joined(joined)) = notifications.try_recv() else {
@@ -493,9 +551,9 @@ fn committed_changes_notify_with_fresh_subjects_for_online_players() {
     assert_eq!(authority.user_by_name("nobody").unwrap(), None);
 }
 
-#[test]
-fn promote_and_demote_move_along_tracks_in_their_contexts() {
-    let authority = authority();
+both_backends!(promote_and_demote_move_along_tracks_in_their_contexts);
+
+fn promote_and_demote_move_along_tracks_in_their_contexts(authority: Authority) {
     for name in ["vip", "mod"] {
         authority.apply(Actor::Cli, create(name, 0)).unwrap();
     }
@@ -551,9 +609,9 @@ fn promote_and_demote_move_along_tracks_in_their_contexts() {
     assert!(log.iter().any(|event| event.ops.len() == 2));
 }
 
-#[test]
-fn bulk_edits_preview_then_apply_in_one_revision() {
-    let authority = authority();
+both_backends!(bulk_edits_preview_then_apply_in_one_revision);
+
+fn bulk_edits_preview_then_apply_in_one_revision(authority: Authority) {
     authority.apply(Actor::Cli, create("vip", 0)).unwrap();
     for change in [
         set(user(ALICE), perm("essentials.fly", true)),
@@ -647,11 +705,11 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-#[test]
-fn luckperms_exports_import_in_one_revision_and_round_trip() {
+both_backends!(luckperms_exports_import_in_one_revision_and_round_trip);
+
+fn luckperms_exports_import_in_one_revision_and_round_trip(authority: Authority) {
     let notch = Uuid::parse("069a79f4-44e9-4726-a5be-fca90e38aaf5").unwrap();
     let jeb = Uuid::parse("853c80ef-3c37-49fd-aa49-938b674adae6").unwrap();
-    let authority = authority();
     let report = authority
         .import_luckperms(Actor::Import, &gzip(&luckperms_export())[..], false)
         .unwrap();
@@ -748,9 +806,9 @@ fn luckperms_exports_import_in_one_revision_and_round_trip() {
     ));
 }
 
-#[test]
-fn the_sweeper_deletes_expired_nodes_as_the_system() {
-    let authority = authority();
+both_backends!(the_sweeper_deletes_expired_nodes_as_the_system);
+
+fn the_sweeper_deletes_expired_nodes_as_the_system(authority: Authority) {
     let soon = unix_now() + 1;
     authority
         .apply(
@@ -784,9 +842,9 @@ fn the_sweeper_deletes_expired_nodes_as_the_system() {
     assert_eq!(authority.user(ALICE).unwrap().nodes, [perm("kept", true)]);
 }
 
-#[test]
-fn registered_permissions_are_replaced_per_owner() {
-    let authority = authority();
+both_backends!(registered_permissions_are_replaced_per_owner);
+
+fn registered_permissions_are_replaced_per_owner(authority: Authority) {
     let registered = |node: &str, plugin: Option<&str>| RegisteredPermission {
         node: node.into(),
         description: Some(format!("{node} help")),
@@ -839,9 +897,9 @@ fn registered_permissions_are_replaced_per_owner() {
     assert_eq!(authority.revision(), 0);
 }
 
-#[test]
-fn log_queries_filter_by_revision_actor_and_subject() {
-    let authority = authority();
+both_backends!(log_queries_filter_by_revision_actor_and_subject);
+
+fn log_queries_filter_by_revision_actor_and_subject(authority: Authority) {
     authority.apply(Actor::Cli, create("vip", 0)).unwrap();
     authority
         .apply(Actor::Lua("join".into()), set(user(ALICE), parent("vip")))
@@ -915,10 +973,86 @@ fn log_queries_filter_by_revision_actor_and_subject() {
     );
 }
 
+both_backends!(users_list_and_search_by_name_uuid_and_group);
+
+fn users_list_and_search_by_name_uuid_and_group(authority: Authority) {
+    let carol = Uuid::from_u128(0xabcd_ef00_0000_0000_0000_0000_0000_0003);
+    let authority = Arc::new(authority);
+    authority.apply(Actor::Cli, create("vip", 0)).unwrap();
+    // Joining records the last-seen name; a new name replaces it.
+    for (uuid, name) in [(ALICE, "Alice"), (ALICE, "alicia"), (BOB, "Bob_")] {
+        authority.join(uuid, name, "lobby", None);
+        authority.leave(uuid);
+    }
+    assert_eq!(authority.last_name(ALICE).as_deref(), Some("alicia"));
+    assert_eq!(authority.user_by_name("ALICIA").unwrap(), Some(ALICE));
+    assert_eq!(authority.user_by_name("alice").unwrap(), None, "renamed");
+    assert_eq!(authority.user_by_name("bob_").unwrap(), Some(BOB));
+    for change in [
+        set(user(BOB), parent("vip")),
+        set(
+            user(carol),
+            parent("vip").with_contexts(survival()).unwrap(),
+        ),
+    ] {
+        authority.apply(Actor::Cli, change).unwrap();
+    }
+    let found = |query: &str, group: Option<&str>, limit: usize| -> (Vec<Uuid>, bool) {
+        let (users, more) = authority.users(query, group, limit).unwrap();
+        (users.iter().map(|u| u.uuid).collect(), more)
+    };
+    // By name ignoring ASCII case, then users without a name.
+    assert_eq!(found("", None, 10), (vec![ALICE, BOB, carol], false));
+    assert_eq!(found("", None, 2), (vec![ALICE, BOB], true));
+    assert_eq!(found("LIC", None, 10), (vec![ALICE], false));
+    assert_eq!(found("b_", None, 10), (vec![BOB], false), "`_` is literal");
+    assert_eq!(found("ABCD-EF", None, 10), (vec![carol], false));
+    assert_eq!(found("", Some("VIP"), 10), (vec![BOB, carol], false));
+    assert_eq!(found("", Some("default"), 10).0.len(), 3);
+    let (users, _) = authority.users("bob", None, 10).unwrap();
+    assert_eq!(
+        users,
+        [UserSummary {
+            uuid: BOB,
+            name: Some("Bob_".into()),
+            online: false,
+            groups: vec!["vip".into()],
+        }]
+    );
+    let (members, more) = authority.group_members("vip", 10).unwrap();
+    assert!(!more);
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| (m.uuid, m.name.as_deref()))
+            .collect::<Vec<_>>(),
+        [(BOB, Some("Bob_")), (carol, None)]
+    );
+    let (members, more) = authority.group_members("vip", 1).unwrap();
+    assert_eq!((members.len(), more), (1, true));
+    let (members, more) = authority.members(10).unwrap();
+    assert!(!more);
+    assert_eq!(members.iter().map(|m| m.uuid).collect::<Vec<_>>(), [BOB]);
+    assert_eq!(authority.expired_unswept().unwrap(), 0);
+}
+
 #[test]
 fn the_extension_store_upgrade_runs_once() {
     let scratch = Scratch::new("upgrade");
-    let authority = scratch.open();
+    upgrade_once(&|| scratch.open());
+}
+
+#[test]
+fn the_extension_store_upgrade_runs_once_on_postgres() {
+    if let Some(location) =
+        test_postgres_or_skip("the_extension_store_upgrade_runs_once_on_postgres")
+    {
+        upgrade_once(&|| open_postgres(&location));
+    }
+}
+
+fn upgrade_once(open: &dyn Fn() -> Authority) {
+    let authority = open();
     let nodes = || {
         Ok(vec![
             (user(ALICE), parent("staff")),
@@ -934,7 +1068,7 @@ fn the_extension_store_upgrade_runs_once() {
     );
     assert!(authority.migrate_once(|| unreachable!()).unwrap().is_none());
     drop(authority);
-    let reopened = scratch.open();
+    let reopened = open();
     assert!(reopened.migrate_once(|| unreachable!()).unwrap().is_none());
     assert_eq!(
         reopened.check(ALICE, "chat.send", &global()),

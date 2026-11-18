@@ -21,9 +21,12 @@ agents only prepare server directories and run processes.
 ```
 
 > [!NOTE]
-> There is exactly one proxy. The message broker and the player registry both
-> live in the proxy process, so nodes add game-server capacity, not proxy
-> redundancy. Multiple proxies and proxy failover are out of scope.
+> There is exactly one active proxy. The message broker and the player
+> registry both live in the proxy process, so nodes add game-server capacity,
+> not proxy capacity. With the instance database in
+> [PostgreSQL](database.md), a second controller can wait as a
+> [standby](database.md#standby-controllers) and take over, adopting the
+> nodes' running servers, when the active one stops.
 
 [examples/nodes.lua](../examples/nodes.lua) is a complete controller
 configuration.

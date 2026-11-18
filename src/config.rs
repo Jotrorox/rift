@@ -32,6 +32,7 @@ pub use status::{
 };
 pub use templates::ServerTemplate;
 
+mod database;
 mod managed;
 mod messaging;
 mod nodes;
@@ -69,7 +70,11 @@ pub struct Config {
     pub instances: BTreeMap<String, ServiceInstance>,
     /// Hosts running `rift node`; servers without a node run on this host.
     pub nodes: BTreeMap<String, NodeConfig>,
+    /// The SQLite file of the instance database, unless `database` puts it
+    /// on a PostgreSQL server.
     pub instance_database: PathBuf,
+    /// `rift.config.database` with `backend = "postgres"`; `None` for SQLite.
+    pub database: Option<crate::database::PostgresConfig>,
     /// Downloaded template software, like CloudNet's `local/versioncache`.
     pub software_cache: PathBuf,
     /// Template folders served by the web file browser (`local/templates`).
@@ -614,6 +619,13 @@ impl Config {
     /// and `rift check --strict` verifies that each is set.
     pub fn secret_variables(&self) -> Vec<(String, String)> {
         let mut variables = Vec::new();
+        if let Some(variable) = self
+            .database
+            .as_ref()
+            .and_then(crate::database::PostgresConfig::url_variable)
+        {
+            variables.push(("database.url_env".into(), variable.to_owned()));
+        }
         if let Some(secret_env) = self
             .forwarding
             .as_ref()
@@ -678,6 +690,7 @@ impl Config {
             instances: BTreeMap::new(),
             nodes: BTreeMap::new(),
             instance_database: PathBuf::from("rift.sqlite3"),
+            database: None,
             software_cache: PathBuf::from(DEFAULT_SOFTWARE_CACHE),
             template_storage: PathBuf::from(DEFAULT_TEMPLATE_STORAGE),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
@@ -852,6 +865,7 @@ impl Config {
                     "service_groups",
                     "nodes",
                     "instance_database",
+                    "database",
                     "software_cache",
                     "template_storage",
                     "routes",
@@ -940,6 +954,7 @@ impl Config {
                     directory.join(value)
                 }
             };
+            let database = database::parse(&root, directory)?;
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
@@ -1231,6 +1246,7 @@ impl Config {
                 instances: BTreeMap::new(),
                 nodes,
                 instance_database,
+                database,
                 software_cache,
                 template_storage,
                 routes,
@@ -1278,6 +1294,15 @@ impl Config {
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }
         Ok((config, cost))
+    }
+
+    /// Where the instance database lives: the SQLite file
+    /// `instance_database`, or the PostgreSQL database of `database`.
+    pub fn database_location(&self) -> crate::database::Location {
+        match &self.database {
+            Some(postgres) => crate::database::Location::Postgres(postgres.clone()),
+            None => crate::database::Location::Sqlite(self.instance_database.clone()),
+        }
     }
 
     /// Whether authenticated sessions run player hooks: with extensions, or

@@ -150,8 +150,8 @@ the host. Run it in the same environment as the service, for example with
 | Check | What passes |
 | --- | --- |
 | Secrets | Every environment variable the configuration names is set and has the length startup requires. Output names the variables, never their values. |
-| Instance database | `instance_database` opens read-only, passes SQLite's `quick_check`, has a supported schema, and its registered instances fit the configuration. A missing database is fine when its directory is writable. |
-| Extension store | An existing `extensions.storage.path` decodes; a missing one can be created. |
+| Instance database | `instance_database` opens read-only, passes SQLite's `quick_check`, has a supported schema, and its registered instances fit the configuration. A missing database is fine when its directory is writable. With [PostgreSQL](database.md), the database connects read-only instead; a database without Rift's tables yet is fine, and one owned by a running Rift counts as running. |
+| Extension store | An existing `extensions.storage.path` decodes; a missing one can be created. A store kept in the instance database (`database = true`) is covered by the instance database check. |
 | Ports | Every gameplay listener, `admin.listen`, `web.listen`, `status.listen` and `metrics` can be bound over TCP, and `messaging.listen` over UDP. Each socket is released at once. |
 | Reloads | Compared with the last deployment in the operator records (`web.records_directory`, or `<config>.operators`), no change needs a restart. The rules are those of a live reload: listener, admin, messaging, node, managed server, instance database, extension enablement/API version/storage/queue and `web.records_directory` changes need one. Modules are read from disk as they are now. |
 

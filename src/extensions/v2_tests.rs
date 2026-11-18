@@ -1332,7 +1332,7 @@ fn upgrade_copies_group_memberships_and_legacy_grants_without_touching_the_store
     );
     let storage = config.extensions.as_ref().unwrap().storage.as_ref();
     {
-        let store = storage::Store::open(storage).unwrap();
+        let store = storage::Store::open(storage, None).unwrap();
         store
             .mutate_then(
                 Instant::now() + Duration::from_secs(30),
@@ -1374,7 +1374,7 @@ fn upgrade_copies_group_memberships_and_legacy_grants_without_touching_the_store
     let other = Uuid::from_u128(7);
     assert_eq!(authority.check(other, "chat.send", &global), Tristate::True);
     // Nothing is deleted from the extension store, so a downgrade still works.
-    let store = storage::Store::open(storage).unwrap();
+    let store = storage::Store::open(storage, None).unwrap();
     assert_eq!(store.namespace(MEMBERSHIPS).len(), 2);
 }
 

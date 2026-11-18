@@ -57,6 +57,9 @@ The store is shared across sessions, jobs and reload generations.
 
 With `storage`, the store survives process restarts in a bundled-SQLite
 database file. Without it, the same API uses memory and resets on restart.
+`storage = { database = true }` keeps the entries in the
+[instance database](database.md) instead, SQLite or PostgreSQL; see
+[storage](extensions.md#storage). The rules below are for the file.
 
 - Relative paths are resolved against the configuration file's directory; the
   parent directory must already exist and be writable.

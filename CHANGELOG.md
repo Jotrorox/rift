@@ -14,6 +14,20 @@ and are listed under **SDKs**.
 
 ### Added
 
+- The instance database can live in PostgreSQL instead of the SQLite file:
+  `rift.config.database = { backend = "postgres" }` with the connection URL in
+  `RIFT_DATABASE_URL` (or `url_env`), optional `ca` for TLS and `schema` to
+  share one database between networks. Every component (instances, group
+  states, node schedules, permissions and their audit log, the player
+  directory) works the same on both backends. One Rift owns a database at a
+  time through an advisory lock; with `standby = true` a second controller
+  waits and takes over when the first stops, adopting the nodes' running
+  servers. `rift database copy` moves the data from SQLite to PostgreSQL and
+  back, and `rift check --strict` checks a PostgreSQL database read-only. See
+  [docs/database.md](docs/database.md).
+- `extensions.storage = { database = true }` keeps the extension store in the
+  instance database (SQLite or PostgreSQL) instead of a file of its own.
+
 - `tab_list.names = "all"` gives the entries backends list themselves the
   same rank names and order as Rift's own entries for players on other
   servers, so a backend without a tab plugin (such as Pumpkin) shows
@@ -94,6 +108,8 @@ and are listed under **SDKs**.
 
 - New `rift.sqlite3` component: node schedules, schema 1. Older releases
   ignore it.
+- New component `extension_store` (table `extension_entries`), created only
+  with `extensions.storage = { database = true }`. Older releases ignore it.
 
 ## [0.1.0] - 2026-11-16
 
