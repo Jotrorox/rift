@@ -1,10 +1,12 @@
 # Clustering: several active proxies
 
 > [!NOTE]
-> **Status: design proposal.** Nothing described here is implemented yet.
-> This document is the plan for the branch that adds clustering. It grows
-> with the branch and becomes the user guide when the branch merges. Sections
-> marked *Open question* still need a decision.
+> **Status: design proposal, revision 2.** Nothing described here is
+> implemented yet. This document is the plan for the branch that adds
+> clustering. It grows with the branch and becomes the user guide when the
+> branch merges. Revision 2 follows a review of revision 1. Choices that still
+> need the owner are listed under [decisions](#decisions), each with its
+> options; the rest of the document assumes the recommended option.
 
 Today exactly one Rift process accepts players. That process also holds the
 message broker, the player registry, the node controller and the instance
@@ -30,7 +32,7 @@ exactly once.
    ┌──────▼──────┐        ┌──────▼──────┐        ┌──────▼──────┐
    │ rift  eu-1  │◄──────►│ rift  eu-2  │◄──────►│ rift  eu-3  │   peer links: QUIC, mutual TLS
    │  (leader)   │  Raft  │ (follower)  │  Raft  │ (follower)  │   Raft log, bus federation,
-   │ sqlite rep. │◄──────────────────────────────►│ sqlite rep. │   player actions, file blobs
+   │ sqlite rep. │◄──────────────────────────────►│ sqlite rep. │   presence, player actions, blobs
    └──────┬──────┘        └──────┬──────┘        └──────┬──────┘
           │ game traffic, bus clients and node agents connect to any peer
           ▼                      ▼                      ▼
@@ -46,8 +48,9 @@ exactly once.
 2. **No single point of failure.** Losing any minority of voting peers keeps
    the network running: logins continue, scaling continues, and nodes keep
    their servers and are adopted by the new leader. Only the players connected
-   to a peer that dies are disconnected, and they can reconnect to another
-   peer at once.
+   to a peer that dies are disconnected. They can log in again through another
+   peer as soon as the dead peer restarts or is expired, at most
+   `cluster.peer_timeout` (default 10 s) later.
 3. **One source of truth, replicated.** The instance database, the player
    directory, the permission store, the extension key-value store,
    configuration deployments and the operator audit trail are replicated by
@@ -55,8 +58,9 @@ exactly once.
    needed.
 4. **Same features, same configuration.** Plugins, Lua, the dashboard, the
    HTTP API, `rift admin` and bus clients work against any peer, with the
-   same semantics as on a single Rift. A single Rift remains a valid
-   deployment with no cluster settings and no extra cost.
+   same semantics as on a single Rift, except where this document says
+   otherwise. A single Rift remains a valid deployment with no cluster
+   settings and no extra cost.
 
 ### Non-goals
 
@@ -66,7 +70,7 @@ exactly once.
   but a peer that crashes drops its players.
 - Clusters spread across continents. Raft commits need a round trip to a
   majority, so voters should be within a few tens of milliseconds of each
-  other. Distant proxies join as [learners](#voters-and-learners).
+  other. Distant proxies join as [learners](#voters-learners-and-witnesses).
 - Byzantine peers. Peers trust each other completely, as the proxy trusts
   its node agents today.
 
@@ -74,16 +78,16 @@ exactly once.
 
 | Concern | Today (one process) | In a cluster |
 | --- | --- | --- |
-| Durable state | SQLite file or PostgreSQL, one writer | A SQLite replica on every peer, changed only through the Raft log |
-| Online players | `PlayerRegistry`, in memory | Replicated **presence** table, one record per player, tagged with its peer |
-| Duplicate logins | Checked in process | Decided by a Raft entry, so exactly one peer wins |
-| Message bus | One in-process `Broker` behind QUIC | One broker per peer; peers forward messages by subscription interest |
+| Durable state | SQLite file or PostgreSQL, one writer | A SQLite replica on every peer, changed only by applying the Raft log |
+| Writes | A closure under the connection lock | A typed operation, executed by the leader; the resulting changeset is replicated |
+| Online players | `PlayerRegistry`, in memory | Name and UUID **claims** in the log; player attributes broadcast between peers |
+| Duplicate logins | Checked in process | Decided by applying a claim, so exactly one peer wins |
+| Message bus | One in-process `Broker` behind QUIC | One broker per peer; every subject has a [scope](#subject-scopes) that says whether and how it crosses peers |
 | Player actions | `mpsc` channel to the session | Local channel, or a request to the owning peer over the peer link |
-| Scaling, nodes, managed servers | The proxy | The Raft **leader**, with fencing so a deposed leader cannot act |
+| Scaling, nodes, managed servers | The proxy | The Raft **leader**, gated by a quorum lease and fenced by term |
+| In-memory mirrors of the database | Loaded at startup | Refreshed by **apply hooks** after every applied entry |
 | Servers on the proxy host | `local` | Each peer is also a node named after itself |
 | Configuration and templates | Files beside `rift.lua` | Deployments and template manifests in the log; file contents as content-addressed blobs |
-
-The rest of this document explains each row.
 
 ## Raft
 
@@ -91,224 +95,350 @@ The rest of this document explains each row.
 
 Rift uses [openraft](https://github.com/databendlabs/openraft). It is async,
 runs on tokio (which Rift already uses), supports joint-consensus membership
-changes, learners, snapshots, leader leases and linearizable reads, and leaves
-storage and transport to the application. `raft-rs` (TiKV) was considered: it
-is well proven, but synchronous, and needs more scaffolding for the parts
-openraft provides.
+changes, learners, snapshots and linearizable reads, and leaves storage and
+transport to the application. `raft-rs` (TiKV) was considered: it is well
+proven, but synchronous, and needs more scaffolding for the parts openraft
+provides. Where this document relies on a specific openraft behavior (leader
+step-down, leases), the behavior is verified in the first implementation step
+and wrapped where it falls short.
 
 Each peer keeps two SQLite files:
 
-| File | Contents |
-| --- | --- |
-| `rift.raft.sqlite3` | The Raft log, the vote and the last purged log id. WAL mode, `synchronous=FULL`, because a vote or log entry acknowledged to the leader must survive a crash |
-| `rift.sqlite3` (the instance database) | The state machine. Every table it holds today, plus `cluster_applied` (the last applied log id) and the cluster tables below |
+| File | Contents | Durability |
+| --- | --- | --- |
+| `rift.raft.sqlite3` | The Raft log, the vote, the cluster id, this peer's Raft id and the last purged log id | WAL, `synchronous=FULL`: a vote or entry acknowledged to the leader must survive a crash |
+| `rift.sqlite3` (the instance database) | The state machine: every table it holds today, plus `cluster_applied` and the cluster tables below | WAL, `synchronous=NORMAL`: entries lost in a crash are re-applied from the log |
 
 The applied log id is written in the same SQLite transaction as the entry it
-records. A crash therefore never applies an entry twice or skips one.
+records, so a crash never applies an entry twice or skips one.
+
+The instance database today runs with one connection behind one mutex, in
+`journal_mode=DELETE` with `synchronous=FULL` (`src/database.rs`). In a
+cluster, applying entries would then block every read on the login path. The
+replicated backend therefore switches to WAL with one writer connection,
+used only by apply and by the leader's execution of operations, and a small
+pool of read connections.
 
 ### Peer links
 
-Peers talk over one QUIC connection per pair, on a dedicated
-`cluster.listen` port with the ALPN `rift-cluster/1`. Both sides verify the
-other's certificate against `cluster.ca` and prove that they hold the cluster
-token (`RIFT_CLUSTER_TOKEN`) in the handshake. Each kind of traffic gets its
-own streams on that connection, so a large snapshot never delays a heartbeat:
+Peers talk over QUIC on a dedicated `listen` port with the ALPN
+`rift-cluster/1`. Both sides verify the other's certificate against the
+cluster CA, prove that they hold the cluster token, and present the cluster
+id; a peer with another cluster id is refused. Each pair keeps two
+connections, so bulk transfers never share a congestion window with
+consensus traffic:
 
-| Stream kind | Purpose |
-| --- | --- |
-| `raft` | AppendEntries, Vote, InstallSnapshot (chunked) |
-| `bus` | Subscription interest and forwarded messages (see [message bus](#message-bus)) |
-| `player` | Actions for players connected to the receiving peer |
-| `blob` | Template and file contents by SHA-256 |
-| `load` | Unreplicated, best-effort per-peer load reports, once per second |
+| Connection | Stream kinds | Purpose |
+| --- | --- | --- |
+| control | `raft` | AppendEntries, Vote, heartbeats |
+| control | `presence` | Player attributes and server moves (see [presence](#presence)) |
+| control | `player` | Actions for players connected to the receiving peer |
+| control | `bus` | Interest and forwarded messages (see [message bus](#message-bus)) |
+| control | `load` | Reservations and stop vetoes (see [inputs from other peers](#inputs-from-other-peers)) |
+| bulk | `snapshot`, `blob` | Snapshots, template and file contents by SHA-256 |
 
-During the handshake each peer also sends its version, the cluster features
-it supports, and an HMAC of each shared secret (the forwarding secret, node
-tokens, the bus-login key) keyed by the cluster token. A peer whose secrets
-differ is refused, and its log names which secret differs, so a misconfigured
-peer cannot reject players or nodes.
+**Liveness comes from peer links, not from log entries.** Peers do not write
+heartbeats into the log; the leader tracks when it last heard from each peer
+on the control connection. This keeps the log small (see
+[snapshots](#snapshots-and-log-purging)).
 
-### Voters and learners
+During the handshake each peer also sends its version, the entry kinds it
+supports, the hash of the [shared configuration](#one-configuration), and an
+HMAC of each shared secret (the forwarding secret, node tokens) keyed by the
+cluster token. A peer whose secrets differ is refused, and its log names which
+secret differs.
+
+### Voters, learners and witnesses
 
 Raft needs a majority of **voters** for every commit. Three voters tolerate one
-failure, five tolerate two. Every peer that is not a voter is a **learner**:
-it replicates the log, takes players, serves the bus and forwards its writes
-to the leader, but it does not vote. This keeps commit latency flat while a
-network adds proxies: a network with twelve proxies might run three voters
-and nine learners.
+failure, five tolerate two. Every other peer is a **learner**: it replicates
+the log, takes players, serves the bus and sends its operations to the leader,
+but it does not vote. This keeps commit latency flat while a network adds
+proxies: a network with twelve proxies might run three voters and nine
+learners. Learners must be able to send operations, because every login
+writes claims.
 
 A two-proxy network adds a **witness**: `rift witness` is a voter that opens no
-game listener and takes no bus clients. It runs on any small host and gives
-the two proxies a third vote.
+game listener and takes no bus clients. It holds the full state machine, so it
+holds everything the instance database holds, including the bus-login key.
+Treat its host like a proxy host. A witness hands leadership to a
+player-serving voter whenever one is available, since the leader talks to
+every node agent.
+
+### Membership
+
+Membership is changed by explicit commands, not by editing `rift.lua`, so a
+typo in a deployment cannot remove two voters:
+
+```sh
+rift cluster init --peer eu-1            # once: a one-voter cluster from this Rift's data
+rift admin cluster add eu-2 10.0.0.2:7444            # joins as a learner and catches up
+rift admin cluster promote eu-2                      # becomes a voter once caught up
+rift admin cluster demote eu-3 | remove eu-3
+rift admin cluster replace eu-3                      # after a peer lost its disk
+```
+
+- Each command is one membership change. The leader refuses a change that
+  would leave fewer than three voters (or two plus a witness) unless it is
+  given `--force`.
+- A peer's Raft id is assigned when it is added and stored in its Raft file.
+  A peer that comes back with an empty Raft file under a name that is still a
+  member is refused, because it could vote twice in one term. `replace`
+  removes and re-adds it under a new id.
+- A peer's own settings (its name, listen address, certificate, key, CA,
+  token variable and the addresses of other peers to contact first) live in
+  a small per-host file, `cluster.toml` beside `rift.lua`, or the equivalent
+  command line flags. They are needed before the peer can reach the cluster
+  that holds the replicated configuration, so they cannot come from it.
 
 ### The state machine
 
-Every log entry is one of a small number of kinds, each versioned. An entry
-kind is used only once every voter and learner advertises it, as node
-features work today, so a rolling upgrade never sends an entry a peer cannot
-apply.
+Every log entry is one of a small number of kinds, each versioned:
 
 | Entry | Applied as |
 | --- | --- |
-| `changeset` | A SQLite session changeset for transactional writes (see [writes](#writes-to-the-instance-database)) |
-| `presence` | Claims, releases and server moves of online players, batched |
-| `kv` | Puts, deletes and compare-and-set in the extension store |
+| `operation` | A changeset produced by the leader executing typed operations, with each operation's result (see [writes](#writes-to-the-instance-database)) |
+| `claim` | Player name and UUID claims and releases, node session claims |
+| `kv` | Key-value mutations, applied with their quota checks, returning a result |
 | `directory` | Player directory upserts (name, last seen, language) |
 | `stream` | Appends to retained streams and consumer acknowledgements |
-| `peer` | Peer joined, peer expired, load summary, leader task term |
+| `peer` | Peer joined (with a new incarnation), peer expired |
 | `config` | A configuration deployment: revision, source and actor |
-| `manifest` | A change to a template folder or file tree: paths, sizes, SHA-256 |
-| `migrate` | Upgrade one component's schema to a version every peer supports |
+| `manifest` | A change to a template folder: paths, sizes, SHA-256 |
+| `features` | The set of entry kinds and settings every member supports |
+| `migrate` | Upgrade one component's schema to a version every member supports |
+| `checksum` | A hash of the state machine at this index, compared by every peer |
 
-Applying an entry must be deterministic. Entries never read the clock or a
-random source while being applied: the proposer puts timestamps and generated
-values into the entry.
+Rules for every kind:
 
-### Snapshots
+- **Deterministic apply.** Applying never reads the clock or a random source.
+  The leader stamps each entry with its time, so timestamps are monotonic
+  across the cluster; generated values come from the leader's execution.
+- **Idempotent proposals.** Each operation carries `(peer, incarnation,
+  serial)`. The state machine keeps the last serial and its result per peer
+  incarnation, so an operation retried after a leader change returns the
+  stored result instead of failing (for example `begin_creation` on a primary
+  key it already inserted).
+- **Feature gating.** An entry kind is used only after a committed `features`
+  entry lists it. The leader computes that set over all members, including
+  ones that are down: a member that is down blocks activation until it comes
+  back or is removed.
+- **Schema changes only through `migrate`.** DDL, `PRAGMA user_version` and
+  startup inserts (such as the permission store's initial rows) are not
+  captured by changesets. The migrations that run when a component opens
+  today (`src/instance_store.rs`, `src/permissions/authority.rs`) run instead
+  when a `migrate` entry is applied, on every peer at the same index.
+- **Divergence detection.** The leader proposes a `checksum` entry every
+  10,000 entries (a hash over every table, ordered by primary key). A peer
+  whose hash differs stops taking logins, reports `rift_cluster_diverged` and
+  reinstalls a snapshot.
 
-A snapshot is a consistent copy of the instance database, made with SQLite's
-online backup API (or `VACUUM INTO`) and sent in chunks over the `raft`
-stream. A new peer, or one that fell behind the purged log, installs the
-snapshot into a temporary file, checks it, swaps it in and continues from the
-snapshot's log id. Peers snapshot and purge their log after a configurable
-number of entries (default 10,000) or 64 MiB of log, whichever comes first.
+### Snapshots and log purging
+
+The state machine is durable on its own, so a peer can purge its log up to
+its applied index once every member has replicated those entries, or
+regardless after 64 MiB of log, since a member that falls behind can install a
+snapshot. A snapshot file is built only when a member needs one, with SQLite's
+online backup API from a read connection, and is sent over the bulk
+connection in chunks.
+
+The instance database can reach gigabytes: the key-value quota allows up to
+1 GiB per owner (`src/extensions/storage.rs`), streams default to 64 MiB each,
+and the player directory grows without bound. Snapshots are therefore rare and
+resumable, and a peer that is several snapshots behind is better replaced
+from a backup (see [backup and restore](#backup-and-restore)).
+
+**Installing a snapshot while serving players:**
+
+1. Pause apply and leader execution on this peer; stop taking logins.
+2. Write the snapshot to a temporary file, check its integrity and schema
+   versions, and swap it in.
+3. Reopen the writer and read connections, which also drops their prepared
+   statement caches.
+4. Run every apply hook in *full reload* mode (see below), synthesizing the
+   join, leave and permission-update events that the difference between the
+   old and new state implies.
+5. Resume apply and logins.
+
+### Apply hooks
+
+Today several components load the database into memory once and then trust
+their memory:
+
+- group states and node schedules (`src/runtime.rs`, `serve`);
+- registered instances in `Config.instances` (`src/instance_store.rs`);
+- the permission authority's groups, revision and compiled cache
+  (`src/permissions/authority.rs`);
+- the key-value mirror (`src/extensions/storage.rs`).
+
+In a cluster another peer's operation changes the database under them. Each
+of these components registers an **apply hook**. After every applied entry,
+the state machine calls the hooks whose tables changed, with the changed keys,
+and each hook refreshes its memory and raises the events it would have raised
+had the change been local. The same hooks run in full reload mode after a
+snapshot install. The single-process backends call the same hooks after each
+local write, so one code path serves both.
 
 ## Writes to the instance database
 
-Rift's database code today takes the connection lock, opens a transaction,
-reads, decides in Rust and writes (for example
-`InstanceStore::allocate_name` in `src/instance_store.rs` or
-`Authority::apply` in `src/permissions/authority.rs`). That logic cannot be
-shipped to another peer, so writes in a cluster use **optimistic replication
-of changesets**.
+Rift's database code takes the connection lock, opens a transaction, reads,
+decides in Rust and writes (for example `InstanceStore::allocate_name` in
+`src/instance_store.rs`). Writes are spread over roughly 8 transactions and
+about 27 lock sites, many of them single statements (`src/directory.rs`,
+`src/instance_store.rs`).
 
-1. Every write becomes a closure, `database.write(|tx| ...)`, which may run
-   more than once. This replaces the `lock()` plus `transaction()` pattern at
-   the roughly dozen call sites. The single-process backends run the closure
-   once, as today.
-2. In a cluster the closure runs against the local replica inside a
-   transaction that SQLite's
-   [session extension](https://sqlite.org/sessionintro.html) records.
-   rusqlite exposes it through its `session` feature. An authorizer callback
-   records which tables the closure read. Afterwards the transaction is rolled
-   back. The local replica changes only when the log says so.
-3. The peer sends the leader the changeset, the set of tables it read and its
-   **base**, the last log index it had applied.
-4. The leader accepts the write if no entry after the base changed a row that
-   the changeset also changes, and no entry after the base changed a table the
-   closure read. The leader tracks the last index that changed each table and
-   each primary key. Otherwise it rejects the write with its current index.
-5. On rejection the peer waits until it has applied that index, then runs the
-   closure again, up to a limit (default 5 attempts, then an error).
-6. On acceptance the write returns once the entry is committed **and applied
-   on the writing peer**, so a caller always reads its own write.
+In a cluster, **the leader executes every write**:
 
-When the writing peer is the leader, it runs the closure under its write lock
-against the latest applied state, so step 4 cannot reject it.
+1. Each write becomes a typed, serializable **operation**: a permission
+   `Change` (already normalized and serializable in
+   `src/permissions/authority.rs`), `BeginCreation`, `AllocateName`,
+   `SetGroupState`, `SetNodeSchedule`, and so on. The closed set of call sites
+   makes this feasible.
+2. A peer sends the operation to the leader. The leader runs the existing
+   code for it on its own replica, inside a transaction that SQLite's
+   [session extension](https://sqlite.org/sessionintro.html) records. The
+   leader runs queued operations one after another in one open transaction,
+   each in its own savepoint, so a failing operation rolls back alone and
+   later operations see earlier ones.
+3. The leader takes the combined changeset and each operation's result, rolls
+   the transaction back, and proposes one `operation` entry.
+4. Every peer, the leader included, applies the changeset when the entry
+   commits. The caller's peer returns the result once the entry is applied
+   **locally**, so a caller always reads its own write.
+5. While an entry is in flight, the leader keeps executing new operations on
+   top of a transaction that already contains the in-flight changesets
+   (group commit), so throughput is not limited to one operation per round
+   trip.
 
-This gives serializable writes: the leader rejects every write whose reads or
-writes overlap with a write it missed. Conflicts are rare because the
-transactional writers are cold paths: permission edits, instance
-registrations, group states, node schedules and name sequences. The hot paths
-(player presence, directory upserts, key-value puts) are not changesets but
-their own deterministic entry kinds, which never conflict.
+Because only the leader executes, against the latest state, under one write
+lock, every write is serializable without read sets, retries or conflict
+detection. The cost is one round trip to the leader for writes made on
+followers. Those writes are cold paths: permission edits, instance
+registrations, group states and node schedules.
 
-Applying a changeset uses `sqlite3changeset_apply` with a conflict handler
-that aborts. Because the leader validated the write, a conflict during apply
-means the replica has diverged. The peer then stops applying, reports the
-divergence (`rift_cluster_diverged`) and reinstalls a snapshot from the
-leader.
+The hot paths are not changesets but their own deterministic entry kinds:
+claims (logins), `directory` (joins), `kv` (plugin storage) and `stream`.
+`kv` covers the full multi-key `mutate` with its quota checks, and its apply
+returns the result the caller expects.
 
-Reads stay local and never wait for the network. They see the replica as of
-its last applied entry, which on a healthy cluster trails the leader by
-milliseconds. A caller that needs the latest state, such as `rift check
---strict` asking a running cluster, uses a linearizable read: openraft's
-read-index confirms leadership, then the peer waits until it has applied that
-index.
+**Applying a changeset:**
+
+- Foreign key actions are disabled during apply
+  (`SQLITE_CHANGESETAPPLY_FKNOACTION`), because the changeset already
+  contains the rows that a cascade deleted: `perm_node` cascades from
+  `perm_subject` (`src/permissions/store.rs`). rusqlite 0.42's `apply` passes
+  no flags, so this is a small FFI call to `sqlite3changeset_apply_v2`.
+- Any conflict aborts. Since the changeset was computed against the same
+  state at the same index, a conflict means divergence and leads to a
+  snapshot install.
+- At startup the replicated backend asserts that every table has a primary
+  key (sessions do not record tables without one) and that the schema
+  version of every component matches the last applied `migrate` entry. A
+  changeset is never applied against a table SQLite would silently skip.
+
+**Reads** stay local and never wait for the network. They see the replica as
+of its last applied entry, which on a healthy cluster trails the leader by
+milliseconds. A caller that needs the latest state uses a linearizable read
+(the leader confirms its leadership, then the peer waits until it has applied
+that index). Ban checks on login use local reads; a ban is enforced on every
+peer within the replication lag, and the session that a ban targets is
+kicked by its owning peer when the ban applies.
 
 > [!IMPORTANT]
 > A cluster uses the replicated SQLite backend. `database.backend =
 > "postgres"` with a [standby](database.md#standby-controllers) stays
-> available for networks that want one active proxy and an existing
-> PostgreSQL server. A cluster on PostgreSQL would reintroduce an external
-> single point of failure and is not planned. *Open question: is that the
-> right call for networks that already run highly available PostgreSQL?*
+> available for networks that want one active proxy; combining it with
+> `cluster` is a configuration error. See [decisions](#decisions).
 
 ## Players
 
 ### Presence
 
-Every online player has one presence record, replicated to every peer:
+Presence is split by what needs consensus:
 
-| Field | Meaning |
-| --- | --- |
-| `uuid`, `name` | Identity; the name is unique case-insensitively, as today |
-| `peer`, `connection_id` | The peer that holds the connection |
-| `server` | The backend the player is on, or none while connecting |
-| `visible_to` | The visibility filter used by `Viewer` today (vanish) |
-| `protocol`, `locale`, `since` | What tab lists, the players API and the dashboard show |
+| Part | Fields | How it travels |
+| --- | --- | --- |
+| **Claims** | lowercase name, UUID, peer, incarnation, connection id | `claim` entries in the Raft log |
+| **Attributes** | server, display name, signed skin properties, tab order, visibility filter, IP address, protocol, locale, since | Broadcast on the `presence` stream from the owning peer, with a per-peer sequence number and a full resync on reconnect |
 
-`PlayerRegistry` (`src/players.rs`) keeps its API and its generation counter,
-but reads from the replicated table, so the tab list (`{online}`,
-`{server_online}`, network entries), the server-list count, the status page,
-BungeeCord `PlayerCount`/`PlayerList`, managed-server player counts and
-metrics count the whole network on every peer.
+Only uniqueness needs consensus. Attributes change often (every server
+switch) and are large (signed skin properties are 1–3 KB), and only the
+owning peer changes them, so putting them in the log would cost snapshot and
+log volume for nothing. Every peer combines its replica's claims with the
+attributes it has received into the view that `PlayerRegistry`
+(`src/players.rs`) serves. The tab list (`{online}`, `{server_online}`,
+network entries with skins), the server-list count, the status page,
+BungeeCord `PlayerCount`, `PlayerList`, `IP`/`IPOther` and `UUIDOther`,
+managed-server player counts and metrics then count the whole network on
+every peer. Tab list rebuilds are rate-limited, so a burst of joins does not
+rebuild every tab list once per join.
 
-Connection ids become cluster-unique: the upper 16 bits hold the peer's
-numeric id, which is assigned when it joins and stored in the membership.
-`src/events.rs` keeps its process-local counter for the lower 48 bits. The
-owning peer of any connection id can therefore be read from the id itself.
+### Incarnations and connection ids
+
+Every time a peer starts, it proposes `peer joined` with a new
+**incarnation**. Applying it releases every claim of that peer's older
+incarnations, so players of a peer that crashed and restarted can log in
+again at once, and a full-cluster restart starts with no stale claims.
+
+Connection ids become cluster-unique: the upper bits hold the peer's numeric
+id and its incarnation, and the lower bits the process-local counter from
+`src/events.rs`. The owning peer of any connection id can be read from the
+id, and an action addressed to a connection of an older incarnation is
+refused instead of reaching another player's session.
 
 ### Logins and duplicate logins
 
 The name reservation and the UUID registration (`reserve_name` and
-`register_visible`) become **claims**:
+`register_visible`) become claims:
 
-1. Before contacting a backend, the session proposes a `presence` claim for
-   its lowercase name. Once the identity is confirmed, it proposes a claim for
-   the UUID and name together.
-2. Applying a claim succeeds only if no other live record holds the name or
+1. Before contacting a backend, the session proposes a claim for its
+   lowercase name. Once the identity is confirmed, it proposes a claim for the
+   UUID and name together. In offline mode the name claim follows the
+   per-address rate limits and admission checks, so unauthenticated clients
+   cannot flood the log.
+2. Applying a claim succeeds only if no other live claim holds the name or
    UUID. Every peer applies the same entries in the same order, so exactly one
    of two simultaneous logins wins, wherever they connected. The loser gets
    `LoginAlreadyConnected` or `LoginDuplicateName`, as today.
 3. `cluster.max_players` (optional) caps the network: a claim beyond it fails
-   deterministically, unless the claim carries a bypass decided by the
-   login hook.
+   deterministically unless it carries a bypass decided by the login hook.
 4. Dropping the session's registration proposes a release.
 
-Claims add one commit (one round trip to a voter majority, typically 1–5 ms
-in one data centre) to each login. Logins already wait far longer on Mojang
-authentication. Claims from one peer are batched: a peer sends at most one
-`presence` entry per 10 ms, with every claim, release and server move since
-the last one.
+A claim adds one commit to each login: a round trip to the leader and from it
+to a majority, typically 1–5 ms in one data centre. Logins already wait far
+longer on Mojang authentication. Claims are group-committed: while one
+proposal is in flight, a peer collects the next claims and sends them
+together. At 20,000 players this is on the order of ten logins and a few
+hundred claim operations per second, well within what Raft handles.
 
 ### When a peer disappears
 
-Every peer proposes a heartbeat entry (a `peer` entry, batched with presence)
-at least once per second. If the leader sees none from a peer for
-`cluster.peer_timeout` (default 10 s), it proposes **peer expired**, which
-releases every presence record of that peer. Its players disappear from tab
-lists and their names become free.
-
-A peer that cannot reach a majority (a network partition) knows it, because
-its own heartbeats stop committing. After `cluster.peer_timeout` it assumes it
-has been expired:
-
-- it refuses new logins, with `cluster.partition_message`;
-- it keeps existing players connected and routed, because their backends may
-  still be reachable;
-- when it rejoins, it proposes fresh claims for its players. A claim that now
-  conflicts, because the player logged in elsewhere meanwhile, disconnects the
-  older session.
-
-*Open question: should a partitioned peer also be able to admit logins in a
-degraded "local only" mode, accepting a possible duplicate until it
-rejoins?* The default above prefers correctness.
+- The leader expires a peer that it has not heard from for
+  `cluster.peer_timeout` (default 10 s) by proposing `peer expired`, which
+  releases its claims. A new leader starts every peer's timer afresh, so an
+  election never expires every peer at once.
+- A peer that has not heard from the leader for half of `peer_timeout`
+  **fences itself**: it refuses new logins with `cluster.partition_message`.
+  Because it fences after half the timeout and the leader expires after the
+  full timeout, a peer has always stopped admitting players before its claims
+  are released. This assumes only that clocks on the peers advance at similar
+  rates, not that they agree.
+- Existing players on a fenced peer stay connected for
+  `cluster.partition_grace` (default 60 s), so a short blip disconnects
+  nobody. If the peer is still cut off afterwards, it disconnects them with
+  the partition message, so they can log in through a healthy peer, and their
+  servers' counts on the majority side become true again.
+- After expiring a peer, the leader holds back idle stops and scale-down for
+  servers that had its players, until `partition_grace` has passed.
+- A peer that rejoins proposes `peer joined` with its current incarnation and
+  fresh claims for any players it still holds. A claim that now conflicts,
+  because the player logged in elsewhere meanwhile, disconnects the session
+  on the rejoining peer.
 
 ### Player actions on another peer
 
 Every operation that today does `entry.actions.try_send(PlayerAction::…)` in
-`src/extensions/players.rs` first looks up the player's presence:
+`src/extensions/players.rs` first looks up the player's claim:
 
 - a local player gets the action through its channel, as today;
 - a player on another peer gets it as a request on the `player` stream to
@@ -317,25 +447,64 @@ Every operation that today does `entry.actions.try_send(PlayerAction::…)` in
 
 `PlayerAction` becomes serializable. Both paths sit behind the existing
 `Players` methods, so these work across peers without changes of their own:
-`rift.players.*` and `rift.network.*` subjects, `GET /api/players` and the
-message and kick routes, the plugin and Lua players API, BungeeCord
-`Message`, `MessageRaw`, `KickPlayer`, `Connect`, `ConnectOther` and
-`ForwardToPlayer`, and `rift admin transfer`. Broadcasts go to every peer,
-and each delivers to its own players.
+`rift.players.*` and `rift.network.*`, `GET /api/players` and the message and
+kick routes, the plugin and Lua players API, BungeeCord `Message`,
+`MessageRaw`, `KickPlayer`, `Connect`, `ConnectOther`, `Forward` and
+`ForwardToPlayer`, and `rift admin transfer`. Broadcasts go to every peer, and
+each delivers to its own players. Dialog clicks arrive on the player's peer
+and are handled there, so a dialog opened from another peer routes its
+callback back over the `player` stream.
 
 Events that belong to a session (login, chat, commands, transfer decisions,
 disconnect) are raised on the peer that holds the session. Every peer loads
-the same plugins from the same configuration, so plugin code sees each
-player exactly once. Network-wide `rift.events.players` is published on the
-federated bus, so a subscriber on any peer sees every player event.
+the same plugins, so plugin code across the cluster sees each of these events
+exactly once.
+
+### Permissions for online players
+
+The permission authority keeps per-session state in memory: who is online,
+their contexts and expected arrivals (`src/permissions/authority.rs`). A
+commit recompiles only players online on that process. In a cluster a
+backend's bus client is connected to one peer while its players arrive
+through every peer, so:
+
+- each peer keeps session state for the players it holds and recompiles them
+  when a permission entry is applied (through the apply hook);
+- permission pushes for a player are published by the owning peer with
+  `cluster` scope, so they reach the backend wherever its client is connected;
+- context reports and expected arrivals that a backend sends are routed to the
+  player's owning peer, like player actions.
 
 ## Message bus
 
+### Subject scopes
+
+Revision 1 forwarded every message to every peer with matching interest.
+That is wrong for Rift's own subjects: every peer subscribes to
+`rift.control.*`, `rift.players.*`, `rift.network.*`, the permission request
+subjects and node states without a queue group
+(`src/messaging_runtime.rs`, `src/permissions/control.rs`,
+`src/node/registry.rs`). A request forwarded by interest would run once per
+peer, and an instance would be created three times. Every subject therefore
+has a **scope**:
+
+| Scope | Subjects | Behavior |
+| --- | --- | --- |
+| `local` | Built-in request subjects: `rift.control.*`, `rift.players.*`, `rift.network.*`, permission requests | Answered by the peer the client is connected to; never exported. That peer forwards the work internally where needed: player actions to the owning peer, operations to the leader |
+| `applied` | Events about replicated state: `rift.events.instances`, `permissions`, `reload`, `servers` | Published by every peer when it applies the entry, to its local subscribers only; never forwarded. Each subscriber gets exactly one copy |
+| `origin` | Events about sessions: `rift.events.players`, `rift.events.control` | Published on the peer where they happen. Forwarded to peers whose **remote clients** have interest; in-process Lua and plugins receive only events of their own peer, so plugin code sees each event once |
+| `owner` | `rift.node.<n>.cmd`, `rift.node.<n>.state` | Routed to the peer that holds the node's session claim (commands) or to the leader (states) |
+| `cluster` | Everything else: user and plugin subjects | Federated by interest, as below |
+
+Lua and plugin subscriptions accept a `scope` (`"cluster"`, the default for
+user subjects, or `"local"`). The plugin host's delivery of every
+`rift.events.>` message to every plugin (`src/plugins/mod.rs`) follows the
+`origin` and `applied` rules.
+
 ### Federation
 
-Every peer runs its own `Broker` (`src/messaging/mod.rs`), and local Lua,
-plugins and bus clients use it exactly as today. Peers federate in a full mesh
-using the `bus` stream:
+For `cluster` subjects, every peer runs its own `Broker`
+(`src/messaging/mod.rs`) and federates in a full mesh:
 
 - **Interest.** Each peer tells every other peer which subject patterns its
   local subscribers use, and how many members each queue group has.
@@ -343,39 +512,65 @@ using the `bus` stream:
   reconnect. It is not stored in Raft.
 - **Publish.** A message is delivered to local subscribers and forwarded once
   to each peer with matching interest. A message received from a peer is
-  never forwarded again, so a full mesh needs one hop and has no loops.
+  never forwarded again: one hop, no loops.
 - **Queue groups** pick one member across the cluster: a local member if
   there is one, otherwise a peer chosen by its member count.
 - **Request and reply.** Inboxes become `_INBOX.<peer>.<random>` (today
-  `_INBOX.<random>`, `src/messaging/mod.rs`), so a reply is routed by its
-  prefix without waiting for the inbox's interest to spread.
+  `_INBOX.<random>`), so a reply is routed by its prefix without waiting for
+  the inbox's interest to spread.
+- **No responders.** Today `NoResponders` comes from a synchronous count of
+  local deliveries, and node requests report it as "unreachable"
+  (`src/node/registry.rs`). With federation, a request with no local
+  subscribers and no remote interest fails with `NoResponders` at once. A
+  request forwarded to a peer whose subscribers left meanwhile gets a
+  no-responders reply from that peer. Node requests use the `owner` scope and
+  the session claim instead, so "unreachable" stays exact.
 - **Identity.** Clients authenticate on the peer they connect to. Forwarded
-  messages carry the publishing principal, so subjects whose permissions depend
-  on who publishes (`rift.node.*`, `rift.perms.*`, bus logins) are checked the
-  same on every peer.
+  messages carry the publishing principal, so permission checks that depend
+  on the publisher give the same answer on every peer.
 
 Bus clients receive a list of peers. `crates/rift-messaging`'s
 `Client::connect` gains an address list and reconnects to the next peer when
-one fails. The Java client and the bus-login files written to servers
-(`rift-bus.pem` today) get the same list. `rift node --controller` becomes
-repeatable.
+one fails; the Java client, the node agent (`--controller`, repeatable) and
+the bus-login files written to servers get the same list. The certificate
+must name every peer address, or each address carries its own TLS name.
+
+### Bus logins
+
+The key that derives bus-login tokens is a generated file today,
+`local/instance-key` (`src/instance_login.rs`), so a token derived on one
+peer would fail on another. `rift cluster init` moves the key into a
+replicated table, and every peer derives and checks tokens from it. Login
+generations are already in the database.
 
 ### Retained streams
 
-Retained streams (`src/messaging/stream.rs`) are bounded and low-volume, so
-their appends and consumer acknowledgements become `stream` entries, and
-every peer keeps the same stream contents. Retention is applied
-deterministically when entries are applied. Acknowledgements are batched per
-consumer. The permission change stream, which today lives in
-`rift.perms-changes/` beside the configuration, is derived from permission
-revisions in the replicated database and is identical on every peer.
+Retained streams (`src/messaging/stream.rs`) keep consumer state that `fetch`
+changes: pending records and redelivery deadlines. Replicating appends and
+acknowledgements alone would let two peers hand the same records to one
+durable consumer. So:
 
-### Sessions that must be unique
+- the **stream service runs on the leader**. `fetch`, `publish` and
+  acknowledgements on any peer are forwarded to it;
+- appends and acknowledgements are `stream` entries, so a new leader rebuilds
+  every stream and its acknowledged positions;
+- pending records that were delivered but not acknowledged when the leader
+  changed are delivered again. Streams already promise at-least-once
+  delivery, so this is within their contract;
+- streams without storage (memory streams) live on the leader and start empty
+  after a leader change.
+
+The permission change stream, which today lives in `rift.perms-changes/`
+beside the configuration, is derived from permission revisions in the
+replicated database and is identical on every peer.
+
+### Node sessions
 
 A node principal has one session at a time today: a new login closes the old
-one. In a cluster, node sessions are claims like player names: a node agent
-connecting to any peer claims `node.<name>`, and the peer that held the older
-session closes it.
+one. In a cluster, node sessions are claims: a node agent connecting to any
+peer claims `node.<name>`, and the peer that held the older session closes
+it. The claim also tells the leader which peer to route the node's commands
+through.
 
 ## Work that runs once: the leader
 
@@ -385,67 +580,89 @@ Raft leader and nowhere else:
 - the scaler (`src/scaling.rs`), instance creation, removal and moves;
 - managed server and instance lifecycle: starting, stopping, idle stops,
   restart retries and recovery;
-- node commands (`rift.node.<n>.cmd`) and node schedules (cordon, drain);
-- template source syncs (git), cache warming;
-- leader-only timers that plugins request (*open question: plugins need an
-  API to say "run this on one peer only"; `rift.cluster.is_leader()` and a
-  `leader` flag on timers are the candidates*).
+- node control commands and node schedules (cordon, drain);
+- startup recovery of half-done operations (today `Store::restore` aborts
+  `creating` records and finishes `removing` ones at every start; in a
+  cluster only the leader does this, when it gains leadership, and continues
+  or aborts the create, remove or move that the previous leader left);
+- writes derived from configuration: `mirror_config`, pruning removed groups
+  and nodes, and the permission expiry sweeper;
+- the stream service, the queue service, template source syncs (git) and
+  cache warming;
+- plugin work marked as leader-only (see [decisions](#decisions)).
 
-The leader starts these tasks once it has applied every entry of its term, and
-stops them the moment openraft reports it is no longer leader.
+### Leader exclusivity
 
-**Fencing.** Every node command carries the leader's Raft term. An agent
-remembers the highest term it has seen and refuses commands with a lower one.
-A deposed leader that has not yet noticed cannot start or stop servers.
+1. **Quorum lease.** The leader acts only while a majority of voters has
+   acknowledged it within the lease period (shorter than the election
+   timeout). Every side effect checks the lease first. A leader cut off from
+   the majority stops acting within one lease period, before another leader
+   can be elected.
+2. **Term-tagged operations.** Operations proposed by leader tasks carry the
+   term they were decided in. The leader executing operations refuses one
+   with another term, so a deposed leader's scaler cannot get its decisions
+   applied by forwarding them to the new leader like an ordinary write.
+3. **Fenced node agents.** When it gains leadership, the leader first sends
+   every node agent a `fence` command with its term. The agent stores the
+   highest term it has seen below its `--root` and refuses control commands
+   with a lower one. The leader sends an agent other commands only after the
+   agent acknowledged its fence. Inspection commands (`logs`, `console`,
+   `files`, `tree`, `read`) are not fenced: any peer's web API may send them
+   for any operator.
+4. **Reconcile on leadership gain.** A new leader already has node states
+   from its time as a follower, so the reconnect path that triggers adoption
+   today (`src/node/registry.rs`) would not fire. The leader therefore
+   reconciles every agent after fencing it, exactly as a restarted controller
+   adopts servers today.
 
-**Inputs from other peers.** The leader decides from replicated state wherever
-it can: player counts per server come from presence, instance records and
-node schedules from the database. Reservations (players being sent to a server
-that is starting) and queue lengths change too fast to replicate, so each
-peer sends them on the `load` stream every second. The leader sums them,
-and treats a peer whose report is older than 5 s as reporting nothing.
+### Inputs from other peers
 
-**Start on connect.** A session that needs a stopped server asks the leader
-(a request to `rift.cluster.leader.start`) and waits until the server's
-replicated state turns `running`, with the same timeout as today.
+The leader decides from replicated state where it can: player counts per
+server come from presence, instance records and node schedules from the
+database. Reservations (players being sent to a server that is starting) and
+queue tickets change too fast to replicate:
 
-**Server states** (`running`, `starting`, `unknown`, the last error) are
-written by the leader as batched `changeset` entries. Every peer routes from
-the same view, and a new leader starts with the old leader's view instead of
-an empty one.
+- **Start on connect.** A session that needs a stopped server asks the leader
+  and waits until the server is running, with the same timeout as today.
+- **Idle stops.** Today one lock guards both reservations and idle detection
+  (`src/managed.rs`), so a player can never connect to a server that is being
+  stopped. In a cluster, before stopping a server for being idle or for
+  scale-down, the leader asks every live peer over the `load` stream. A peer
+  stops routing new players to that server and answers with a veto if it has
+  a reservation or a player on its way there. The leader stops the server
+  only if no peer vetoes and no peer is unreachable.
+- **Server states** (`running`, `starting`, `unknown`, the last error) are
+  written by the leader as `operation` entries, so every peer routes from the
+  same view and a new leader starts with the old leader's view.
+- **Service states** that backends report on `rift.server.state` (`LOBBY`,
+  `INGAME`, drain flags; `src/service_state.rs`) arrive on whichever peer
+  the backend's client uses. That peer broadcasts them to every peer, and a
+  peer that starts asks the others for a full copy, so it never routes players
+  into an `INGAME` or draining server.
 
 ### Servers on the peers' own hosts
 
 Today `local` means the proxy's own host. In a cluster each peer runs an
-embedded node agent and is a node named after itself, with labels from
-`cluster.peers.<name>.labels`. Managed servers and service groups select peers
-like any node. A server on a peer's host keeps running when that peer's proxy
-process restarts if it uses [`keep_running`](kept-servers.md); otherwise it
-stops with its peer, as local servers stop today. The name `local` is refused
-in a cluster.
+embedded node agent and is a node named after itself, with labels from its
+`cluster.toml`. Managed servers and service groups select peers like any
+node. A server on a peer's host keeps running when that peer's proxy process
+restarts if it uses [`keep_running`](kept-servers.md); otherwise it stops with
+its peer, as local servers stop today. The name `local` is refused in a
+cluster. `rift cluster init` converts existing local registrations (stored
+with an empty node and absolute plan directories) to the initializing peer's
+node.
 
 ## Configuration and files
 
 ### One configuration
 
-Every peer runs the same `rift.lua`. The peer's own name comes from
-`--peer <name>` or `RIFT_PEER`, and is visible to the script as `rift.peer`,
-so per-host settings stay in the one file:
+Every peer runs the same `rift.lua`. The peer's own name is visible to the
+script as `rift.peer`, so per-host differences stay in the one file:
 
 ```lua
 rift.config.cluster = {
-    listen = "0.0.0.0:7444",
-    certificate = "certs/cluster.pem",
-    private_key = "certs/cluster-key.pem",
-    ca = "certs/cluster-ca.pem",
-    token_env = "RIFT_CLUSTER_TOKEN",          -- the default
-    peers = {
-        ["eu-1"] = { address = "10.0.0.1:7444", voter = true },
-        ["eu-2"] = { address = "10.0.0.2:7444", voter = true },
-        ["eu-3"] = { address = "10.0.0.3:7444", voter = true },
-        ["us-1"] = { address = "10.1.0.1:7444" }, -- a learner
-    },
     peer_timeout_ms = 10000,
+    partition_grace_ms = 60000,
     max_players = 20000,
 }
 
@@ -455,58 +672,88 @@ if rift.peer == "us-1" then
 end
 ```
 
+Branching on `rift.peer` is allowed only in **peer sections**: listeners,
+routes, limits, health checks, the server list, the tab list and the web
+listener. Every other section is **shared**: it writes durable state or
+drives leader tasks (service groups, managed servers, backends, nodes,
+permissions, extensions, messaging principals). Each peer hashes the shared
+sections of its evaluated configuration and sends the hash to the leader. The
+leader refuses to activate a deployment while any peer's hash differs, and the
+dashboard shows which peer and section differ.
+
 Configuration **deployments** (the dashboard, `PUT /api/config`, `rift admin
 reload` after an edit) become `config` entries. Every peer writes the
 deployed source to its `rift.lua` atomically and reloads. The deployment
-history (`deployments.json` today) and the operator audit trail
-(`audit.jsonl`, both in `src/operator.rs`) become replicated tables, so
-rollback and audit work from any peer. A peer that starts with a different
-`rift.lua` than the last deployment logs which revision it differs from and
-adopts the deployed one. *Open question: or refuse to start, so a hand edit
-on one host is never silently overwritten?*
+history (`deployments.json`) and the operator audit trail (`audit.jsonl`,
+both in `src/operator.rs`) become replicated tables, so rollback and audit
+work from any peer. A peer that starts with a `rift.lua` that differs from the
+last deployment adopts the deployment if its file matches an older deployed
+revision. If it matches none, which means someone edited it by hand, the peer
+refuses to start and keeps the file; `--adopt-deployed` overrides.
 
-Membership follows the configuration. After a deployment changes
-`cluster.peers`, the leader adds new peers as learners, waits for them to
-catch up, promotes those marked `voter`, and removes dropped peers, one
-membership change at a time. It refuses to remove voters if fewer than three
-would remain, unless a witness is configured.
+The web API has no sessions: tokens come from the configuration, which is
+replicated, so a token works on every peer. The random token for local
+access that each process creates (`src/web.rs`) stays per peer.
 
 ### Templates and other files
 
 Template folders, plugin jars, maps and the software cache can be large, so
-they never travel in the log. Instead:
+they never travel in the log:
 
 - A `manifest` entry records a folder's files by path, size and SHA-256.
 - Each peer stores contents by hash under `cache/blobs/` and fetches missing
-  blobs from any peer that has them, over the `blob` stream.
-- An upload or a git sync on any peer stores the blobs locally, copies them to
-  a majority of voters, then proposes the manifest. A committed manifest
-  therefore never references a blob that only one host has.
+  blobs from any peer that has them, over the bulk connection.
+- An upload or a git sync stores the blobs, copies them to a majority of
+  voters, then proposes the manifest, so a committed manifest never references
+  a blob only one host has. Git syncs run on the leader, so every voter needs
+  the git credentials.
 - `template_storage` on each peer is materialized from the manifest, so node
-  agents keep fetching templates over `--web` from whichever peer they reach,
-  with the same manifest endpoint as today.
+  agents keep fetching templates over `--web` from whichever peer they reach.
 
 Server directories on hosts (nodes and peers) stay where they are: they are
 the data of running servers, not shared configuration.
 
+### Key-value stores and other local files
+
+- A key-value store in the instance database (`extensions.storage.database =
+  true`) is replicated with `kv` entries.
+- A store kept in its own file (`path`) cannot be replicated as a file. In a
+  cluster it is a configuration error; `rift cluster init` copies its entries
+  into the instance database.
+- Writes from plugin hooks wait at most `STORE_WAIT`
+  (`src/plugins/services.rs`). An election (1.5–3 s) can exceed it, so hook
+  writes during an election fail with a timeout, as they would if the disk
+  stalled today. The documentation will say so.
+
 ### Secrets
 
-Secrets stay in each peer's environment, as today: the cluster token, node
-tokens, the forwarding secret, the web token and the bus-login key. They must
-be equal on all peers; the handshake checks this without revealing them. The
-web API's operator tokens and sessions move into replicated tables, so a
-dashboard session works against any peer behind a load balancer.
+Secrets stay in each peer's environment: the cluster token, node tokens, the
+forwarding secret and the web token. They must be equal on all peers; the
+handshake checks this without revealing them. The bus-login key moves into the
+replicated state (see [bus logins](#bus-logins)).
+
+## What stays per peer
+
+Some state stays deliberately per peer, and the documentation will say so:
+
+| State | Why |
+| --- | --- |
+| Connection rate limits, per-address counts, `limits.max_connections` | They protect one process; a network-wide cap is `cluster.max_players` |
+| Backend health checks | Each peer measures its own path to the backends and routes by it |
+| Metrics | Per process; aggregate them in Prometheus |
+| Plugin and Lua in-memory state, `rift.every` timers | Each peer runs its own plugin instances; see [decisions](#decisions) for leader-only work |
+| Managed server logs and consoles | Served by the node agent that runs the server, from any peer |
 
 ## Failure behavior
 
 | Situation | What happens |
 | --- | --- |
-| A follower or learner dies | Its players are disconnected and can reconnect to another peer at once. After `peer_timeout` their presence is released. Everything else continues. |
-| The leader dies | The voters elect a new leader within the election timeout (default 1.5–3 s). Commits pause meanwhile: new logins wait, players already on backends notice nothing. The new leader resumes scaling and adopts every node's servers, as a restarted controller does today. |
-| A minority of voters is partitioned | The majority side continues. The minority side keeps its players playing, refuses new logins after `peer_timeout` and reconciles its claims when it rejoins. |
-| No majority anywhere | No commits: no logins, no configuration or permission changes, no scaling. Connected players keep playing on their backends, and node agents keep their servers. |
-| A peer falls behind | It catches up from the log, or installs a snapshot if the log was purged. It takes players while catching up, but refuses logins until it is within 1 s of the leader, so its tab list and counts are not stale. |
-| A replica diverges | Detected when applying a changeset. The peer stops taking logins, reinstalls a snapshot and reports `rift_cluster_diverged`. |
+| A follower or learner dies | Its players are disconnected. If it restarts, its new incarnation releases their claims at once; otherwise the leader expires it after `peer_timeout`. Everything else continues. |
+| The leader dies | The voters elect a new leader within the election timeout (default 1.5–3 s). Meanwhile no entry commits: new logins and writes wait, players already on backends notice nothing. The new leader fences and reconciles every node agent, resumes half-done operations and scaling. |
+| A minority of peers is partitioned | The majority side continues. The minority side fences itself after half of `peer_timeout`, keeps its players for `partition_grace`, then disconnects them. |
+| No majority anywhere | No commits: no logins, no configuration or permission changes, no scaling. Connected players keep playing for `partition_grace`. Node agents keep their servers. |
+| A peer falls behind | It catches up from the log, or installs a snapshot if the log was purged. It refuses logins until it is within 1 s of the leader, so its tab list and counts are not stale; players already connected keep playing. |
+| A replica diverges | Detected by a `checksum` entry or a changeset conflict. The peer stops taking logins, reinstalls a snapshot and reports `rift_cluster_diverged`. |
 | A disk fills up | Writing the Raft log fails, so the peer stops acknowledging entries; Raft treats it as unavailable. |
 
 ### Rolling restarts
@@ -515,41 +762,56 @@ dashboard session works against any peer behind a load balancer.
 gracefully:
 
 1. it stops taking new logins and transfers leadership if it has it;
-2. it sends 1.20.5+ clients to another peer with the Transfer packet, using
-   `cluster.peers.<name>.public_address` of a healthy peer, and gives older
+2. it sends 1.20.5+ clients to another peer with the Transfer packet, using a
+   healthy peer's public address from its `cluster.toml`, and gives older
    clients a reconnect message;
-3. it releases its presence records and closes its bus clients, which
-   reconnect to other peers.
+3. it releases its claims and closes its bus clients, which reconnect to
+   other peers.
 
 Upgrades run one peer at a time. Entry kinds and schema migrations are
-enabled only when every peer advertises support (see
-[the state machine](#the-state-machine)), so a mixed-version cluster always
-works with the features of its oldest peer.
+enabled only after a committed `features` entry says every member supports
+them, so a mixed-version cluster works with the features of its oldest
+member. A peer older than the oldest version a committed `features` entry
+requires is refused when it joins. After a `migrate` entry has committed,
+downgrading means restoring a backup, as for a single Rift today.
+
+### Backup and restore
+
+- `rift admin cluster backup <file>` writes a consistent copy of the state
+  machine from any peer, through a linearizable read.
+- `rift cluster init --from-backup <file>` starts a new one-voter cluster
+  from a backup; add the other peers as on a first setup.
+- `rift cluster recover --peer <name>` forces a one-voter cluster from the
+  data of one surviving peer when the others are gone for good. It can lose
+  writes that only the lost peers acknowledged, so it requires
+  `--i-understand-data-loss`.
 
 ## Getting there from one Rift
 
-1. `rift cluster init` on the existing Rift creates the Raft log and a
-   one-voter cluster whose first snapshot is the current instance database.
-   It also moves `deployments.json`, `audit.jsonl` and the template folders
-   into the replicated store. A PostgreSQL installation first runs `rift
-   database copy --to rift.sqlite3`.
-2. Add `rift.config.cluster` with the new peers and deploy it. The leader adds
-   them as learners as they come up, and promotes the voters once they catch
-   up.
+1. Write `cluster.toml` on the existing host and run `rift cluster init`. It
+   creates the Raft log and a one-voter cluster whose state is the current
+   instance database, moves `deployments.json`, `audit.jsonl`, the bus-login
+   key, file-backed key-value stores and the template folders into the
+   replicated store, and converts `local` registrations to this peer's node.
+   A PostgreSQL installation first runs `rift database copy --to
+   rift.sqlite3`.
+2. Start the other peers with their `cluster.toml`, add them with `rift admin
+   cluster add`, and promote the voters once they have caught up.
 3. Put the peers behind DNS or a load balancer. Give bus clients and node
    agents the peer list.
 
 `rift check --strict` against a cluster reports peers that are unreachable,
-behind, on another version, or holding different secrets.
+behind, on another version, holding different secrets, or evaluating the
+shared configuration differently.
 
 ## Operating a cluster
 
 | Where | What |
 | --- | --- |
-| CLI | `rift admin cluster` (members, roles, leader, term, applied index, lag), `rift admin cluster leave\|transfer-leader\|snapshot` |
+| CLI | `rift admin cluster` (members, roles, leader, term, applied index, lag), `add`, `promote`, `demote`, `remove`, `replace`, `leave`, `transfer-leader`, `backup` |
 | HTTP | `GET /api/cluster`, the same data; every server and player in the API gains a `peer` field |
-| Dashboard | A Cluster panel with each peer's role, lag, players and load |
-| Metrics | `rift_cluster_term`, `rift_cluster_is_leader`, `rift_cluster_commit_index`, `rift_cluster_applied_index`, per-peer `rift_cluster_replication_lag`, `rift_cluster_proposal_seconds`, `rift_cluster_write_retries_total`, `rift_cluster_bus_forwarded_total` |
+| Dashboard | A Cluster panel with each peer's role, lag, players, load and configuration hash |
+| Metrics | `rift_cluster_term`, `rift_cluster_is_leader`, `rift_cluster_commit_index`, `rift_cluster_applied_index`, per-peer `rift_cluster_replication_lag`, `rift_cluster_proposal_seconds`, `rift_cluster_operations_total`, `rift_cluster_bus_forwarded_total`, `rift_cluster_diverged` |
 | Control subject | `rift.control.cluster` and `rift.events.cluster` (leader changes, membership, peer expired) |
 
 ## Code changes
@@ -559,15 +821,22 @@ broker, extensions, player registry, nodes and managed servers together.
 
 | Area | Change |
 | --- | --- |
-| `src/cluster/` (new) | Peer links, openraft network and storage, the state machine, membership reconciliation, leader tasks, the blob store |
-| `src/database.rs` | `Database::write` closures; a `Replicated` backend that records changesets and waits for apply; per-table and per-key change tracking on the leader |
-| `src/players.rs`, `src/extensions/players.rs`, `src/events.rs` | Presence-backed registry, claims, routed `PlayerAction`s, cluster-unique connection ids |
-| `src/messaging/` | Interest exchange and forwarding in `Broker`; peer-prefixed inboxes; principals on forwarded messages |
+| `src/cluster/` (new) | Peer links, openraft network and storage, the state machine, apply hooks, membership commands, leader tasks and leases, the blob store |
+| `src/database.rs` | WAL and read connections for the replicated backend; operation execution with session recording; changeset apply through FFI; primary key and schema assertions |
+| Every write site | A typed operation per write, executed through one entry point that runs locally on a single Rift and on the leader in a cluster |
+| `src/players.rs`, `src/extensions/players.rs`, `src/events.rs` | Claims, broadcast attributes, routed `PlayerAction`s, connection ids with peer and incarnation |
+| `src/permissions/authority.rs` | Apply hooks; per-peer sessions; pushes with `cluster` scope; routed context reports |
+| `src/messaging/` | Subject scopes; interest exchange and forwarding; peer-prefixed inboxes; principals on forwarded messages |
 | `crates/rift-messaging`, Java client | Address lists and failover |
-| `src/managed.rs`, `src/scaling.rs`, `src/node/` | Leader-only start; fencing terms in node commands; peers as embedded nodes; load reports |
-| `src/control.rs`, `src/operator.rs` | Deployments, history and audit as replicated entries |
-| `src/extensions/storage.rs`, `src/directory.rs`, `src/messaging/stream.rs` | Their own entry kinds instead of direct SQL |
-| `src/config.rs`, `src/check.rs` | `cluster` settings, `rift.peer`, strict checks against a running cluster |
+| `src/managed.rs`, `src/scaling.rs`, `src/node/` | Leader-only start; fencing; reconcile on leadership gain; stop vetoes; peers as embedded nodes |
+| `src/instance_store.rs` | Recovery as a leader task; apply hook for `Config.instances` |
+| `src/control.rs`, `src/operator.rs` | Deployments, history and audit as replicated entries; shared-section hashes |
+| `src/extensions/storage.rs`, `src/directory.rs`, `src/messaging/stream.rs`, `src/instance_login.rs` | Their own entry kinds; the stream service on the leader; the replicated bus-login key |
+| `src/config.rs`, `src/check.rs` | `cluster` settings, `cluster.toml`, `rift.peer`, peer and shared sections, strict checks against a running cluster |
+
+The rusqlite `session` feature needs bindgen and therefore libclang at build
+time. It sits behind a `cluster` cargo feature that release builds enable, so
+other builds keep their current requirements.
 
 ## Plan
 
@@ -576,42 +845,130 @@ commits with tests, and the single-process behavior stays unchanged
 throughout.
 
 1. **Design** (this document).
-2. **Cluster core.** Peer links, openraft with SQLite log storage, membership
-   from configuration, learners, witness, snapshots, `rift admin cluster`,
-   `/api/cluster`, metrics. No application state yet.
-3. **Replicated database.** `Database::write` at every call site; changeset
-   replication with optimistic validation; `directory` and `kv` entries;
-   `rift cluster init`. Every database-backed feature works on any peer.
-4. **Presence.** Claims, cluster-wide duplicate-login checks,
-   `cluster.max_players`, peer expiry, partition behavior, cluster-unique
+2. **Cluster core and its test harness.** Peer links, openraft with SQLite log
+   storage, membership commands, learners, witness, incarnations, leases,
+   `rift admin cluster`, `/api/cluster`, metrics. A deterministic simulation
+   (simulated network, clock and disk) that later steps extend, and a
+   fault-injecting peer transport for partitions.
+3. **Replicated database.** Typed operations at every write site, leader
+   execution with group commit, changeset apply, apply hooks, `directory`,
+   `kv`, `migrate`, `checksum`, snapshots and install while serving,
+   idempotent proposals, `rift cluster init`.
+4. **Presence.** Claims, broadcast attributes, cluster-wide duplicate-login
+   checks, `cluster.max_players`, expiry, fencing and partition grace,
    connection ids, network-wide counts.
-5. **Bus federation.** Interest, forwarding, queue groups, prefixed inboxes,
-   replicated streams, node session claims, multi-address clients.
-6. **Routed player actions.** `PlayerAction` over the `player` stream, and
-   every API, subject and BungeeCord channel on top of it.
-7. **Leader tasks.** Scaling, managed servers, nodes and template syncs on the
-   leader only, with fencing, load reports, start-on-connect through the
-   leader, peers as embedded nodes.
-8. **Configuration and files.** Replicated deployments, history, audit, web
-   sessions; template manifests and the blob store.
-9. **Queues and admission.** [Server queues](queues.md) become network-wide:
-   the leader holds the queue, and peers enqueue, dequeue and receive their
-   turn over the bus.
-10. **Hardening.** Rolling restarts with the Transfer packet, `rift check
-    --strict` for clusters, and failure tests: a three-peer cluster in CI
-    whose leader is killed with SIGKILL, partitions simulated by a
-    fault-injecting peer transport, and a deterministic simulation of the
-    state machine and the optimistic write path that asserts no duplicate
-    logins and no lost acknowledged writes.
+5. **Bus.** Subject scopes, federation, prefixed inboxes, node session claims,
+   the replicated bus-login key, the stream service on the leader,
+   multi-address clients.
+6. **Routed player actions and permissions.** `PlayerAction` over the
+   `player` stream with every API, subject and BungeeCord channel on top;
+   permission sessions per peer.
+7. **Leader tasks.** Scaling, managed servers, nodes, recovery and
+   configuration-derived writes on the leader, with leases, term-tagged
+   operations, agent fencing, reconcile on leadership gain, stop vetoes and
+   peers as embedded nodes.
+8. **Configuration and files.** Replicated deployments, history and audit;
+   peer and shared sections; template manifests and the blob store.
+9. **Queues.** [Server queues](queues.md) become network-wide: the queue
+   service runs on the leader; each peer keeps its own players' tickets and
+   submits them again to a new leader, which orders them by their
+   leader-stamped time.
+10. **Hardening.** Rolling restarts with the Transfer packet, backup and
+    recovery commands, `rift check --strict` for clusters, and a three-peer
+    cluster in CI whose leader is killed with SIGKILL, asserting no duplicate
+    logins, no lost acknowledged writes, no doubly executed leader work.
 
-## Open questions
+## Decisions
 
-- PostgreSQL in clusters: never, or as an alternative state store for networks
-  that already run it highly available?
-- Logins on a partitioned minority: refuse (proposed), or allow with a later
-  reconciliation?
-- A peer whose `rift.lua` differs from the deployed revision: adopt the
-  deployed one (proposed), or refuse to start?
-- The plugin API for leader-only work.
-- Whether learners should accept writes (forwarded to the leader, as
-  proposed) or be read-only.
+Each question lists its options with their trade-offs. The recommended option
+comes first; the rest of this document assumes it.
+
+### 1. How writes reach the database
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Leader executes typed operations, replicates changesets** (recommended) | Serializable by construction; no read sets, retries or conflict detection; a closed set of operations is easy to test | Every write site becomes a typed operation; follower writes cost a round trip to the leader |
+| Optimistic changesets from any peer (revision 1) | Writes run on the peer that makes them; closures stay as they are | Not serializable as specified: cached statements skip the authorizer, unique constraints are invisible, a new leader has no change index; retries starve under load |
+| Replicate SQL statements (rqlite style) | Small entries; no session extension | Rust logic between statements cannot be replicated; every statement must be deterministic |
+
+### 2. What player presence puts in the log
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Claims in Raft, attributes broadcast by the owning peer** (recommended) | Uniqueness is linearizable; skins and server moves stay out of the log and snapshots | Two mechanisms; attributes can lag claims by milliseconds |
+| Everything in Raft | One mechanism, one ordering | 1–3 KB per login and an entry per server switch, bigger snapshots, slower tab lists |
+| Nothing in Raft (gossip only, RedisBungee style) | No commit on login | Duplicate logins across peers become possible again |
+
+### 3. Logins on a partitioned minority
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Refuse** (recommended) | No duplicates, no stale bans, caps hold | A peer cut off from the majority admits nobody |
+| Allow local-only logins, reconcile on rejoin | Players can still join a cut-off peer | Duplicate sessions, banned players admitted, `max_players` exceeded; the reconciliation kicks someone |
+
+### 4. Existing players on a cut-off peer
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Keep for `partition_grace` (60 s), then disconnect** (recommended) | Short blips disconnect nobody; long partitions end with true counts and players able to rejoin elsewhere | A partition longer than the grace disconnects players whose backends may still work |
+| Keep indefinitely | Nobody is disconnected by a partition | The majority's counts understate, so idle stops and caps misbehave; the players cannot be messaged or moved from the majority side |
+| Disconnect when fenced | Simplest; counts are true immediately | Every short network blip disconnects a whole proxy's players |
+
+### 5. PostgreSQL in clusters
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Never: `cluster` with `backend = "postgres"` is an error; keep standby mode** (recommended) | One replicated backend to test; no external single point of failure | Networks with highly available PostgreSQL cannot reuse it for a cluster |
+| Later, as an alternative state store | Uses an existing HA database; no Raft for durable state | A third mode of every write path; PostgreSQL becomes the availability limit again |
+
+### 6. A peer whose `rift.lua` differs from the deployed revision
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Adopt if it matches an older deployed revision, otherwise refuse to start** (recommended) | Stale hosts update themselves; hand edits are never silently lost | A hand-edited host needs an explicit `--adopt-deployed` |
+| Always adopt the deployed revision | No operator action ever | Hand edits on one host vanish without notice |
+| Always refuse to start | Nothing is ever overwritten | Every stale host needs manual work |
+
+### 7. Where membership comes from
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Explicit `rift admin cluster` commands, bootstrap settings in `cluster.toml`** (recommended) | No circular dependency; a configuration typo cannot remove voters; each change is deliberate | A second place to configure; membership is not visible in `rift.lua` |
+| `cluster.peers` in the replicated `rift.lua` | One file describes everything | A peer needs the file to join the cluster that holds the file; a typo can drop voters |
+
+### 8. Leader-only work in plugins
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Named leases with a fencing token, plus `scope` on `rift.every` (default `cluster`, meaning one peer)** (recommended) | Safe under leader changes; existing broadcast timers do not suddenly run once per peer | A new API to learn; `scope = "peer"` must be chosen for per-peer jobs |
+| `rift.cluster.is_leader()` only | Tiny API | Racy: a deposed leader still sees `true` until it notices |
+| Run all plugins only on the leader | No plugin changes | Session events happen on every peer, so plugins must run everywhere |
+
+### 9. Plugins that are not cluster-aware
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Load every plugin; flag ones without a `cluster` declaration in `plugin.toml`** (recommended) | Existing plugins keep working; operators see which ones to check | A plugin that keeps network-wide state in memory misbehaves until fixed |
+| Refuse plugins without the declaration | No silent misbehavior | Every existing plugin breaks on the first cluster start |
+
+### 10. Learners and writes
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Learners send operations to the leader** (recommended) | Learners can be full proxies; voters stay few | Writes from distant learners pay their distance to the leader |
+| Read-only learners | Simpler | A learner cannot admit players, since logins write claims |
+
+### 11. Default scope of user subjects
+
+| Option | For | Against |
+| --- | --- | --- |
+| **`cluster`** (recommended) | Plugins and backends talk across the whole network, as they expect from one bus | Chatty subjects cross peer links; they need `scope = "local"` |
+| `local`, opt in to `cluster` | No cross-peer traffic unless asked | Existing plugins stop seeing each other across peers |
+
+### 12. Witnesses and controller-only voters
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Witnesses are full replicas that may lead but hand leadership to a player-serving voter** (recommended) | Simple, uses Raft as is; works on any host that can reach the nodes | The witness holds all state and the bus-login key |
+| Log-only witnesses that never lead | Holds no state | Needs custom voting rules on top of openraft |
+| Dedicated controller voters with no game listener | Proxies and control work separated; proxies scale as learners | More hosts to run for small networks |
