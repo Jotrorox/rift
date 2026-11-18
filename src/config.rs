@@ -26,7 +26,8 @@ pub use nodes::{
 };
 pub use permissions::PermissionsConfig;
 pub use services::{
-    Balance, GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+    Balance, GroupMode, GroupState, InstanceStorage, MovedServer, ServiceGroup, ServiceInstance,
+    ServiceScaling,
 };
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
@@ -70,6 +71,10 @@ pub struct Config {
     pub template_sources: BTreeMap<String, crate::template_source::TemplateSource>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
+    /// Servers of `managed_servers` that `rift admin move` put on another
+    /// node than the Lua configuration names; their definitions and backends
+    /// above already show where they run.
+    pub moved_servers: BTreeMap<String, MovedServer>,
     /// Hosts running `rift node`; servers without a node run on this host.
     pub nodes: BTreeMap<String, NodeConfig>,
     /// The SQLite file of the instance database, unless `database` puts it
@@ -706,6 +711,7 @@ impl Config {
             template_sources: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
+            moved_servers: BTreeMap::new(),
             nodes: BTreeMap::new(),
             instance_database: PathBuf::from("rift.sqlite3"),
             database: None,
@@ -1265,6 +1271,7 @@ impl Config {
                 template_sources,
                 service_groups,
                 instances: BTreeMap::new(),
+                moved_servers: BTreeMap::new(),
                 nodes,
                 instance_database,
                 database,
@@ -1307,6 +1314,8 @@ impl Config {
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
         if let Some(previous) = previous {
+            services::restore_moved(&mut config, &previous.moved_servers)
+                .map_err(|error| invalid(format!("{name}: {error}")))?;
             services::restore_instances(&mut config, previous)
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }

@@ -239,6 +239,8 @@ rift.config.managed_servers.survival = {
   the node, or upload files through the dashboard's Files page.
 - Start, stop, start on connect, idle stops, restart retries, console commands
   and logs work exactly as for local servers.
+- `rift admin move` [moves it](#move-a-named-server) and its folder to
+  another node.
 - The proxy probes readiness, since it must reach the server anyway.
 
 ## Service groups across nodes
@@ -493,14 +495,62 @@ the agent's `--root` at the same path (`local/services/<instance>`), then:
 rift admin move lobby-3 node2 --no-copy
 ```
 
+Built-in backups cover persistent instances only, so recover a
+[named server](#move-a-named-server) the same way: put its folder on the new
+node at the same path and run `rift admin move <server> <node> --no-copy`.
+
 Rift checks that the folder exists and records the new node; it deletes
 nothing. Keep the dead node in `rift.config.nodes` until its instances have
 moved, since Rift refuses a configuration that drops a node with instances. If the
 old node comes back, its agent stops any server that no longer belongs to it,
 but leaves the old folder for you to delete.
 
-Named servers in `managed_servers` cannot be moved this way: copy their folder
-yourself and change their `node` and backend in the configuration.
+### Move a named server
+
+Named servers in `managed_servers` move with the same command:
+
+```sh
+rift admin move survival node2
+```
+
+It works like an instance move, with these differences:
+
+- No service group applies, so neither do `nodes` and memory. `node2` must
+  still be online, not cordoned or draining, run an agent that can start the
+  server, and have a free instance slot and its `min_free_disk_mb` of free
+  disk.
+- The server keeps its port, since its own files may name it. Rift refuses
+  the move when another server on `node2` already uses that port.
+- Nothing in the folder is rewritten, `server.properties` included.
+- The old folder is only deleted when it is named after the server, like
+  `directory = "survival"`. Otherwise Rift keeps it and says so in
+  `cleanup_error`.
+- The reply and the `moved` event have `group` and `storage` set to `null`,
+  and `configured_node` names the node the configuration still has.
+- Rift needs its instance database to remember the move, so it refuses to
+  move named servers when it runs without a configuration file.
+
+**Your configuration file is not edited.** Rift records the new node and
+backend in the instance database and keeps using them across reloads and
+restarts, for as long as the configuration names the server's old node and
+backend. `rift admin servers` shows the old node as `configured_node`, and
+Rift logs the move at every start. To finish the move, put the new values in
+the configuration and reload:
+
+```lua
+rift.config.backends.survival = "10.0.0.12:25570"
+rift.config.managed_servers.survival = {
+    node = "node2",
+    directory = "survival",
+    command = { "java", "-Xmx4G", "-jar", "server.jar", "nogui" },
+    start_on_connect = true,
+}
+```
+
+Rift then forgets the move. Any other change to the server's `node` or
+backend also hands the server back to the configuration; like every other
+change to a named server's definition, that one needs a restart. Moving the
+server back to the node the configuration names forgets the move too.
 
 ## Failure behavior
 
