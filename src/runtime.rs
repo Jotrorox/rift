@@ -3014,9 +3014,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (config, instance_store, permissions, restored_ports) = blocking(move || {
         let mut config = config;
         if persistent {
-            // One file, one lock: the instance registry and the permission
-            // store share the connection.
-            let database = Arc::new(rift::database::Database::open(&config.instance_database)?);
+            // One database, one owner: the instance registry and the
+            // permission store share the connection. A standby waits here
+            // until the owning Rift stops.
+            let database = Arc::new(rift::database::Database::connect(
+                &config.database_location(),
+            )?);
             // The upgrade reads fields that validation rejects, so it runs
             // before anything validates the configuration.
             let permissions =

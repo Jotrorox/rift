@@ -305,25 +305,29 @@ pub fn strict(config: &Config, path: &Path) -> Report {
             }
         }
     }
-    let running = match Store::check(&config.instance_database, config) {
+    let location = config.database_location();
+    let described = location.describe();
+    let running = match Store::check(&location, config) {
         Ok(DatabaseCheck::Missing) => {
-            report.notes.push(format!(
-                "instance database {} does not exist yet; startup will create it",
-                config.instance_database.display()
-            ));
+            report.notes.push(match &location {
+                rift::database::Location::Sqlite(_) => format!(
+                    "instance database {described} does not exist yet; startup will create it"
+                ),
+                rift::database::Location::Postgres(_) => format!(
+                    "instance database {described} connects and has no Rift tables yet; startup will create them"
+                ),
+            });
             false
         }
         Ok(DatabaseCheck::Ready { instances }) => {
             report.notes.push(format!(
-                "instance database {} opens ({instances} registered instances fit the configuration)",
-                config.instance_database.display()
+                "instance database {described} opens ({instances} registered instances fit the configuration)"
             ));
             false
         }
         Ok(DatabaseCheck::InUse) => {
             report.notes.push(format!(
-                "instance database {} is locked by a running Rift; port binds were not checked",
-                config.instance_database.display()
+                "instance database {described} is locked by a running Rift; port binds were not checked"
             ));
             true
         }
@@ -477,7 +481,7 @@ fn command_permissions(config: &Config, extensions: &ExtensionScript, report: &m
         return;
     }
     match rift::permissions::ungranted_command_permissions(
-        Some(&config.instance_database),
+        Some(&config.database_location()),
         extensions.groups(),
         &commands,
     ) {
@@ -508,8 +512,9 @@ fn secret(field: &str, variable: &str, min: usize) -> Result<(), String> {
 
 fn environment(config: &Config, report: &mut Report) {
     for (field, variable) in config.secret_variables() {
-        // Integration headers are checked below with their own rules.
-        if field.starts_with("extensions.") {
+        // Integration headers are checked below with their own rules; the
+        // database URL is checked by connecting to it.
+        if field.starts_with("extensions.") || field.starts_with("database.") {
             continue;
         }
         let minimum = if field == "forwarding.secret_env" {

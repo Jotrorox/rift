@@ -44,8 +44,8 @@ Set `rift.config.plugins = { ... }`, or call `rift.on(event, callback)` and
 [callbacks](#callbacks-and-decisions), the table takes `commands` and `groups`
 ([permissions and commands](#permissions-and-commands)), `decisions`
 ([bus responders](#decisions-answered-over-the-message-bus)), `queues`
-([queues](#queues)), and `storage`, `jobs` and `integrations`
-([host services](host-services.md)).
+([queues](#queues)), `storage` ([storage](#storage)), and `jobs` and
+`integrations` ([host services](host-services.md)).
 
 - Unknown fields, invalid registrations and missing online authentication
   reject the configuration.
@@ -228,6 +228,28 @@ back. `rift.publish` becomes available only after source evaluation, and
 publications already delivered before a callback fails are not rolled back
 either.
 
+## Storage
+
+`storage` makes `rift.store` (and every persistent plugin's `store`) survive
+restarts; without it the store lives in memory. It takes exactly one place
+plus the optional [`quota`](host-services.md#limits-and-quotas):
+
+```lua
+storage = { path = "extensions.state" }  -- a SQLite file of its own
+storage = { database = true }            -- the instance database
+```
+
+- `path` is a bundled-SQLite file that one Rift locks while it runs; see
+  [the storage file](host-services.md#the-storage-file).
+- `database = true` keeps the entries in the table `extension_entries` of the
+  [instance database](database.md): the SQLite file `instance_database` or
+  PostgreSQL (`rift.config.database`). A deployment on PostgreSQL then needs
+  no SQLite file at all, and the database's backups cover the store. It needs
+  a configuration file, which is what makes Rift open the instance database.
+- Limits, quotas, validation and the commit rules are the same for both.
+  Entries are not copied when you switch between them, and `rift check` does
+  not open a store kept in the database.
+
 ## Permissions and commands
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
@@ -341,9 +363,9 @@ leaves the active generation intact.
 - **Host leases, queue order, storage, permission overrides and worker limits**
   survive a reload.
 - **A restart is needed** to enable or disable `rift.config.plugins`, and to
-  change the storage path or quotas or queue destinations or capacities. It
-  clears in-memory state and job schedules but preserves a configured storage
-  database.
+  change the storage location (`path` or `database`) or quotas or queue
+  destinations or capacities. It clears in-memory state and job schedules but
+  preserves a configured store.
 
 There is no automatic state migration or durable replay of callbacks.
 Persistent plugins reload by [their own rules](plugin-operations.md#reloads).

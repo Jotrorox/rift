@@ -23,7 +23,10 @@ use super::{
     http::{BackendDirectory, NoBackends},
     store::{self, Effects, Work},
 };
-use crate::{config::PermissionsConfig, database::Database};
+use crate::{
+    config::PermissionsConfig,
+    database::{Conn, Database, Dialect, OptionalExtension, params},
+};
 use rift_permissions::{
     Actor, Applied, Change, ChangeEvent, CompiledSubject, ContextSet, DEFAULT_GROUP, Group, Limits,
     MetaView, Node, Source, SubjectRef, Trace, Track, Tristate, User, Uuid,
@@ -34,7 +37,6 @@ use rift_permissions::{
     unix_now,
     wire::RegisteredPermission,
 };
-use rusqlite::{TransactionBehavior, params};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -263,9 +265,14 @@ impl Authority {
     /// `default` group on first start.
     pub fn open(database: Arc<Database>, config: &PermissionsConfig) -> Result<Self, PermError> {
         database
-            .migrate(store::COMPONENT, store::SCHEMA_VERSION, |_| {
-                store::SCHEMA.into()
-            })
+            .migrate(
+                store::COMPONENT,
+                store::SCHEMA_VERSION,
+                |dialect, _| match dialect {
+                    Dialect::Sqlite => store::SCHEMA.into(),
+                    Dialect::Postgres => store::POSTGRES_SCHEMA.into(),
+                },
+            )
             .map_err(|e| PermError::Storage(e.to_string()))?;
         let (revision, groups, tracks) = {
             let connection = database.lock();
@@ -371,11 +378,7 @@ impl Authority {
     }
 
     /// Compile while the caller holds the connection.
-    fn compile_locked(
-        &self,
-        connection: &rusqlite::Connection,
-        uuid: Uuid,
-    ) -> Arc<CompiledSubject> {
+    fn compile_locked(&self, connection: &Conn, uuid: Uuid) -> Arc<CompiledSubject> {
         let (groups, revision) = {
             let state = self.state();
             if let Some(cached) = state.cache.get(&uuid) {
@@ -479,13 +482,21 @@ impl Authority {
         {
             return Ok(Some(*uuid));
         }
-        let key: Option<String> =
-            rusqlite::OptionalExtension::optional(self.database.lock().query_row(
-                "SELECT key FROM perm_subject WHERE kind = 0 AND last_name = ?1 COLLATE NOCASE
-                 ORDER BY id DESC LIMIT 1",
-                [name],
+        let connection = self.database.lock();
+        let dialect = connection.dialect();
+        let key: Option<String> = connection
+            .query_row(
+                &format!(
+                    "SELECT key FROM perm_subject WHERE kind = 0 AND {} = {}
+                     ORDER BY id DESC LIMIT 1",
+                    dialect.nocase("last_name"),
+                    dialect.nocase("?1"),
+                ),
+                params![name],
                 |r| r.get(0),
-            ))?;
+            )
+            .optional()?;
+        drop(connection);
         key.map(|key| Uuid::parse(&key).map_err(PermError::from))
             .transpose()
     }
@@ -495,31 +506,34 @@ impl Authority {
     pub fn members(&self, limit: usize) -> Result<(Vec<Member>, bool), PermError> {
         let limit = limit.min(MAX_RESULTS);
         let connection = self.database.lock();
-        let mut statement = connection.prepare(
+        let mut members: Vec<Member> = Vec::new();
+        let mut more = false;
+        connection.each(
             "SELECT s.key, s.last_name, n.key FROM perm_node n
              JOIN perm_subject s ON s.id = n.subject_id
              WHERE s.kind = 0 AND n.kind = 1 AND n.value = 'true' AND n.contexts = ''
              ORDER BY s.key, n.id",
-        )?;
-        let mut rows = statement.query([])?;
-        let mut members: Vec<Member> = Vec::new();
-        while let Some(row) = rows.next()? {
-            let uuid = Uuid::parse(&row.get::<_, String>(0)?)?;
-            let group: String = row.get(2)?;
-            if let Some(member) = members.last_mut().filter(|m| m.uuid == uuid) {
-                member.groups.push(group);
-                continue;
-            }
-            match members.len() == limit {
-                true => return Ok((members, true)),
-                false => members.push(Member {
+            params![],
+            |row| -> Result<bool, PermError> {
+                let uuid = Uuid::parse(&row.get::<_, String>(0)?)?;
+                let group: String = row.get(2)?;
+                if let Some(member) = members.last_mut().filter(|m| m.uuid == uuid) {
+                    member.groups.push(group);
+                    return Ok(true);
+                }
+                if members.len() == limit {
+                    more = true;
+                    return Ok(false);
+                }
+                members.push(Member {
                     uuid,
                     name: row.get(1)?,
                     groups: vec![group],
-                }),
-            }
-        }
-        Ok((members, false))
+                });
+                Ok(true)
+            },
+        )?;
+        Ok((members, more))
     }
 
     /// Users with a row in the store (everyone who joined or was written),
@@ -552,39 +566,39 @@ impl Authority {
             .map(|(uuid, online)| (*uuid, online.name.clone()))
             .collect();
         let connection = self.database.lock();
-        let mut statement = connection.prepare(
-            "SELECT s.id, s.key, s.last_name FROM perm_subject s
-             WHERE s.kind = 0
-               AND (?1 = '' OR s.last_name LIKE ?2 ESCAPE '\\' OR s.key LIKE ?3 ESCAPE '\\')
-               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM perm_node n WHERE n.subject_id = s.id
-                    AND n.kind = 1 AND n.key = ?4 AND n.value = 'true'
-                    AND (n.expires_at IS NULL OR n.expires_at > ?5)))
-             ORDER BY s.last_name IS NULL, s.last_name COLLATE NOCASE, s.key
-             LIMIT ?6",
+        let dialect = connection.dialect();
+        let rows = connection.query_map(
+            &format!(
+                "SELECT s.id, s.key, s.last_name FROM perm_subject s
+                 WHERE s.kind = 0
+                   AND (?1 = '' OR s.last_name {like} ?2 ESCAPE '\\' OR s.key {like} ?3 ESCAPE '\\')
+                   AND (?4 IS NULL OR EXISTS (SELECT 1 FROM perm_node n WHERE n.subject_id = s.id
+                        AND n.kind = 1 AND n.key = ?4 AND n.value = 'true'
+                        AND (n.expires_at IS NULL OR n.expires_at > ?5)))
+                 ORDER BY s.last_name IS NULL, {by_name}, s.key
+                 LIMIT ?6",
+                like = dialect.like(),
+                by_name = dialect.nocase("s.last_name"),
+            ),
+            params![query, name, uuid, group, now, (limit + 1) as i64],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
         )?;
-        let rows = statement
-            .query_map(
-                params![query, name, uuid, group, now, (limit + 1) as i64],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
         let truncated = rows.len() > limit;
-        let mut groups = connection.prepare(
-            "SELECT key FROM perm_node WHERE subject_id = ?1 AND kind = 1 AND value = 'true'
-             AND contexts = '' AND (expires_at IS NULL OR expires_at > ?2) ORDER BY id",
-        )?;
         let mut users = Vec::with_capacity(rows.len().min(limit));
         for (id, key, last_name) in rows.into_iter().take(limit) {
             let uuid = Uuid::parse(&key)?;
-            let names = groups
-                .query_map(params![id, now], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
+            let names = connection.query_map(
+                "SELECT key FROM perm_node WHERE subject_id = ?1 AND kind = 1 AND value = 'true'
+                 AND contexts = '' AND (expires_at IS NULL OR expires_at > ?2) ORDER BY id",
+                params![id, now],
+                |r| r.get::<_, String>(0),
+            )?;
             let current = online.get(&uuid);
             users.push(UserSummary {
                 uuid,
@@ -642,20 +656,20 @@ impl Authority {
 
     /// Every registered permission, sorted by node.
     pub fn registered(&self) -> Result<Vec<Registered>, PermError> {
-        let connection = self.database.lock();
-        let mut statement = connection
-            .prepare("SELECT node, description, dflt, owner FROM perm_registered ORDER BY node")?;
-        let rows = statement.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut registered = Vec::new();
-        for row in rows {
-            let (node, description, default, owner) = row?;
+        let rows = self.database.lock().query_map(
+            "SELECT node, description, dflt, owner FROM perm_registered ORDER BY node",
+            params![],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        let mut registered = Vec::with_capacity(rows.len());
+        for (node, description, default, owner) in rows {
             let (owner, plugin) = match owner.split_once('/') {
                 Some((owner, plugin)) => (owner.to_owned(), Some(plugin.to_owned())),
                 None => (owner, None),
@@ -864,7 +878,7 @@ impl Authority {
         let transaction = connection.transaction()?;
         transaction.execute(
             "DELETE FROM perm_registered WHERE owner = ?1 OR substr(owner, 1, length(?1) + 1) = ?1 || '/'",
-            [owner],
+            params![owner],
         )?;
         for (node, description, default, column) in &rows {
             transaction.execute(
@@ -896,7 +910,7 @@ impl Authority {
             None => self.database.lock(),
         };
         let now = unix_now();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = connection.transaction_immediate()?;
         let mut work = Work::new(&transaction, now, self.limits());
         let value = body(&mut work)?;
         let effects = work.finish()?;
@@ -1122,7 +1136,7 @@ impl Authority {
             .lock()
             .query_row(
                 "SELECT last_name FROM perm_subject WHERE kind = 0 AND key = ?1",
-                [uuid.to_string()],
+                params![uuid.to_string()],
                 |r| r.get::<_, Option<String>>(0),
             )
             .ok()
@@ -1133,7 +1147,7 @@ impl Authority {
     pub fn expired_unswept(&self) -> Result<u64, PermError> {
         let count: i64 = self.database.lock().query_row(
             "SELECT count(*) FROM perm_node WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-            [store::sql_time(unix_now())],
+            params![store::sql_time(unix_now())],
             |r| r.get(0),
         )?;
         Ok(count.max(0) as u64)
@@ -1148,19 +1162,16 @@ impl Authority {
         limit: usize,
     ) -> Result<(Vec<Member>, bool), PermError> {
         let limit = limit.min(MAX_RESULTS);
-        let connection = self.database.lock();
-        let mut statement = connection.prepare(
+        let rows = self.database.lock().query_map(
             "SELECT DISTINCT s.key, s.last_name FROM perm_node n
              JOIN perm_subject s ON s.id = n.subject_id
              WHERE s.kind = 0 AND n.kind = 1 AND n.key = ?1 AND n.value = 'true'
              ORDER BY s.key LIMIT ?2",
+            params![group, limit as i64 + 1],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
         )?;
-        let rows = statement.query_map(params![group, limit as i64 + 1], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?;
-        let mut members = Vec::new();
-        for row in rows {
-            let (key, name) = row?;
+        let mut members = Vec::with_capacity(rows.len());
+        for (key, name) in rows {
             members.push(Member {
                 uuid: Uuid::parse(&key)?,
                 name,

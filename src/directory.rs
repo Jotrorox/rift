@@ -10,8 +10,7 @@
 //!
 //! Joins and quits are written off the session's task; lookups read the
 //! table directly.
-use crate::database::Database;
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::database::{self, Conn, Database, Dialect, OptionalExtension, Row, params};
 use std::{io, sync::Arc};
 
 const COMPONENT: &str = "players";
@@ -27,6 +26,17 @@ const SCHEMA: &str = "CREATE TABLE players (
     language TEXT
 ) STRICT;
 CREATE INDEX players_name ON players (name_key, last_seen);";
+const POSTGRES_SCHEMA: &str = r#"CREATE TABLE players (
+    uuid TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    name TEXT COLLATE "C" NOT NULL,
+    name_key TEXT COLLATE "C" NOT NULL,
+    first_seen BIGINT NOT NULL,
+    last_seen BIGINT NOT NULL,
+    last_ip TEXT COLLATE "C" NOT NULL DEFAULT '',
+    last_server TEXT COLLATE "C" NOT NULL DEFAULT '',
+    language TEXT COLLATE "C"
+);
+CREATE INDEX players_name ON players (name_key, last_seen);"#;
 
 /// Most records one `search` returns.
 pub const MAX_SEARCH: u32 = 100;
@@ -73,7 +83,7 @@ fn unix_now() -> u64 {
 
 const COLUMNS: &str = "uuid, name, first_seen, last_seen, last_ip, last_server, language";
 
-fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
+fn record(row: &Row) -> database::Result<Record> {
     Ok(Record {
         uuid: row.get(0)?,
         name: row.get(1)?,
@@ -94,7 +104,13 @@ pub struct Directory {
 impl Directory {
     /// Create or migrate the table in `database`.
     pub fn open(database: Arc<Database>) -> io::Result<Self> {
-        database.migrate(COMPONENT, SCHEMA_VERSION, |_| SCHEMA.to_owned())?;
+        database.migrate(COMPONENT, SCHEMA_VERSION, |dialect, _| {
+            match dialect {
+                Dialect::Sqlite => SCHEMA,
+                Dialect::Postgres => POSTGRES_SCHEMA,
+            }
+            .to_owned()
+        })?;
         Ok(Self { database })
     }
 
@@ -103,7 +119,7 @@ impl Directory {
         Self::open(Arc::new(Database::memory())).expect("in-memory SQLite accepts the schema")
     }
 
-    fn read<T>(&self, work: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+    fn read<T>(&self, work: impl FnOnce(&Conn) -> database::Result<T>) -> Result<T, String> {
         let connection = self.database.lock();
         work(&connection).map_err(|error| self.database.error(error).to_string())
     }
@@ -114,12 +130,15 @@ impl Directory {
     pub fn joined(&self, uuid: &str, name: &str, ip: Option<&str>, server: &str) {
         let now = unix_now() as i64;
         let result = self.read(|connection| {
+            let greatest = connection.dialect().greatest();
             connection.execute(
-                "INSERT INTO players (uuid, name, name_key, first_seen, last_seen, last_ip, last_server)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
-                 ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, name_key = excluded.name_key,
-                     last_seen = MAX(last_seen, excluded.last_seen), last_ip = excluded.last_ip,
-                     last_server = excluded.last_server",
+                &format!(
+                    "INSERT INTO players (uuid, name, name_key, first_seen, last_seen, last_ip, last_server)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
+                     ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, name_key = excluded.name_key,
+                         last_seen = {greatest}(players.last_seen, excluded.last_seen),
+                         last_ip = excluded.last_ip, last_server = excluded.last_server"
+                ),
                 params![uuid, name, name.to_ascii_lowercase(), now, ip.unwrap_or_default(), server],
             )
         });
@@ -132,8 +151,11 @@ impl Directory {
     pub fn left(&self, uuid: &str, server: &str) {
         let now = unix_now() as i64;
         let result = self.read(|connection| {
+            let greatest = connection.dialect().greatest();
             connection.execute(
-                "UPDATE players SET last_seen = MAX(last_seen, ?2), last_server = ?3 WHERE uuid = ?1",
+                &format!(
+                    "UPDATE players SET last_seen = {greatest}(last_seen, ?2), last_server = ?3 WHERE uuid = ?1"
+                ),
                 params![uuid, now, server],
             )
         });
@@ -188,13 +210,15 @@ impl Directory {
             .chain(['%'])
             .collect();
         self.read(|connection| {
-            connection
-                .prepare(&format!(
-                    "SELECT {COLUMNS} FROM players WHERE name_key LIKE ?1 ESCAPE '\\'
+            let like = connection.dialect().like();
+            connection.query_map(
+                &format!(
+                    "SELECT {COLUMNS} FROM players WHERE name_key {like} ?1 ESCAPE '\\'
                      ORDER BY last_seen DESC, name_key LIMIT ?2"
-                ))?
-                .query_map(params![pattern, limit], record)?
-                .collect()
+                ),
+                params![pattern, limit],
+                record,
+            )
         })
     }
 
@@ -234,9 +258,25 @@ mod tests {
     const ALEX: &str = "00000000000000000000000000000001";
     const STEVE: &str = "00000000000000000000000000000002";
 
+    /// A directory in a fresh PostgreSQL schema, when the tests have one.
+    fn postgres(test: &str) -> Option<Directory> {
+        let location = crate::database::test_postgres_or_skip(test)?;
+        Some(Directory::open(Arc::new(Database::connect(&location).unwrap())).unwrap())
+    }
+
     #[test]
     fn joins_and_quits_are_remembered_by_uuid_and_name() {
-        let directory = Directory::memory();
+        joins_and_quits(&Directory::memory());
+    }
+
+    #[test]
+    fn joins_and_quits_are_remembered_on_postgres() {
+        if let Some(directory) = postgres("joins_and_quits_are_remembered_on_postgres") {
+            joins_and_quits(&directory);
+        }
+    }
+
+    fn joins_and_quits(directory: &Directory) {
         assert_eq!(directory.lookup("Alex").unwrap(), None);
         directory.joined(ALEX, "Alex", Some("203.0.113.7"), "lobby");
         directory.joined(STEVE, "Steve_1", None, "lobby");
@@ -272,7 +312,17 @@ mod tests {
 
     #[test]
     fn search_matches_prefixes_literally() {
-        let directory = Directory::memory();
+        search_literally(&Directory::memory());
+    }
+
+    #[test]
+    fn search_matches_prefixes_literally_on_postgres() {
+        if let Some(directory) = postgres("search_matches_prefixes_literally_on_postgres") {
+            search_literally(&directory);
+        }
+    }
+
+    fn search_literally(directory: &Directory) {
         directory.joined(ALEX, "Al_ex", None, "lobby");
         directory.joined(STEVE, "Alxex", None, "lobby");
         let names = |prefix: &str| -> Vec<String> {
@@ -293,7 +343,17 @@ mod tests {
 
     #[test]
     fn languages_belong_to_known_players() {
-        let directory = Directory::memory();
+        languages(&Directory::memory());
+    }
+
+    #[test]
+    fn languages_belong_to_known_players_on_postgres() {
+        if let Some(directory) = postgres("languages_belong_to_known_players_on_postgres") {
+            languages(&directory);
+        }
+    }
+
+    fn languages(directory: &Directory) {
         assert!(!directory.set_language(ALEX, Some("de")).unwrap());
         directory.joined(ALEX, "Alex", None, "lobby");
         assert!(directory.set_language(ALEX, Some("de")).unwrap());

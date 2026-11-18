@@ -427,12 +427,12 @@ fn exclusive_lock_corruption_and_newer_schema_have_clear_errors() {
     let fixture = Fixture::new("persistent");
     let store = fixture.store();
     assert!(
-        Store::open(store.database().path())
+        Store::open(store.database().path().unwrap())
             .unwrap_err()
             .to_string()
             .contains("already in use")
     );
-    let path = store.database().path().to_owned();
+    let path = store.database().path().unwrap().to_owned();
     store
         .database()
         .lock()
@@ -557,7 +557,7 @@ fn version_one_databases_migrate_and_ports_become_unique_per_node() {
     let legacy: u32 = store
         .database()
         .lock()
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .query_row("PRAGMA user_version", params![], |r| r.get(0))
         .unwrap();
     assert_eq!(legacy, 2);
     // The sequence survives, so names are never reused after the upgrade.
@@ -722,4 +722,147 @@ fn every_creation_of_a_name_gets_a_new_login_generation() {
     // It survives a restart, which keeps tokens of running servers valid.
     assert_eq!(fixture.store().login_generation(&name).unwrap(), 2);
     let _ = plan;
+}
+
+#[test]
+fn the_instance_registry_works_on_postgres() {
+    let Some(location) = database::test_postgres_or_skip("the_instance_registry_works_on_postgres")
+    else {
+        return;
+    };
+    let fixture = Fixture::new("persistent");
+    assert_eq!(
+        Store::check(&location, &fixture.config()).unwrap(),
+        DatabaseCheck::Missing
+    );
+    let store = Store::new(Arc::new(Database::connect(&location).unwrap())).unwrap();
+    assert_eq!(store.database().dialect(), Dialect::Postgres);
+    assert!(store.database().path().is_none());
+    assert_eq!(
+        Store::check(&location, &fixture.config()).unwrap(),
+        DatabaseCheck::InUse
+    );
+    {
+        let connection = store.database().lock();
+        assert_eq!(database::version(&connection, "instances").unwrap(), 2);
+        assert_eq!(database::version(&connection, "groups").unwrap(), 1);
+        assert_eq!(
+            database::version(&connection, "instance_logins").unwrap(),
+            1
+        );
+        assert_eq!(database::version(&connection, "node_schedules").unwrap(), 1);
+    }
+
+    // A local instance: creation, restoration, stop intent and removal.
+    let (config, name, plan) = fixture.ready(&store);
+    assert_eq!(name, "games-1");
+    assert_eq!(store.login_generation(&name).unwrap(), 1);
+    assert_eq!(store.login_generation("never-created").unwrap(), 0);
+    store.set_explicit_stop(&name, true).unwrap();
+    let mut restored = fixture.config();
+    store.restore(&mut restored).unwrap();
+    assert_eq!(restored.instances, config.instances);
+    assert_eq!(
+        store.stopped_names().unwrap(),
+        BTreeSet::from([name.clone()])
+    );
+    let port = config.instances[&name].port;
+    assert_eq!(store.reserved_ports().unwrap(), BTreeSet::from([port]));
+    assert_eq!(
+        store.plan(&name).unwrap().unwrap().directory,
+        plan.directory
+    );
+    store.begin_removal(&name).unwrap();
+    store.finish_removal(&name).unwrap();
+    assert!(store.records().unwrap().is_empty());
+    // Removal keeps the login generation, so a recreation moves past it.
+    let reused = provisioning::plan(&config, &name).unwrap();
+    store.begin_creation(&config, &name, &reused).unwrap();
+    assert_eq!(store.login_generation(&name).unwrap(), 2);
+    store.abort_creation(&name).unwrap();
+    assert!(store.records().unwrap().is_empty());
+    assert_eq!(
+        store.allocate_name(&fixture.config(), "games").unwrap(),
+        "games-2"
+    );
+
+    // Group states and node schedules: upserts, and defaults remove rows.
+    let dev = GroupState {
+        suspended: true,
+        mode: GroupMode::Dev,
+    };
+    store.set_group_state("games", dev).unwrap();
+    let resumed = GroupState {
+        suspended: false,
+        mode: GroupMode::Dev,
+    };
+    store.set_group_state("games", resumed).unwrap();
+    assert_eq!(
+        store.group_states().unwrap(),
+        BTreeMap::from([("games".to_owned(), resumed)])
+    );
+    store
+        .set_group_state("games", GroupState::default())
+        .unwrap();
+    assert!(store.group_states().unwrap().is_empty());
+    store
+        .set_node_schedule("node1", NodeSchedule::Cordoned)
+        .unwrap();
+    store
+        .set_node_schedule("node1", NodeSchedule::Draining)
+        .unwrap();
+    assert_eq!(
+        store.node_schedules().unwrap(),
+        BTreeMap::from([("node1".to_owned(), NodeSchedule::Draining)])
+    );
+    store
+        .set_node_schedule("node1", NodeSchedule::Active)
+        .unwrap();
+    assert!(store.node_schedules().unwrap().is_empty());
+
+    // A remote instance moves between nodes.
+    let source = fixture
+        .source
+        .replace(
+            "return {",
+            "return {messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'},nodes={node1={address='10.0.0.11'},node2={address='10.0.0.12'}},",
+        )
+        .replace("directory='instances/{name}',", "nodes={'node1','node2'},");
+    let mut remote = Config::from_lua_at(&source, &fixture.root.join("rift.lua")).unwrap();
+    let name = store.allocate_name(&remote, "games").unwrap();
+    assert_eq!(name, "games-3");
+    let port = remote.service_groups["games"].port_start;
+    remote
+        .add_instance_on("games", &name, port, Some("node1"))
+        .unwrap();
+    let plan = Plan {
+        directory: remote.managed_servers[&name].directory.clone(),
+        marker: None,
+        stage: None,
+        created: false,
+    };
+    store.begin_creation(&remote, &name, &plan).unwrap();
+    store.commit_creation(&name).unwrap();
+    assert_eq!(
+        store.reserved_ports_on(Some("node1")).unwrap(),
+        BTreeSet::from([port])
+    );
+    remote.move_instance(&name, "node2", port).unwrap();
+    store.move_instance(&remote, &name, "node1").unwrap();
+    assert!(store.reserved_ports_on(Some("node1")).unwrap().is_empty());
+    assert_eq!(
+        store.reserved_ports_on(Some("node2")).unwrap(),
+        BTreeSet::from([port])
+    );
+    assert!(
+        store.move_instance(&remote, &name, "node1").is_err(),
+        "the stored node must still be the source"
+    );
+    assert_eq!(store.login_generation(&name).unwrap(), 1);
+    let mut restored = Config::from_lua_at(&source, &fixture.root.join("rift.lua")).unwrap();
+    store.restore(&mut restored).unwrap();
+    assert_eq!(restored.instances[&name].node.as_deref(), Some("node2"));
+    store.begin_removal(&name).unwrap();
+    store.finish_removal(&name).unwrap();
+    assert!(store.records().unwrap().is_empty());
 }

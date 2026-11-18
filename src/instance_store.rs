@@ -1,10 +1,10 @@
-//! Durable instance registrations and filesystem intents, using bundled SQLite.
+//! Durable instance registrations and filesystem intents, kept in the
+//! instance database (SQLite or PostgreSQL).
 use crate::{
     config::{Config, GroupMode, GroupState, NodeSchedule, ServiceInstance},
-    database::{self, Database},
+    database::{self, Database, Dialect, Location, OptionalExtension, params},
     provisioning::{self, Plan},
 };
-use rusqlite::{OptionalExtension, params};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions as FileOptions},
@@ -28,6 +28,20 @@ const INSTANCES_V2: &str = "CREATE TABLE instances (
     UNIQUE(node, port)
 ) STRICT;";
 
+const INSTANCES_POSTGRES: &str = r#"CREATE TABLE instances (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    node TEXT COLLATE "C" NOT NULL DEFAULT '',
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535),
+    phase TEXT COLLATE "C" NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
+    explicitly_stopped BIGINT NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
+    definition TEXT COLLATE "C" NOT NULL,
+    UNIQUE(node, port)
+);
+CREATE TABLE sequences (
+    group_name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    value TEXT COLLATE "C" NOT NULL
+);"#;
+
 /// Operator group state lives in its own schema component, so the
 /// `instances` schema (and a downgrade to a release without group state)
 /// is unaffected; older releases ignore the extra table.
@@ -41,6 +55,10 @@ const LOGINS_V1: &str = "CREATE TABLE login_generations (
     name TEXT PRIMARY KEY NOT NULL,
     generation INTEGER NOT NULL CHECK(generation > 0)
 ) STRICT;";
+const LOGINS_POSTGRES: &str = r#"CREATE TABLE login_generations (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    generation BIGINT NOT NULL CHECK(generation > 0)
+);"#;
 
 /// Node schedules (cordon and drain) live in their own component too.
 const NODES_COMPONENT: &str = "node_schedules";
@@ -49,12 +67,30 @@ const NODES_V1: &str = "CREATE TABLE node_schedules (
     name TEXT PRIMARY KEY NOT NULL,
     schedule TEXT NOT NULL CHECK(schedule IN ('cordoned','draining'))
 ) STRICT;";
+const NODES_POSTGRES: &str = r#"CREATE TABLE node_schedules (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    schedule TEXT COLLATE "C" NOT NULL CHECK(schedule IN ('cordoned','draining'))
+);"#;
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
     name TEXT PRIMARY KEY NOT NULL,
     suspended INTEGER NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
     mode TEXT NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
 ) STRICT;";
+const GROUPS_POSTGRES: &str = r#"CREATE TABLE group_states (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    suspended BIGINT NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
+    mode TEXT COLLATE "C" NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
+);"#;
+
+/// The DDL of a component for `dialect`.
+fn ddl(dialect: Dialect, sqlite: &str, postgres: &str) -> String {
+    match dialect {
+        Dialect::Sqlite => sqlite,
+        Dialect::Postgres => postgres,
+    }
+    .to_owned()
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Definition {
@@ -107,41 +143,65 @@ pub enum DatabaseCheck {
 impl Store {
     /// Check the database read-only, without creating, locking or migrating
     /// anything (for `rift check --strict`).
-    pub fn check(path: &Path, config: &Config) -> io::Result<DatabaseCheck> {
-        let path = provisioning::checked_path(path)?;
-        let lock_path = database::lock_path(&path);
-        if fs::symlink_metadata(&lock_path).is_ok() {
-            let lock = FileOptions::new().read(true).write(true).open(&lock_path)?;
-            match lock.try_lock() {
-                Ok(()) => {}
-                Err(fs::TryLockError::WouldBlock) => return Ok(DatabaseCheck::InUse),
-                Err(fs::TryLockError::Error(error)) => return Err(error),
+    pub fn check(location: &Location, config: &Config) -> io::Result<DatabaseCheck> {
+        let opened = match location {
+            Location::Sqlite(path) => {
+                let path = provisioning::checked_path(path)?;
+                let lock_path = database::lock_path(&path);
+                if fs::symlink_metadata(&lock_path).is_ok() {
+                    let lock = FileOptions::new().read(true).write(true).open(&lock_path)?;
+                    match lock.try_lock() {
+                        Ok(()) => {}
+                        Err(fs::TryLockError::WouldBlock) => return Ok(DatabaseCheck::InUse),
+                        Err(fs::TryLockError::Error(error)) => return Err(error),
+                    }
+                }
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if !metadata.is_file() => {
+                        return Err(invalid("instance database and lock must be regular files"));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        crate::preflight::check_creatable(&path)?;
+                        return Ok(DatabaseCheck::Missing);
+                    }
+                    Err(error) => return Err(error),
+                }
+                Database::read_only(&path)?
             }
-        }
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(invalid("instance database and lock must be regular files"));
+            Location::Postgres(_) => {
+                let database = Database::connect_read_only(location)?;
+                if database.owner()?.is_some() {
+                    return Ok(DatabaseCheck::InUse);
+                }
+                database
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                crate::preflight::check_creatable(&path)?;
-                return Ok(DatabaseCheck::Missing);
-            }
-            Err(error) => return Err(error),
-        }
+        };
         let store = Self {
-            database: Arc::new(Database::read_only(&path)?),
+            database: Arc::new(opened),
         };
         let (version, check) = {
             let connection = store.database.lock();
             let version = database::version(&connection, COMPONENT).map_err(|e| store.error(e))?;
-            let check: String = connection
-                .query_row("PRAGMA quick_check", [], |r| r.get(0))
-                .map_err(|e| store.error(e))?;
+            // PostgreSQL keeps its own consistency; only a file is checked.
+            let check: Option<String> = match connection.dialect() {
+                Dialect::Sqlite => Some(
+                    connection
+                        .query_row("PRAGMA quick_check", params![], |r| r.get(0))
+                        .map_err(|e| store.error(e))?,
+                ),
+                Dialect::Postgres => None,
+            };
             (version, check)
         };
-        if check != "ok" {
-            return Err(store.error(format!("integrity check failed: {check}")));
+        match check {
+            Some(check) if check != "ok" => {
+                return Err(store.error(format!("integrity check failed: {check}")));
+            }
+            // A PostgreSQL database without instance tables yet; startup
+            // creates them.
+            None if version == 0 => return Ok(DatabaseCheck::Missing),
+            _ => {}
         }
         match version {
             // Empty, or upgraded in place at startup.
@@ -178,13 +238,15 @@ impl Store {
         // are unique per node, since every node has its own port range.
         // `user_version` keeps the version too, for Rift releases that
         // predate `rift_schema`, so a downgrade still opens the file.
-        database.migrate(COMPONENT, SCHEMA_VERSION, |from| match from {
-            0 => format!(
+        // PostgreSQL databases always start at the latest version.
+        database.migrate(COMPONENT, SCHEMA_VERSION, |dialect, from| match (dialect, from) {
+            (Dialect::Postgres, _) => INSTANCES_POSTGRES.to_owned(),
+            (Dialect::Sqlite, 0) => format!(
                 "{INSTANCES_V2}
                 CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
                 PRAGMA user_version={SCHEMA_VERSION};"
             ),
-            _ => format!(
+            (Dialect::Sqlite, _) => format!(
                 "ALTER TABLE instances RENAME TO instances_v1;
                 {INSTANCES_V2}
                 INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
@@ -193,14 +255,14 @@ impl Store {
                 PRAGMA user_version={SCHEMA_VERSION};"
             ),
         })?;
-        database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |_| {
-            GROUPS_V1.to_owned()
+        database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |dialect, _| {
+            ddl(dialect, GROUPS_V1, GROUPS_POSTGRES)
         })?;
-        database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |_| {
-            LOGINS_V1.to_owned()
+        database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |dialect, _| {
+            ddl(dialect, LOGINS_V1, LOGINS_POSTGRES)
         })?;
-        database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |_| {
-            NODES_V1.to_owned()
+        database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |dialect, _| {
+            ddl(dialect, NODES_V1, NODES_POSTGRES)
         })?;
         Ok(Self { database })
     }
@@ -215,51 +277,52 @@ impl Store {
     }
 
     fn records(&self) -> io::Result<Vec<Record>> {
-        let connection = self.database.lock();
-        let mut statement = connection
-            .prepare(
+        let rows = self
+            .database
+            .lock()
+            .query_map(
                 "SELECT name,port,phase,explicitly_stopped,definition,node FROM instances ORDER BY name",
+                params![],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u16>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
             )
             .map_err(|e| self.error(e))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u16>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, bool>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })
-            .map_err(|e| self.error(e))?;
-        rows.map(|row| {
-            let (name, port, phase, stopped, json, node) = row.map_err(|e| self.error(e))?;
-            let definition: Definition = serde_json::from_str(&json).map_err(|e| self.error(e))?;
-            if port != definition.instance.port
-                || node != definition.instance.node.clone().unwrap_or_default()
-                || !["creating", "ready", "removing", "deleting"].contains(&phase.as_str())
-            {
-                return Err(self.error(format!("invalid registration for {name}")));
-            }
-            if definition.instance.node.is_some() {
-                if !crate::config::valid_node_directory(&definition.plan.directory)
-                    || definition.plan.stage.is_some()
+        rows.into_iter()
+            .map(|(name, port, phase, stopped, json, node)| {
+                let definition: Definition =
+                    serde_json::from_str(&json).map_err(|e| self.error(e))?;
+                if port != definition.instance.port
+                    || node != definition.instance.node.clone().unwrap_or_default()
+                    || !["creating", "ready", "removing", "deleting"].contains(&phase.as_str())
                 {
-                    return Err(self.error(format!("instances.{name}: invalid node directory")));
+                    return Err(self.error(format!("invalid registration for {name}")));
                 }
-            } else {
-                provisioning::validate_plan(&definition.instance, &name, &definition.plan)
-                    .map_err(|e| self.error(format!("instances.{name}: {e}")))?;
-            }
-            Ok(Record {
-                name,
-                phase,
-                stopped,
-                definition,
+                if definition.instance.node.is_some() {
+                    if !crate::config::valid_node_directory(&definition.plan.directory)
+                        || definition.plan.stage.is_some()
+                    {
+                        return Err(self.error(format!("instances.{name}: invalid node directory")));
+                    }
+                } else {
+                    provisioning::validate_plan(&definition.instance, &name, &definition.plan)
+                        .map_err(|e| self.error(format!("instances.{name}: {e}")))?;
+                }
+                Ok(Record {
+                    name,
+                    phase,
+                    stopped,
+                    definition,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     /// Validate every registration before recovering intents or launching workers.
@@ -317,8 +380,8 @@ impl Store {
             }
             for directory in &storage_paths {
                 // Stored paths must not overlap the database, templates, or another worker.
-                if self.database.path().starts_with(directory)
-                    || directory.starts_with(self.database.path())
+                if let Some(file) = self.database.path()
+                    && (file.starts_with(directory) || directory.starts_with(file))
                 {
                     return Err(self.error(format!(
                         "instances.{}: storage overlaps database",
@@ -452,7 +515,7 @@ impl Store {
         let current: Option<String> = transaction
             .query_row(
                 "SELECT value FROM sequences WHERE group_name=?1",
-                [group],
+                params![group],
                 |r| r.get(0),
             )
             .optional()
@@ -528,8 +591,8 @@ impl Store {
         transaction
             .execute(
                 "INSERT INTO login_generations (name,generation) VALUES (?1,1)
-                 ON CONFLICT(name) DO UPDATE SET generation=generation+1",
-                [name],
+                 ON CONFLICT(name) DO UPDATE SET generation=login_generations.generation+1",
+                params![name],
             )
             .map_err(|e| self.error(e))?;
         transaction.commit().map_err(|e| self.error(e))?;
@@ -591,7 +654,7 @@ impl Store {
         let generation: Option<i64> = connection
             .query_row(
                 "SELECT generation FROM login_generations WHERE name=?1",
-                [name],
+                params![name],
                 |row| row.get(0),
             )
             .optional()
@@ -627,7 +690,7 @@ impl Store {
     fn forget(&self, name: &str) -> io::Result<()> {
         self.database
             .lock()
-            .execute("DELETE FROM instances WHERE name=?1", [name])
+            .execute("DELETE FROM instances WHERE name=?1", params![name])
             .map_err(|e| self.error(e))?;
         Ok(())
     }
@@ -676,33 +739,35 @@ impl Store {
 
     /// Every group with a state other than the default.
     pub fn group_states(&self) -> io::Result<BTreeMap<String, GroupState>> {
-        let connection = self.database.lock();
-        let mut statement = connection
-            .prepare("SELECT name,suspended,mode FROM group_states ORDER BY name")
+        let rows = self
+            .database
+            .lock()
+            .query_map(
+                "SELECT name,suspended,mode FROM group_states ORDER BY name",
+                params![],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
             .map_err(|e| self.error(e))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+        rows.into_iter()
+            .map(|(name, suspended, mode)| {
+                let mode = GroupMode::parse(&mode)
+                    .ok_or_else(|| self.error(format!("invalid mode for group {name}")))?;
+                Ok((name, GroupState { suspended, mode }))
             })
-            .map_err(|e| self.error(e))?;
-        rows.map(|row| {
-            let (name, suspended, mode) = row.map_err(|e| self.error(e))?;
-            let mode = GroupMode::parse(&mode)
-                .ok_or_else(|| self.error(format!("invalid mode for group {name}")))?;
-            Ok((name, GroupState { suspended, mode }))
-        })
-        .collect()
+            .collect()
     }
 
     /// Record a group's state; the default state removes its row.
     pub fn set_group_state(&self, group: &str, state: GroupState) -> io::Result<()> {
         let connection = self.database.lock();
         let result = if state.is_default() {
-            connection.execute("DELETE FROM group_states WHERE name=?1", [group])
+            connection.execute("DELETE FROM group_states WHERE name=?1", params![group])
         } else {
             connection.execute(
                 "INSERT INTO group_states (name,suspended,mode) VALUES (?1,?2,?3)
@@ -716,29 +781,29 @@ impl Store {
 
     /// Every node that is cordoned or draining.
     pub fn node_schedules(&self) -> io::Result<BTreeMap<String, NodeSchedule>> {
-        let connection = self.database.lock();
-        let mut statement = connection
-            .prepare("SELECT name,schedule FROM node_schedules ORDER BY name")
+        let rows = self
+            .database
+            .lock()
+            .query_map(
+                "SELECT name,schedule FROM node_schedules ORDER BY name",
+                params![],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
             .map_err(|e| self.error(e))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        rows.into_iter()
+            .map(|(name, schedule)| {
+                let schedule = NodeSchedule::parse(&schedule)
+                    .ok_or_else(|| self.error(format!("invalid schedule for node {name}")))?;
+                Ok((name, schedule))
             })
-            .map_err(|e| self.error(e))?;
-        rows.map(|row| {
-            let (name, schedule) = row.map_err(|e| self.error(e))?;
-            let schedule = NodeSchedule::parse(&schedule)
-                .ok_or_else(|| self.error(format!("invalid schedule for node {name}")))?;
-            Ok((name, schedule))
-        })
-        .collect()
+            .collect()
     }
 
     /// Record a node's schedule; `active` removes its row.
     pub fn set_node_schedule(&self, node: &str, schedule: NodeSchedule) -> io::Result<()> {
         let connection = self.database.lock();
         let result = if schedule == NodeSchedule::Active {
-            connection.execute("DELETE FROM node_schedules WHERE name=?1", [node])
+            connection.execute("DELETE FROM node_schedules WHERE name=?1", params![node])
         } else {
             connection.execute(
                 "INSERT INTO node_schedules (name,schedule) VALUES (?1,?2)
