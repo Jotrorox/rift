@@ -406,18 +406,23 @@ fn convert_parser(source: i32, target: i32, mut parser: Parser) -> Option<Parser
     if !has_parser(target, &parser.name) {
         return None;
     }
-    // A registry lookup the receiver cannot resolve fails its whole graph.
+    // A registry lookup the receiver cannot resolve fails its whole graph
+    // (a 1.21.11 client given 26.1's `world_clock` disconnects).
     if let Properties::Registry(registry) = &parser.properties
-        && matches!(
-            parser.name.as_str(),
-            "minecraft:resource" | "minecraft:resource_or_tag"
-        )
-        && registry::registry(source, registry).is_some()
-        && registry::registry(target, registry).is_none()
+        && knows_registry(source, registry)
+        && !knows_registry(target, registry)
     {
         return None;
     }
     Some(parser)
+}
+
+/// Whether `protocol` has the registry `name`, built in or synchronised.
+/// Synchronised registries count by name, since vanilla data only numbers
+/// those its tags refer to.
+fn knows_registry(protocol: i32, name: &str) -> bool {
+    registry::registry(protocol, name).is_some()
+        || crate::codec::registries::defaults::synced(protocol, name)
 }
 
 /// Convert a graph between the sender's and the receiver's protocols.
@@ -648,6 +653,36 @@ mod tests {
                 .name,
             "minecraft:color"
         );
+        // A registry the receiver lacks fails the client's whole graph, so the
+        // argument becomes a server-completed greedy string; one it has stays.
+        for parser in [
+            "minecraft:resource",
+            "minecraft:resource_key",
+            "minecraft:resource_or_tag_key",
+        ] {
+            let clock = graph(vec![argument(
+                "c",
+                parser,
+                Properties::Registry("minecraft:world_clock".into()),
+            )]);
+            assert_eq!(
+                convert(775, 774, clock.clone()).nodes[1]
+                    .parser
+                    .as_ref()
+                    .unwrap(),
+                &Parser {
+                    name: "brigadier:string".into(),
+                    properties: Properties::String(GREEDY_PHRASE),
+                }
+            );
+            assert_eq!(convert(777, 776, clock.clone()), clock);
+            let dialog = graph(vec![argument(
+                "d",
+                parser,
+                Properties::Registry("minecraft:dialog".into()),
+            )]);
+            assert_eq!(convert(775, 774, dialog.clone()), dialog);
+        }
         // A parser the receiver lacks becomes a server-completed greedy string.
         let mut uuid = graph(vec![argument("u", "minecraft:uuid", Properties::None)]);
         uuid.nodes[1].children = vec![0];
