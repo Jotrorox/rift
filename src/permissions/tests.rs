@@ -809,7 +809,9 @@ fn luckperms_exports_import_in_one_revision_and_round_trip(authority: Authority)
 both_backends!(the_sweeper_deletes_expired_nodes_as_the_system);
 
 fn the_sweeper_deletes_expired_nodes_as_the_system(authority: Authority) {
-    let soon = unix_now() + 1;
+    // Expiry has whole-second precision, so `+ 1` could pass at the next
+    // second boundary, before the first check on a slow backend.
+    let soon = unix_now() + 3;
     authority
         .apply(
             Actor::Cli,
@@ -822,7 +824,9 @@ fn the_sweeper_deletes_expired_nodes_as_the_system(authority: Authority) {
     assert_eq!(authority.check(ALICE, "trial", &global()), Tristate::True);
     let mut notifications = authority.subscribe();
     assert_eq!(authority.sweep().unwrap().ops, 0, "nothing expired yet");
-    std::thread::sleep(Duration::from_millis(1100));
+    while unix_now() < soon {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     // Expiry is exact at check time, before any sweep.
     assert_eq!(
         authority.check(ALICE, "trial", &global()),
