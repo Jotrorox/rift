@@ -781,8 +781,8 @@ fn every_creation_of_a_name_gets_a_new_login_generation() {
 }
 
 #[test]
-fn the_instance_registry_works_on_postgres() {
-    let Some(location) = database::test_postgres_or_skip("the_instance_registry_works_on_postgres")
+fn the_instance_registry_works_on_a_server() {
+    let Some(location) = database::test_server_or_skip("the_instance_registry_works_on_a_server")
     else {
         return;
     };
@@ -792,7 +792,7 @@ fn the_instance_registry_works_on_postgres() {
         DatabaseCheck::Missing
     );
     let store = Store::new(Arc::new(Database::connect(&location).unwrap())).unwrap();
-    assert_eq!(store.database().dialect(), Dialect::Postgres);
+    assert_ne!(store.database().dialect(), Dialect::Sqlite);
     assert!(store.database().path().is_none());
     assert_eq!(
         Store::check(&location, &fixture.config()).unwrap(),

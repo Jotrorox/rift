@@ -2,7 +2,7 @@
 //!
 //! A configured store is either a bundled-SQLite database of its own (`path`)
 //! or the table `extension_entries` in the instance database
-//! (`database = true`), which is a SQLite file or PostgreSQL. Each mutation
+//! (`database = true`), which is a SQLite file, PostgreSQL or MariaDB. Each mutation
 //! commits only the entries it changes. A file store runs in WAL mode with
 //! `synchronous=FULL`, so a write costs one small append and sync instead of
 //! rewriting the store; its connection holds an exclusive lock: one runtime
@@ -859,6 +859,15 @@ fn shared_schema(dialect: Dialect) -> &'static str {
                 PRIMARY KEY (namespace, key)
             );"
         }
+        // Namespaces and keys are at most MAX_LABEL bytes.
+        Dialect::Mariadb => {
+            "CREATE TABLE extension_entries (
+                namespace VARCHAR(255) NOT NULL,
+                \"key\" VARCHAR(255) NOT NULL,
+                value LONGBLOB NOT NULL,
+                PRIMARY KEY (namespace, \"key\")
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;"
+        }
     }
 }
 
@@ -1509,14 +1518,13 @@ mod tests {
     }
 
     #[test]
-    fn the_store_can_live_in_postgres() {
-        let Some(location) =
-            crate::database::test_postgres_or_skip("the_store_can_live_in_postgres")
+    fn the_store_can_live_on_a_server() {
+        let Some(location) = crate::database::test_server_or_skip("the_store_can_live_on_a_server")
         else {
             return;
         };
         let database = Arc::new(Database::connect(&location).unwrap());
-        assert_eq!(database.dialect(), Dialect::Postgres);
+        assert_ne!(database.dialect(), Dialect::Sqlite);
         exercise_shared(&database);
     }
 

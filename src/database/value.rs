@@ -1,4 +1,4 @@
-//! Values, rows and errors shared by both database backends.
+//! Values, rows and errors shared by every database backend.
 //!
 //! Statements bind [`Value`]s, built with [`params!`](crate::database::params),
 //! and read [`Row`]s of them. A NULL parameter keeps the type of the Rust value
@@ -83,7 +83,7 @@ macro_rules! lossless_integer {
 }
 lossless_integer!(i8, i16, i32, i64, u8, u16, u32, bool);
 
-/// Values past `i64::MAX` bind as `i64::MAX`; both databases store signed
+/// Values past `i64::MAX` bind as `i64::MAX`; every database stores signed
 /// 64-bit integers.
 macro_rules! saturating_integer {
     ($($type:ty),*) => {$(
@@ -259,6 +259,7 @@ pub enum Error {
     NoRows,
     Sqlite(rusqlite::Error),
     Postgres(tokio_postgres::Error),
+    Mariadb(mysql_async::Error),
     /// A column did not convert to the requested type.
     Conversion(String),
     /// Anything else, such as a lost connection or a timeout.
@@ -286,6 +287,10 @@ impl fmt::Display for Error {
                 }
                 None => error.fmt(f),
             },
+            Self::Mariadb(mysql_async::Error::Server(error)) => {
+                write!(f, "{} (error {})", error.message, error.code)
+            }
+            Self::Mariadb(error) => error.fmt(f),
             Self::Conversion(message) | Self::Other(message) => f.write_str(message),
         }
     }
@@ -305,6 +310,12 @@ impl From<rusqlite::Error> for Error {
 impl From<tokio_postgres::Error> for Error {
     fn from(error: tokio_postgres::Error) -> Self {
         Self::Postgres(error)
+    }
+}
+
+impl From<mysql_async::Error> for Error {
+    fn from(error: mysql_async::Error) -> Self {
+        Self::Mariadb(error)
     }
 }
 

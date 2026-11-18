@@ -26,7 +26,16 @@ and are listed under **SDKs**.
   back, and `rift check --strict` checks a PostgreSQL database read-only. See
   [docs/database.md](docs/database.md).
 - `extensions.storage = { database = true }` keeps the extension store in the
-  instance database (SQLite or PostgreSQL) instead of a file of its own.
+  instance database (SQLite, PostgreSQL or MariaDB) instead of a file of its
+  own.
+- MariaDB (10.5 or newer) works as the instance database too:
+  `rift.config.database = { backend = "mariadb" }` with a `mariadb://` URL in
+  `RIFT_DATABASE_URL`. It supports the same settings and features as
+  PostgreSQL: TLS with `require_ssl=true` or `ca`, `schema` naming a database
+  on the server, one owner at a time through a named lock with
+  `standby = true` for a waiting second controller, `rift database copy` to
+  and from SQLite, and `rift check --strict`. See
+  [docs/database.md](docs/database.md#use-mariadb).
 - Built-in backups of persistent instances on nodes. With
   `rift.config.backups` set, Rift snapshots each such instance every
   `interval_ms` (6 hours by default) into a folder on the proxy host or an S3

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     config::{Config, PermissionsConfig},
-    database::{Database, Location, test_postgres_or_skip},
+    database::{Database, Location, test_server_or_skip},
     extensions::{Action, Context, Extensions},
     messaging::Broker,
 };
@@ -87,9 +87,9 @@ impl Drop for Scratch {
     }
 }
 
-/// Open the permission tables in the PostgreSQL schema at `location`,
+/// Open the permission tables in the server database at `location`,
 /// waiting for an earlier connection's lock to go with its session.
-fn open_postgres(location: &Location) -> Authority {
+fn open_server(location: &Location) -> Authority {
     let deadline = Instant::now() + Duration::from_secs(10);
     let database = loop {
         match Database::connect(location) {
@@ -101,15 +101,15 @@ fn open_postgres(location: &Location) -> Authority {
     Authority::open(Arc::new(database), &PermissionsConfig::default()).unwrap()
 }
 
-/// An authority over a fresh PostgreSQL schema, or `None` (with a note)
-/// when `RIFT_TEST_POSTGRES_URL` is not set.
-fn postgres(test: &str) -> Option<Authority> {
-    test_postgres_or_skip(test).map(|location| open_postgres(&location))
+/// An authority over a fresh server schema, or `None` (with a note) when
+/// neither `RIFT_TEST_POSTGRES_URL` nor `RIFT_TEST_MARIADB_URL` is set.
+fn server(test: &str) -> Option<Authority> {
+    test_server_or_skip(test).map(|location| open_server(&location))
 }
 
 /// Run the test body `$body(authority)` on an in-memory SQLite store
-/// (`$body::sqlite`) and on a fresh PostgreSQL schema (`$body::postgres`,
-/// skipped without `RIFT_TEST_POSTGRES_URL`).
+/// (`$body::sqlite`) and on a fresh server schema (`$body::server`, skipped
+/// without a test server URL).
 macro_rules! both_backends {
     ($body:ident) => {
         mod $body {
@@ -119,8 +119,8 @@ macro_rules! both_backends {
             }
 
             #[test]
-            fn postgres() {
-                if let Some(authority) = super::postgres(concat!(stringify!($body), "::postgres")) {
+            fn server() {
+                if let Some(authority) = super::server(concat!(stringify!($body), "::server")) {
                     super::$body(authority);
                 }
             }
@@ -135,10 +135,10 @@ fn store_round_trips_and_revisions_survive_reopening() {
 }
 
 #[test]
-fn store_round_trips_and_revisions_survive_reopening_on_postgres() {
-    let test = "store_round_trips_and_revisions_survive_reopening_on_postgres";
-    if let Some(location) = test_postgres_or_skip(test) {
-        round_trip_and_reopen(&|| open_postgres(&location));
+fn store_round_trips_and_revisions_survive_reopening_on_a_server() {
+    let test = "store_round_trips_and_revisions_survive_reopening_on_a_server";
+    if let Some(location) = test_server_or_skip(test) {
+        round_trip_and_reopen(&|| open_server(&location));
     }
 }
 
@@ -1043,11 +1043,10 @@ fn the_extension_store_upgrade_runs_once() {
 }
 
 #[test]
-fn the_extension_store_upgrade_runs_once_on_postgres() {
-    if let Some(location) =
-        test_postgres_or_skip("the_extension_store_upgrade_runs_once_on_postgres")
+fn the_extension_store_upgrade_runs_once_on_a_server() {
+    if let Some(location) = test_server_or_skip("the_extension_store_upgrade_runs_once_on_a_server")
     {
-        upgrade_once(&|| open_postgres(&location));
+        upgrade_once(&|| open_server(&location));
     }
 }
 

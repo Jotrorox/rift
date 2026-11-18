@@ -69,7 +69,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     rift dev [options] (development proxy for plugin authors; see rift dev --help)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift node init <name> [--address <host>] (print a node's token, systemd unit and setup checks; see rift node init --help)\n\
-    rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL; see rift database --help)\n\
+    rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL or MariaDB; see rift database --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\

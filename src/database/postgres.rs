@@ -9,7 +9,10 @@
 //! counterpart of the SQLite lock file. When its connection drops, it
 //! reconnects and takes the lock again; if another Rift took it meanwhile,
 //! this one has been replaced and exits rather than write beside it.
-use super::value::{Error, Kind, Result, Row, Value};
+use super::{
+    Ownership,
+    value::{Error, Kind, Result, Row, Value},
+};
 use bytes::BytesMut;
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use std::{
@@ -451,17 +454,6 @@ impl std::fmt::Display for Holder {
         };
         write!(f, "{name} from {}", self.address)
     }
-}
-
-/// How [`Session::open`] treats a lock held elsewhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ownership {
-    /// Read-only, without the lock (`rift check --strict`).
-    None,
-    /// Take the lock, waiting up to `wait` for it.
-    Own { wait: Duration },
-    /// Wait for the lock as long as it takes (`database.standby`).
-    Standby,
 }
 
 /// One connection with its statement cache.

@@ -1,5 +1,5 @@
 //! Durable instance registrations and filesystem intents, kept in the
-//! instance database (SQLite or PostgreSQL).
+//! instance database (SQLite, PostgreSQL or MariaDB).
 use crate::{
     config::{Config, GroupMode, GroupState, MovedServer, NodeSchedule, ServiceInstance},
     database::{self, Database, Dialect, Location, OptionalExtension, params},
@@ -42,6 +42,22 @@ CREATE TABLE sequences (
     value TEXT COLLATE "C" NOT NULL
 );"#;
 
+/// MariaDB keys text by `VARCHAR` (names are at most 107 bytes) and needs
+/// `LONGTEXT` for definitions past 64 KiB.
+const INSTANCES_MARIADB: &str = "CREATE TABLE instances (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    node VARCHAR(255) NOT NULL DEFAULT '',
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535),
+    phase VARCHAR(16) NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
+    explicitly_stopped BIGINT NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
+    definition LONGTEXT NOT NULL,
+    UNIQUE(node, port)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE sequences (
+    group_name VARCHAR(255) PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
+
 /// Operator group state lives in its own schema component, so the
 /// `instances` schema (and a downgrade to a release without group state)
 /// is unaffected; older releases ignore the extra table.
@@ -59,6 +75,10 @@ const LOGINS_POSTGRES: &str = r#"CREATE TABLE login_generations (
     name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
     generation BIGINT NOT NULL CHECK(generation > 0)
 );"#;
+const LOGINS_MARIADB: &str = "CREATE TABLE login_generations (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    generation BIGINT NOT NULL CHECK(generation > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 /// Node schedules (cordon and drain) live in their own component too.
 const NODES_COMPONENT: &str = "node_schedules";
@@ -71,6 +91,10 @@ const NODES_POSTGRES: &str = r#"CREATE TABLE node_schedules (
     name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
     schedule TEXT COLLATE "C" NOT NULL CHECK(schedule IN ('cordoned','draining'))
 );"#;
+const NODES_MARIADB: &str = "CREATE TABLE node_schedules (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    schedule VARCHAR(16) NOT NULL CHECK(schedule IN ('cordoned','draining'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 /// Where `rift admin move` put servers of `managed_servers`, in a component
 /// of its own; older releases ignore the table and run the servers where the
@@ -91,6 +115,13 @@ const MOVED_POSTGRES: &str = r#"CREATE TABLE moved_servers (
     node TEXT COLLATE "C" NOT NULL,
     port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
 );"#;
+const MOVED_MARIADB: &str = "CREATE TABLE moved_servers (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    configured_node VARCHAR(255) NOT NULL,
+    configured_backend TEXT NOT NULL,
+    node VARCHAR(255) NOT NULL,
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
     name TEXT PRIMARY KEY NOT NULL,
@@ -102,12 +133,18 @@ const GROUPS_POSTGRES: &str = r#"CREATE TABLE group_states (
     suspended BIGINT NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
     mode TEXT COLLATE "C" NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
 );"#;
+const GROUPS_MARIADB: &str = "CREATE TABLE group_states (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    suspended BIGINT NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
+    mode VARCHAR(16) NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
-/// The DDL of a component for `dialect`.
-fn ddl(dialect: Dialect, sqlite: &str, postgres: &str) -> String {
+/// The DDL of a component for `dialect`: `[sqlite, postgres, mariadb]`.
+fn ddl(dialect: Dialect, [sqlite, postgres, mariadb]: [&str; 3]) -> String {
     match dialect {
         Dialect::Sqlite => sqlite,
         Dialect::Postgres => postgres,
+        Dialect::Mariadb => mariadb,
     }
     .to_owned()
 }
@@ -189,7 +226,7 @@ impl Store {
                 }
                 Database::read_only(&path)?
             }
-            Location::Postgres(_) => {
+            Location::Server(_) => {
                 let database = Database::connect_read_only(location)?;
                 if database.owner()?.is_some() {
                     return Ok(DatabaseCheck::InUse);
@@ -203,14 +240,14 @@ impl Store {
         let (version, check) = {
             let connection = store.database.lock();
             let version = database::version(&connection, COMPONENT).map_err(|e| store.error(e))?;
-            // PostgreSQL keeps its own consistency; only a file is checked.
+            // A server keeps its own consistency; only a file is checked.
             let check: Option<String> = match connection.dialect() {
                 Dialect::Sqlite => Some(
                     connection
                         .query_row("PRAGMA quick_check", params![], |r| r.get(0))
                         .map_err(|e| store.error(e))?,
                 ),
-                Dialect::Postgres => None,
+                Dialect::Postgres | Dialect::Mariadb => None,
             };
             (version, check)
         };
@@ -218,7 +255,7 @@ impl Store {
             Some(check) if check != "ok" => {
                 return Err(store.error(format!("integrity check failed: {check}")));
             }
-            // A PostgreSQL database without instance tables yet; startup
+            // A server database without instance tables yet; startup
             // creates them.
             None if version == 0 => return Ok(DatabaseCheck::Missing),
             _ => {}
@@ -258,9 +295,10 @@ impl Store {
         // are unique per node, since every node has its own port range.
         // `user_version` keeps the version too, for Rift releases that
         // predate `rift_schema`, so a downgrade still opens the file.
-        // PostgreSQL databases always start at the latest version.
+        // Server databases always start at the latest version.
         database.migrate(COMPONENT, SCHEMA_VERSION, |dialect, from| match (dialect, from) {
             (Dialect::Postgres, _) => INSTANCES_POSTGRES.to_owned(),
+            (Dialect::Mariadb, _) => INSTANCES_MARIADB.to_owned(),
             (Dialect::Sqlite, 0) => format!(
                 "{INSTANCES_V2}
                 CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
@@ -276,16 +314,16 @@ impl Store {
             ),
         })?;
         database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, GROUPS_V1, GROUPS_POSTGRES)
+            ddl(dialect, [GROUPS_V1, GROUPS_POSTGRES, GROUPS_MARIADB])
         })?;
         database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, LOGINS_V1, LOGINS_POSTGRES)
+            ddl(dialect, [LOGINS_V1, LOGINS_POSTGRES, LOGINS_MARIADB])
         })?;
         database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, NODES_V1, NODES_POSTGRES)
+            ddl(dialect, [NODES_V1, NODES_POSTGRES, NODES_MARIADB])
         })?;
         database.migrate(MOVED_COMPONENT, MOVED_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, MOVED_V1, MOVED_POSTGRES)
+            ddl(dialect, [MOVED_V1, MOVED_POSTGRES, MOVED_MARIADB])
         })?;
         Ok(Self { database })
     }

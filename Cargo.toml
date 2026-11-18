@@ -70,6 +70,8 @@ rusqlite = { version = "0.42", features = ["bundled"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 futures-util = { version = "0.3", default-features = false }
 webpki-roots = "1"
+# database.backend = "mariadb": the instance database on a MariaDB server.
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "tls12", "aws-lc-rs"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 aes = { version = "0.9", features = ["zeroize"] }
 cfb8 = { version = "0.9", features = ["zeroize"] }
