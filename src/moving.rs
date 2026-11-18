@@ -246,7 +246,7 @@ pub(crate) fn check(
     }
     if source_online && !snapshot.nodes.online(&from) {
         return Err(format!(
-            "node {from} is {}, so the folder of {instance} cannot be copied from it. If the node is gone for good, restore {} on node {to} from a backup and run: rift admin move {instance} {to} --no-copy",
+            "node {from} is {}, so the folder of {instance} cannot be copied from it. If the node is gone for good, run: rift admin restore {instance} --node {to}; or restore {} on node {to} from a backup of your own and run: rift admin move {instance} {to} --no-copy",
             snapshot.nodes.reachability(&from).as_str(),
             directory.display()
         ));
