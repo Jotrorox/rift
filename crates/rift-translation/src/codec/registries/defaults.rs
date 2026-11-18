@@ -92,6 +92,13 @@ pub fn syncs(protocol: i32, registry: &str) -> bool {
     get(protocol, registry).is_some()
 }
 
+/// Whether `protocol` synchronises `registry`, by name alone: no registry
+/// data is loaded.
+pub fn synced(protocol: i32, registry: &str) -> bool {
+    let registry = data::strip(registry);
+    names(protocol).iter().any(|name| *name == registry)
+}
+
 /// The registries a client of `protocol` needs, with full data.
 pub fn registries(protocol: i32) -> Vec<Registry> {
     all(protocol).iter().map(Defaults::to_registry).collect()
