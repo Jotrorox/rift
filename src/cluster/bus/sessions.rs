@@ -116,18 +116,36 @@ pub(super) fn spawn_claim(state: &Arc<BusState>, node: String, session: u64) {
     });
 }
 
-/// Routes `rift.node.<n>.cmd` to the peer holding node `n`'s session and
-/// `rift.node.<n>.state` to the leader. A node nobody holds, or no leader,
-/// keeps the message on this peer, where it finds no subscriber.
+/// Routes `rift.node.<n>.cmd` to the peer holding node `n`'s session, or,
+/// when no `rift node` agent holds it, to peer `n` itself if it is a peer
+/// that serves players (its embedded agent, docs/clustering.md "Servers on
+/// the peers' own hosts"); `rift.node.<n>.state` goes to the leader. A node
+/// nobody holds, or no leader, keeps the message on this peer, where it
+/// finds no subscriber.
 pub(super) struct Router {
     pub(super) state: Arc<BusState>,
+}
+
+impl Router {
+    /// `node` if it names a peer that runs an embedded agent.
+    fn peer_node(&self, node: &str) -> Option<String> {
+        let cluster = self.state.cluster()?;
+        let rows = cluster.state().peers().ok()?;
+        rows.iter()
+            .any(|row| row.name == node && !row.witness)
+            .then(|| node.to_owned())
+    }
 }
 
 impl OwnerRouter for Router {
     fn route(&self, subject: &str) -> Option<PeerId> {
         let (node, kind) = subject.strip_prefix("rift.node.")?.rsplit_once('.')?;
         match kind {
-            "cmd" => self.state.session_holder(node).map(PeerId::from),
+            "cmd" => self
+                .state
+                .session_holder(node)
+                .or_else(|| self.peer_node(node))
+                .map(PeerId::from),
             "state" => self
                 .state
                 .cluster()?

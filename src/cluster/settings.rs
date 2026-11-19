@@ -18,6 +18,11 @@
 //!
 //! [labels]
 //! region = "eu"
+//!
+//! [node]                             # this peer as a node (all optional)
+//! memory_mb = 16384
+//! max_instances = 128
+//! min_free_disk_mb = 1024
 //! ```
 //!
 //! Relative paths are relative to the directory of `rift.lua`, which also
@@ -65,6 +70,68 @@ pub struct Settings {
     pub witness: bool,
     /// The directory of `rift.lua`: Raft file, state machine, snapshots.
     pub directory: PathBuf,
+    /// This peer as a node: its limits, as `rift.config.nodes.*` has them.
+    pub node: NodeSettings,
+}
+
+/// The `[node]` table: this peer's limits as the node it is in a cluster
+/// (docs/clustering.md, "Servers on the peers' own hosts"). The fields mean
+/// what they mean in `rift.config.nodes.*`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSettings {
+    pub memory_mb: Option<usize>,
+    #[serde(default = "default_max_instances")]
+    pub max_instances: usize,
+    #[serde(default = "default_min_free_disk_mb")]
+    pub min_free_disk_mb: usize,
+}
+
+impl Default for NodeSettings {
+    fn default() -> Self {
+        Self {
+            memory_mb: None,
+            max_instances: default_max_instances(),
+            min_free_disk_mb: default_min_free_disk_mb(),
+        }
+    }
+}
+
+fn default_max_instances() -> usize {
+    128
+}
+
+fn default_min_free_disk_mb() -> usize {
+    crate::config::DEFAULT_MIN_FREE_DISK_MB
+}
+
+/// Label keys that carry [`NodeSettings`] in the peer table: a peer
+/// announces them with its labels in `peer joined`, so every peer knows the
+/// limits of every peer's node.
+pub const NODE_MEMORY_LABEL: &str = "node.memory_mb";
+pub const NODE_INSTANCES_LABEL: &str = "node.max_instances";
+pub const NODE_DISK_LABEL: &str = "node.min_free_disk_mb";
+/// The prefix of those keys, which `[labels]` may not use.
+pub const NODE_LABEL_PREFIX: &str = "node.";
+
+impl Settings {
+    /// The labels this peer announces in `peer joined`: `[labels]` and its
+    /// node settings under the `node.*` keys.
+    pub fn announced_labels(&self) -> BTreeMap<String, String> {
+        let mut labels = self.labels.clone();
+        if let Some(memory) = self.node.memory_mb {
+            labels.insert(NODE_MEMORY_LABEL.to_owned(), memory.to_string());
+        }
+        labels.insert(
+            NODE_INSTANCES_LABEL.to_owned(),
+            self.node.max_instances.to_string(),
+        );
+        labels.insert(
+            NODE_DISK_LABEL.to_owned(),
+            self.node.min_free_disk_mb.to_string(),
+        );
+        labels
+    }
 }
 
 #[derive(Deserialize)]
@@ -84,6 +151,8 @@ struct Raw {
     public_address: Option<String>,
     #[serde(default)]
     witness: bool,
+    #[serde(default)]
+    node: NodeSettings,
 }
 
 impl Settings {
@@ -178,6 +247,24 @@ impl Settings {
             if key.is_empty() || key.len() > 64 || value.len() > 256 {
                 return Err(format!("labels.{key}: keys 1..=64 bytes, values up to 256"));
             }
+            if key.starts_with(NODE_LABEL_PREFIX) {
+                return Err(format!(
+                    "labels.{key}: keys starting with {NODE_LABEL_PREFIX:?} are reserved; set node limits in [node]"
+                ));
+            }
+        }
+        let node = &raw.node;
+        if node
+            .memory_mb
+            .is_some_and(|memory| memory == 0 || memory > 16_777_216)
+        {
+            return Err("node.memory_mb: expected 1..=16777216".into());
+        }
+        if node.max_instances == 0 || node.max_instances > 4096 {
+            return Err("node.max_instances: expected 1..=4096".into());
+        }
+        if node.min_free_disk_mb > 16_777_216 {
+            return Err("node.min_free_disk_mb: expected 0..=16777216".into());
         }
         if let Some(address) = &raw.public_address {
             check_address(address, "public_address")?;
@@ -201,6 +288,7 @@ impl Settings {
             public_address: raw.public_address,
             witness: raw.witness,
             directory: directory.to_path_buf(),
+            node: raw.node,
         })
     }
 

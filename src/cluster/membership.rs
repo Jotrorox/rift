@@ -7,6 +7,7 @@
 //!
 //! ```text
 //! cluster                              status: members, roles, leader, term, indexes, lag
+//! cluster status --leader              the leader's status, which knows every peer's lag
 //! cluster add <name> <host:port> [--witness]   joins as a learner and catches up
 //! cluster promote <name>               a caught-up learner becomes a voter
 //! cluster demote <name> [--force]      a voter becomes a learner
@@ -27,7 +28,7 @@ use openraft::ChangeMembers;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
-pub const USAGE: &str = "usage: cluster [status] | cluster add <name> <host:port> [--witness] | cluster promote <name> | cluster demote <name> [--force] | cluster remove <name> [--force] | cluster replace <name> [--force] | cluster leave <name> | cluster transfer-leader [<name>] | cluster backup <file>";
+pub const USAGE: &str = "usage: cluster [status [--leader]] | cluster add <name> <host:port> [--witness] | cluster promote <name> | cluster demote <name> [--force] | cluster remove <name> [--force] | cluster replace <name> [--force] | cluster leave <name> | cluster transfer-leader [<name>] | cluster backup <file>";
 /// How far behind the leader a learner may be when it is promoted.
 const PROMOTE_LAG: u64 = 1000;
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -38,6 +39,8 @@ impl Cluster {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         match args.as_slice() {
             [] | ["status"] => Ok(self.status()),
+            // Replication lag is known on the leader only.
+            ["status", "--leader"] => self.on_leader(&["status"]).await,
             ["backup", file] => self.backup(Path::new(file)).await,
             [command, ..]
                 if matches!(
@@ -84,6 +87,9 @@ impl Cluster {
     pub(crate) async fn admin_here(&self, args: &[String]) -> Result<Value, String> {
         if !self.leadership().is_leader {
             return Err("this peer is no longer the leader; retry".into());
+        }
+        if args == ["status"] {
+            return Ok(self.status());
         }
         let _change = self
             .inner

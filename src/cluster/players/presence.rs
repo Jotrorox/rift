@@ -74,6 +74,10 @@ pub enum PresenceReply {
     Probe {
         applied: u64,
         lease: bool,
+        /// Whether the receiver admits logins now (not fenced, catching up
+        /// or draining). Peers of earlier releases leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admits: Option<bool>,
     },
     States(Vec<StateUpdate>),
 }
@@ -139,6 +143,7 @@ fn answer(shared: &Shared, body: &[u8]) -> Result<Bytes, String> {
         PresenceMessage::Probe => PresenceReply::Probe {
             applied: shared.cluster.state().applied_index(),
             lease: shared.cluster.is_leader_with_lease(),
+            admits: Some(shared.admits()),
         },
         PresenceMessage::States => PresenceReply::States(shared.states.full_copy()),
     };

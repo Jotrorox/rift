@@ -14,6 +14,9 @@
 //!   gated by [`Coordination::acting_term`].
 //! - [`follow`] keeps a follower's configuration and managed servers in
 //!   step with the registry the leader writes.
+//! - [`serve_requests`]: a follower hands moves, backups and restores and
+//!   cache warming to the leader ([`forward`], [`forward_move`]), which
+//!   runs them for the operator who asked and audits them under that name.
 //!
 //! A single Rift calls none of this.
 use crate::{
@@ -27,19 +30,14 @@ use rift::{
         node::LeaderContext,
         players::Presence,
     },
-    config::{MovedServer, ServiceInstance},
+    config::{MovedServer, NodeConfig, ServiceInstance},
     instance_login::Logins,
-    instance_store::Store,
+    instance_store::{Store, events::InstanceEvents},
     managed::Coordinator,
     routing::Backend,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, watch};
 
 /// How long a follower waits for the leader to create or remove an
@@ -52,6 +50,9 @@ pub enum Update {
     Instances(BTreeMap<String, ServiceInstance>),
     /// The moves of named servers.
     Moved(BTreeMap<String, MovedServer>),
+    /// The peer-nodes, as the peer table describes them
+    /// (`rift::cluster::peer_nodes`).
+    PeerNodes(BTreeMap<String, NodeConfig>),
 }
 
 /// What [`prepare`] set up, for [`attach`].
@@ -69,9 +70,32 @@ pub fn prepare(cluster: &Cluster, snapshot: &Snapshot, store: &Arc<Store>) -> io
     store.watch_instances(move |ready| {
         let _ = instances.send(Update::Instances(ready));
     });
+    let peer_nodes = sender.clone();
     store.watch_moved_servers(move |moved| {
         let _ = sender.send(Update::Moved(moved));
     });
+    // Peers that join, leave or change their labels change the nodes.
+    let mut registry = rift::cluster::peer_nodes::subscribe();
+    tokio::spawn(async move {
+        while registry.changed().await.is_ok() {
+            let nodes = registry.borrow_and_update().clone();
+            if let Some(nodes) = nodes
+                && peer_nodes.send(Update::PeerNodes(nodes)).is_err()
+            {
+                return;
+            }
+        }
+    });
+    // `rift.events.instances` is an applied event: every peer announces a
+    // change when it applies here, so the control loop announces none.
+    let nodes = snapshot.nodes.clone();
+    let events = InstanceEvents::new(snapshot.messaging.clone(), move |node: &str, port: u16| {
+        nodes
+            .config()
+            .get(node)
+            .map(|node| node.backend_address(port))
+    });
+    store.watch_events(Arc::new(events))?;
     Ok(Prepared {
         coordination,
         updates,
@@ -88,6 +112,8 @@ pub struct Peer {
     _queues: rift::cluster::queues::Attached,
     /// What the leader wrote that this peer follows ([`follow`]).
     pub updates: mpsc::UnboundedReceiver<Update>,
+    /// The node agent this peer runs in its own process ([`embed_agent`]).
+    agent: Option<EmbeddedAgent>,
 }
 
 /// Make this peer's players and bus part of `cluster`: presence with the
@@ -127,6 +153,8 @@ pub async fn attach(
     let bus = bus::attach(cluster, &snapshot.messaging, &parts.bus, options).await?;
     // Network-wide server queues, served by the leader (plan step 9).
     let queues = rift::cluster::queues::attach(cluster, snapshot.extensions.queue_host());
+    // This peer is a node too, served by an agent in this process.
+    let agent = embed_agent(cluster, snapshot)?;
     Ok(Peer {
         cluster: cluster.clone(),
         coordination: prepared.coordination,
@@ -134,30 +162,122 @@ pub async fn attach(
         bus: Some(bus),
         _queues: queues,
         updates: prepared.updates,
+        agent,
     })
 }
 
+/// The node agent a cluster peer runs in its own process, with its tasks.
+struct EmbeddedAgent {
+    agent: Arc<rift::node::agent::Agent>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// Run this peer's node (docs/clustering.md, "Servers on the peers' own
+/// hosts"): an agent named after the peer, whose servers live below the
+/// directory of `rift.lua`, where servers on the proxy's host lived before
+/// the cluster (so `rift cluster init`'s converted instances stay in
+/// place), reading templates from this peer's materialized template
+/// storage. It answers on this peer's broker; the cluster routes the
+/// leader's commands to it and its state to the leader. Witnesses run none.
+fn embed_agent(cluster: &Cluster, snapshot: &Snapshot) -> io::Result<Option<EmbeddedAgent>> {
+    let settings = cluster.settings();
+    if settings.witness {
+        return Ok(None);
+    }
+    // A `nodes.<peer>` entry means a `rift node` agent of its own serves
+    // this host under the peer's name; two agents must not answer.
+    if snapshot
+        .config
+        .nodes
+        .get(&settings.peer)
+        .is_some_and(|node| !node.peer)
+    {
+        log_info!(
+            "cluster: nodes.{} is configured, so its `rift node` agent serves this host instead of an embedded one",
+            settings.peer
+        );
+        return Ok(None);
+    }
+    let secret = snapshot
+        .forwarding_secret
+        .as_ref()
+        .and_then(|secret| String::from_utf8(secret.to_vec()).ok());
+    let options = rift::node::agent::Options::embedded(
+        &settings.peer,
+        settings.directory.clone(),
+        Some(snapshot.config.template_storage.clone()),
+        secret,
+    );
+    let agent = rift::node::agent::Agent::new(options)?;
+    let monitor = tokio::spawn(agent.clone().monitor());
+    let serving = {
+        let agent = agent.clone();
+        let broker = snapshot.messaging.clone();
+        let name = settings.peer.clone();
+        tokio::spawn(async move {
+            let error = agent.serve_broker(broker).await;
+            log_error!("cluster: the node agent of peer {name} stopped: {error}");
+        })
+    };
+    log_info!(
+        "cluster: peer {} is a node; its servers live below {}",
+        settings.peer,
+        settings.directory.display()
+    );
+    Ok(Some(EmbeddedAgent {
+        agent,
+        tasks: vec![monitor, serving],
+    }))
+}
+
 impl Peer {
-    /// Hand the leadership to another voter if this peer has it: the first
-    /// step of leaving (docs/clustering.md, "Rolling restarts"). New logins
-    /// already stopped with the listeners.
-    pub async fn hand_over(&self) {
-        if !self.cluster.leadership().is_leader {
-            return;
+    /// Let this peer's embedded agent start the servers whose definition in
+    /// the published configuration (`current`) has `keep_running` as kept
+    /// servers, which outlive this process.
+    pub fn follow_keep_running(&self, current: watch::Receiver<Arc<Snapshot>>) {
+        if let Some(embedded) = &self.agent {
+            embedded.agent.set_keep(Arc::new(move |name: &str| {
+                current
+                    .borrow()
+                    .config
+                    .managed_servers
+                    .get(name)
+                    .is_some_and(|server| server.keep_running)
+            }));
         }
-        match self.cluster.admin(&["transfer-leader".to_owned()]).await {
-            Ok(result) => log_info!("cluster: leaving: {result}"),
-            Err(error) => {
-                log_warn!("cluster: leaving without handing over the leadership: {error}")
+    }
+
+    /// The first steps of leaving (docs/clustering.md, "Rolling restarts"),
+    /// once new logins stopped with the listeners: hand the leadership to
+    /// another voter if this peer has it, then send the players to the
+    /// other peers (the Transfer packet for 1.20.5+ clients, a reconnect
+    /// message for the others).
+    pub async fn hand_over(&self) {
+        if self.cluster.leadership().is_leader {
+            match self.cluster.admin(&["transfer-leader".to_owned()]).await {
+                Ok(result) => log_info!("cluster: leaving: {result}"),
+                Err(error) => {
+                    log_warn!("cluster: leaving without handing over the leadership: {error}")
+                }
             }
         }
+        self.presence.hand_off().await;
     }
 
     /// Stop being a peer, once the sessions drained (their claims are
     /// released as they end): no more presence, bus federation, leader
     /// tasks or Raft.
     pub async fn shutdown(mut self) {
+        *PEER.write().unwrap_or_else(|e| e.into_inner()) = None;
         self.coordination.stop();
+        // The servers on this peer's host stop with it.
+        if let Some(embedded) = self.agent.take() {
+            for task in &embedded.tasks {
+                task.abort();
+            }
+            log_info!("cluster: stopping the servers on this peer's host");
+            embedded.agent.shutdown().await;
+        }
         self.presence.stop();
         if let Some(bus) = self.bus.take() {
             bus.shutdown();
@@ -235,53 +355,14 @@ async fn take_charge(current: &watch::Receiver<Arc<Snapshot>>) {
 /// again; one without fencing gets no control command and is reported once.
 async fn fence_and_reconcile(context: LeaderContext, current: watch::Receiver<Arc<Snapshot>>) {
     let nodes = current.borrow().nodes.clone();
-    let mut done: BTreeSet<String> = BTreeSet::new();
-    let mut reported: BTreeSet<String> = BTreeSet::new();
-    loop {
-        if context.has_lease() {
-            let snapshot = current.borrow().clone();
-            for node in snapshot.config.nodes.keys() {
-                if done.contains(node) || !nodes.online(node) {
-                    continue;
-                }
-                if let Err(error) = nodes.fence(node, context.term).await {
-                    if reported.insert(node.clone()) {
-                        log_warn!(
-                            "cluster: node {node} is not fenced for term {}: {error}",
-                            context.term
-                        );
-                    }
-                    continue;
-                }
-                reported.remove(node);
-                let command = rift::node::protocol::Command::Reconcile {
-                    servers: snapshot.managed.names_on(node),
-                };
-                match nodes
-                    .request(node, &command, Duration::from_secs(120))
-                    .await
-                {
-                    Ok(result) => {
-                        done.insert(node.clone());
-                        let changed = result["stopped"].as_array().is_some_and(|v| !v.is_empty())
-                            || result["removed"].as_array().is_some_and(|v| !v.is_empty());
-                        if changed {
-                            log_info!("node {node} reconciled: {result}");
-                        }
-                    }
-                    Err(error) => log_error!("node {node} reconciliation failed: {error}"),
-                }
-            }
-        }
-        tokio::select! {
-            reconnected = nodes.reconnected() => {
-                for node in reconnected {
-                    done.remove(&node);
-                }
-            }
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
-        }
-    }
+    let configured = current.clone();
+    leader::fence_and_reconcile(
+        context,
+        nodes,
+        move || configured.borrow().config.nodes.keys().cloned().collect(),
+        move |node| current.borrow().managed.names_on(node),
+    )
+    .await;
 }
 
 /// The permission expiry sweeper, on the leader only.
@@ -338,9 +419,11 @@ pub async fn forward_change(
         .leadership()
         .leader_name
         .unwrap_or_else(|| "the leader".to_owned());
+    // A move this peer prepared while it led; followers hand moves over
+    // whole (`forward_move`).
     let Some(request) = encode_instance(&operation) else {
         return Err(control::Error::conflict(format!(
-            "instance moves run on the cluster leader; run rift admin move on {leader}"
+            "this peer stopped leading the cluster during the move; run rift admin move again, and {leader} runs it"
         )));
     };
     match coordination.forward_instance(request, FORWARD_WAIT).await {
@@ -385,11 +468,27 @@ pub async fn follow(
     active: Arc<Snapshot>,
     instances: Option<BTreeMap<String, ServiceInstance>>,
     moved: Option<BTreeMap<String, MovedServer>>,
+    peer_nodes: Option<BTreeMap<String, NodeConfig>>,
 ) -> InstanceResult {
     let mut config = active.config.clone();
     let mut retired: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
     let mut relocated: Vec<String> = Vec::new();
+    // First the nodes, which registrations on a new peer's node need.
+    let mut renodes = false;
+    if let Some(peers) = &peer_nodes {
+        let mut nodes: BTreeMap<String, NodeConfig> = config
+            .nodes
+            .iter()
+            .filter(|(_, node)| !node.peer)
+            .map(|(name, node)| (name.clone(), node.clone()))
+            .collect();
+        rift::cluster::peer_nodes::add(&mut nodes, peers);
+        if nodes != config.nodes {
+            config.nodes = nodes;
+            renodes = true;
+        }
+    }
     if let Some(ready) = &instances {
         for (name, instance) in &active.config.instances {
             if ready.get(name) != Some(instance) {
@@ -436,10 +535,14 @@ pub async fn follow(
             }
         }
     }
-    if retired.is_empty() && added.is_empty() && relocated.is_empty() {
+    if retired.is_empty() && added.is_empty() && relocated.is_empty() && !renodes {
         return Ok((active, json!({ "synced": true, "unchanged": true })));
     }
     let next = instance_snapshot(config, &active)?;
+    if renodes {
+        let logins = rift::node::identities(&next.config.nodes)?;
+        next.nodes.reconfigure(&next.config.nodes, logins)?;
+    }
     for name in &retired {
         if let Err(error) = next.managed.remove(name).await {
             log_warn!("cluster: {name} was removed by the leader; its worker here: {error}");
@@ -471,6 +574,225 @@ pub async fn follow(
             "removed": retired,
             "added": added,
             "moved": relocated,
+            "nodes": renodes,
         }),
     ))
+}
+
+/// The kinds of the leader-only requests a follower hands the leader
+/// ([`leader::ForwardedRequest`]). `move`: `{server, node, copy,
+/// keep_source}`, as `rift admin move` takes them.
+pub const MOVE: &str = "move";
+/// `{server}`: the leader's `moving::describe` of a move, or `null`.
+pub const MOVE_STATUS: &str = "move_status";
+/// `{server}`: `rift admin move <server> --cancel`.
+pub const MOVE_CANCEL: &str = "move_cancel";
+/// `{instance}`: `rift admin backup`.
+pub const BACKUP: &str = "backup";
+/// `{instance, snapshot}`: `rift admin backups forget`, `snapshot` an id or
+/// `all`.
+pub const FORGET_BACKUPS: &str = "backups_forget";
+/// `{instance, snapshot, node}`: `rift admin restore`; `snapshot` and
+/// `node` are `null` for the newest snapshot and the instance's own node.
+pub const RESTORE: &str = "restore";
+/// `{template}`: `rift admin warm`; `template` is `null` for all of them.
+pub const WARM: &str = "warm";
+
+/// How long a follower waits for a cancel or a progress report.
+pub const SHORT_WAIT: Duration = Duration::from_secs(10);
+/// How often a follower asks the leader how a move it handed over is going.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// This process's coordination while it is a cluster peer, for the
+/// requests it hands the leader ([`follower`]).
+static PEER: std::sync::RwLock<Option<Coordination>> = std::sync::RwLock::new(None);
+
+/// Run the leader-only requests followers hand this peer while it leads
+/// (moves, backups and restores, cache warming), and hand the leader the
+/// ones made here while this peer follows ([`follower`]). `commands` is the
+/// administration queue of the control loop, which commits moves.
+pub fn serve_requests(
+    peer: &Peer,
+    current: watch::Receiver<Arc<Snapshot>>,
+    commands: mpsc::Sender<crate::admin::Command>,
+    audit: Arc<crate::operator::Store>,
+) {
+    peer.coordination
+        .set_request_handler(Arc::new(move |request: leader::ForwardedRequest| {
+            let snapshot = current.borrow().clone();
+            let commands = commands.clone();
+            let audit = audit.clone();
+            let answer: rift::managed::CoordinatorFuture<Result<Value, String>> =
+                Box::pin(run_forwarded(snapshot, commands, audit, request));
+            answer
+        }));
+    *PEER.write().unwrap_or_else(|e| e.into_inner()) = Some(peer.coordination.clone());
+}
+
+/// This peer's coordination while it follows: leader-only requests made
+/// here go to the leader through it. `None` on a single Rift and on the
+/// leader, which run them themselves.
+pub fn follower() -> Option<Coordination> {
+    let peer = PEER.read().unwrap_or_else(|e| e.into_inner()).clone();
+    peer.filter(|peer| peer.acting_term().is_none())
+}
+
+/// On a follower: have the leader run the request `kind` with `body` for
+/// `actor`, the operator this peer authenticated, waiting at most `wait`.
+pub async fn forward(
+    coordination: &Coordination,
+    kind: &str,
+    actor: &str,
+    body: Value,
+    wait: Duration,
+) -> Result<Value, String> {
+    let request = leader::ForwardedRequest {
+        kind: kind.to_owned(),
+        actor: actor.to_owned(),
+        body,
+    };
+    coordination
+        .forward_request(request, wait)
+        .await
+        .map_err(|error| match coordination.leader_name() {
+            Ok(leader) => format!("the cluster leader {leader} did not run it: {error}"),
+            Err(_) => error.to_string(),
+        })
+}
+
+/// The body of a [`MOVE`] request.
+pub fn move_body(request: &crate::moving::Request) -> Value {
+    json!({
+        "server": request.instance,
+        "node": request.node,
+        "copy": request.copy,
+        "keep_source": request.keep_source,
+    })
+}
+
+/// On a follower: have the leader run a move for `actor`. While it runs,
+/// this peer asks the leader for its progress every second and shows it
+/// under `move` like a move of its own (`moving::describe`); cancel it with
+/// [`MOVE_CANCEL`] from any peer.
+pub async fn forward_move(
+    coordination: Coordination,
+    actor: String,
+    request: crate::moving::Request,
+) -> Result<Value, String> {
+    let shown = crate::moving::Forwarded::new(&request.instance);
+    let status = json!({ "server": request.instance });
+    let body = move_body(&request);
+    let work = forward(&coordination, MOVE, &actor, body, crate::moving::DEADLINE);
+    let mut work = std::pin::pin!(work);
+    let mut tick = tokio::time::interval(PROGRESS_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut work => return result,
+            _ = tick.tick() => {
+                let asked = leader::ForwardedRequest {
+                    kind: MOVE_STATUS.to_owned(),
+                    actor: actor.clone(),
+                    body: status.clone(),
+                };
+                match coordination.forward_request(asked, SHORT_WAIT).await {
+                    Ok(report) => shown.report(report),
+                    Err(error) => log_debug!(
+                        "cluster: no progress report of the move of {} from the leader: {error}",
+                        request.instance
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// On the leader: run a request a follower handed it, in the leader's term,
+/// and record it in the audit trail under the operator who made it.
+async fn run_forwarded(
+    snapshot: Arc<Snapshot>,
+    commands: mpsc::Sender<crate::admin::Command>,
+    audit: Arc<crate::operator::Store>,
+    request: leader::ForwardedRequest,
+) -> Result<Value, String> {
+    let leader::ForwardedRequest { kind, actor, body } = request;
+    let text = |key: &str| field(&kind, &body, key);
+    let optional = |key: &str| body[key].as_str().map(str::to_owned);
+    let (target, result) = match kind.as_str() {
+        MOVE_STATUS => {
+            let report = crate::moving::describe(&text("server")?);
+            return Ok(report.unwrap_or(Value::Null));
+        }
+        MOVE => {
+            let request = crate::moving::Request {
+                instance: text("server")?,
+                node: text("node")?,
+                copy: body["copy"].as_bool().unwrap_or(true),
+                keep_source: body["keep_source"].as_bool().unwrap_or(false),
+            };
+            let target = request.instance.clone();
+            let committer = crate::moving::Committer::Admin(&commands);
+            let result = crate::moving::run(snapshot, committer, request).await;
+            (target, result)
+        }
+        MOVE_CANCEL => {
+            let server = text("server")?;
+            let result = crate::moving::cancel(&server);
+            (server, result)
+        }
+        BACKUP => {
+            let instance = text("instance")?;
+            let result = crate::backups::backup_now(snapshot, &instance).await;
+            (instance, result)
+        }
+        FORGET_BACKUPS => {
+            let instance = text("instance")?;
+            let which = text("snapshot")?;
+            let result = crate::backups::forget(snapshot, &instance, &which).await;
+            (instance, result)
+        }
+        RESTORE => {
+            let request = crate::backups::Restore {
+                instance: text("instance")?,
+                snapshot: optional("snapshot"),
+                node: optional("node"),
+            };
+            let target = request.instance.clone();
+            let result = crate::backups::restore(snapshot, &commands, request).await;
+            (target, result)
+        }
+        WARM => {
+            let template = optional("template");
+            let result = crate::admin::warm_templates(&snapshot, template.as_deref()).await;
+            (template.unwrap_or_default(), result)
+        }
+        other => {
+            return Err(format!(
+                "this leader does not know the request {other:?}; run the same rift version on every peer"
+            ));
+        }
+    };
+    let (outcome, status) = if result.is_ok() {
+        ("ok", 200)
+    } else {
+        ("rejected", 400)
+    };
+    let action = format!("forwarded.{kind}");
+    if let Err(error) = audit
+        .audit_async(&actor, &action, &target, outcome, status)
+        .await
+    {
+        log_error!(
+            "audit of {kind} {target} for {actor}, handed over by a follower, failed: {error}"
+        );
+    }
+    result
+}
+
+/// The text field `key` of the body of a forwarded `kind` request.
+fn field(kind: &str, body: &Value, key: &str) -> Result<String, String> {
+    match body[key].as_str() {
+        Some(value) => Ok(value.to_owned()),
+        None => Err(format!("{kind} without {key}; upgrade rift on every peer")),
+    }
 }

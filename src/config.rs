@@ -22,8 +22,8 @@ pub use managed::{
 };
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{
-    LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement, default_token_env,
-    valid_node_directory,
+    DEFAULT_MIN_FREE_DISK_MB, LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement,
+    default_token_env, valid_node_directory,
 };
 pub use permissions::PermissionsConfig;
 pub use services::{
@@ -661,7 +661,7 @@ impl Config {
                 ));
             }
         }
-        for (name, node) in &self.nodes {
+        for (name, node) in self.nodes.iter().filter(|(_, node)| !node.peer) {
             variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
         }
         if let Some(Backups {
@@ -970,7 +970,9 @@ impl Config {
             let templates = templates::parse(&root, directory, &software_cache)?;
             let template_sources = templates::parse_sources(&root)?;
             let service_groups = services::parse(&lua, &root, directory)?;
-            let nodes = nodes::parse(&root)?;
+            let mut nodes = nodes::parse(&root)?;
+            // On a cluster peer, every peer is a node too.
+            crate::cluster::peer_nodes::add_to(&mut nodes);
             let backups = backups::parse(&root, directory, &service_groups)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
@@ -1489,8 +1491,10 @@ impl Config {
                 .values()
                 .chain(self.service_groups.values().map(|group| &group.server))
                 .any(|server| server.messaging.is_some());
+            // A peer's own node logs in to nothing.
+            let agents = self.nodes.values().any(|node| !node.peer);
             messaging
-                .validate_with_nodes(!self.nodes.is_empty() || logins)
+                .validate_with_nodes(agents || logins)
                 .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {

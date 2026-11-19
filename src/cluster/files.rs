@@ -1411,6 +1411,21 @@ pub fn prepare() -> Arc<FilesState> {
     state
 }
 
+/// `rift witness`, once its peer started with the [`prepare`]d components:
+/// attach the state without a configuration, so the witness serves, stores
+/// and fetches template blobs (it counts toward the voters a manifest needs)
+/// and records deployments without applying them. Keeps the tasks for the
+/// life of the process.
+pub async fn attach_witness(cluster: &Cluster) -> io::Result<()> {
+    let state = lock(&PREPARED)
+        .take()
+        .ok_or_else(|| super::invalid("cluster files: start the peer with cluster_components"))?;
+    let attached = attach(cluster, &state, AttachOptions::default()).await?;
+    *lock(&ATTACHED) = Some(attached);
+    install_global(state);
+    Ok(())
+}
+
 /// After the peer started with the [`prepare`]d components: decision 6 for
 /// `rift.lua` ([`startup`]; `rift.lua` beside `cluster.toml` when `path` is
 /// `None`), then [`attach`] and [`install_global`]. Returns the

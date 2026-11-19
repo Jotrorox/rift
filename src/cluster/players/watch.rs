@@ -89,8 +89,12 @@ pub struct Shared {
     outboxes: Mutex<BTreeMap<String, mpsc::UnboundedSender<presence::Outbound>>>,
     contact: Mutex<Contact>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Set by [`Shared::stop`]: tasks added later are aborted at once.
+    stopped: AtomicBool,
     /// Why logins are refused right now; `None` while they are admitted.
     held_back: Mutex<Option<String>>,
+    /// This peer is leaving: its probes tell other peers it admits nobody.
+    draining: AtomicBool,
 }
 
 impl Shared {
@@ -119,8 +123,22 @@ impl Shared {
                 observed: VecDeque::new(),
             }),
             tasks: Mutex::default(),
+            stopped: AtomicBool::new(false),
             held_back: Mutex::default(),
+            draining: AtomicBool::new(false),
         }
+    }
+
+    /// Mark this peer as leaving (docs/clustering.md, "Rolling restarts").
+    pub(super) fn start_draining(&self) {
+        self.draining.store(true, Ordering::Release);
+    }
+
+    /// Whether this peer would admit a login now: what its probe answers,
+    /// so that a peer that drains sends its players only to peers that take
+    /// them.
+    pub(super) fn admits(&self) -> bool {
+        !self.draining.load(Ordering::Acquire) && self.held_back().is_none()
     }
 
     /// Refuse logins with `admission` (never [`Admission::Open`]) because
@@ -239,6 +257,15 @@ impl Shared {
 
     pub(super) fn add_tasks(&self, added: Vec<JoinHandle<()>>) {
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        // Checked under the lock `stop` takes the tasks with: a task an
+        // aborted one spawned on its way out never outlives the stop (and
+        // never keeps the cluster, and with it the database, open).
+        if self.stopped.load(Ordering::Acquire) {
+            for task in added {
+                task.abort();
+            }
+            return;
+        }
         tasks.retain(|task| !task.is_finished());
         tasks.extend(added);
     }
@@ -248,8 +275,11 @@ impl Shared {
         self.registry.set_sink(None);
         self.states.set_sync(None);
         self.lock_outboxes().clear();
-        let tasks: Vec<JoinHandle<()>> =
-            std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        let tasks: Vec<JoinHandle<()>> = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            self.stopped.store(true, Ordering::Release);
+            std::mem::take(&mut *tasks)
+        };
         for task in tasks {
             task.abort();
         }
@@ -370,7 +400,7 @@ impl Shared {
             incarnation: self.cluster.incarnation(),
             address: settings.advertise.clone(),
             public_address: settings.public_address.clone(),
-            labels: settings.labels.clone(),
+            labels: settings.announced_labels(),
             witness: settings.witness,
             version: VERSION.to_owned(),
             kinds: self.cluster.links().identity().kinds.clone(),
@@ -433,6 +463,7 @@ pub async fn probe(shared: Arc<Shared>) {
             Ok(presence::PresenceReply::Probe {
                 applied,
                 lease: true,
+                ..
             }) => shared.contacted(Some(applied)),
             Ok(_) => {}
             Err(error) => log_debug!("cluster: probing the leader {leader}: {error}"),

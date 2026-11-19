@@ -7,7 +7,7 @@
 //! incarnation of it (or to a connection id it did not mint) as stale.
 //! Broadcasts go to every other peer that is up and not expired.
 use crate::{
-    cluster::{Cluster, StreamKind, link::remote_error},
+    cluster::{Cluster, StreamKind, link::remote_error, node},
     extensions::{
         Players,
         routing::{PlayerRouter, RouteError, RouteFuture, WireRequest, WireResult},
@@ -15,20 +15,35 @@ use crate::{
     players::identity::MAX_PEER,
 };
 use bytes::Bytes;
-use std::{io, time::Duration};
+use std::{
+    io,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 /// How long a routed request waits for the other peer's answer. A transfer
 /// answers once the player switched or failed to, which can take a while.
 pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Delivers requests for other peers' players on the `player` stream.
+///
+/// It holds its cluster weakly: the [`Players`] it is installed in outlive
+/// the cluster (and the `player` stream's handler holds those players), so
+/// a strong handle would keep a stopped peer, its replica and its instance
+/// database open. Once the cluster is gone every peer is unreachable.
 pub struct LinkRouter {
-    cluster: Cluster,
+    cluster: Weak<node::Inner>,
 }
 
 impl LinkRouter {
     pub fn new(cluster: Cluster) -> Self {
-        Self { cluster }
+        Self {
+            cluster: Arc::downgrade(&cluster.inner),
+        }
+    }
+
+    fn cluster(&self) -> Option<Cluster> {
+        self.cluster.upgrade().map(|inner| Cluster { inner })
     }
 }
 
@@ -54,8 +69,11 @@ impl PlayerRouter for LinkRouter {
         peer: u16,
         request: WireRequest,
     ) -> RouteFuture<Result<WireResult, RouteError>> {
-        let cluster = self.cluster.clone();
+        let cluster = self.cluster();
         Box::pin(async move {
+            let Some(cluster) = cluster else {
+                return Err(RouteError::Unreachable(peer));
+            };
             let Some(name) = cluster.peer_name(u64::from(peer)) else {
                 return Err(RouteError::Unreachable(peer));
             };
@@ -83,8 +101,11 @@ impl PlayerRouter for LinkRouter {
     }
 
     fn peers(&self) -> Vec<u16> {
-        let me = self.cluster.raft_id();
-        self.cluster
+        let Some(cluster) = self.cluster() else {
+            return Vec::new();
+        };
+        let me = cluster.raft_id();
+        cluster
             .peers()
             .unwrap_or_default()
             .into_iter()

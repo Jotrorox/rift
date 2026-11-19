@@ -337,13 +337,25 @@ impl Nodes {
     }
 
     pub fn reachability(&self, node: &str) -> Reachability {
+        // Before taking `observed`: `describe` locks the two the other way.
+        let expired = self.expired_peer(node);
         match lock(&self.0.observed).get(node) {
             None => Reachability::NeverConnected,
+            // A cluster peer's node is unreachable while its peer is expired.
+            Some(_) if expired => Reachability::Unreachable,
             Some(observed) if observed.seen.elapsed() <= self.0.unreachable_after => {
                 Reachability::Online
             }
             Some(_) => Reachability::Unreachable,
         }
+    }
+
+    /// Whether `node` is a cluster peer's own node and that peer is expired.
+    fn expired_peer(&self, node: &str) -> bool {
+        read(&self.0.config)
+            .get(node)
+            .is_some_and(|definition| definition.peer)
+            && crate::cluster::peer_nodes::is_expired(node)
     }
 
     pub fn online(&self, node: &str) -> bool {
@@ -541,6 +553,8 @@ impl Nodes {
                         "name": name,
                         "address": node.address,
                         "labels": node.labels,
+                        // A cluster peer's own node, run by its embedded agent.
+                        "peer": node.peer,
                         "state": reachability.as_str(),
                         "memory_mb": node.memory_mb,
                         "allocated_memory_mb": memory,
@@ -569,10 +583,12 @@ impl Nodes {
 }
 
 /// The bus login of every node in `nodes`: principal `node.<name>`, the
-/// token from its `token_env`, and the grants of an agent.
+/// token from its `token_env`, and the grants of an agent. A cluster peer's
+/// own node has none: its agent runs in the peer's process.
 pub fn identities(nodes: &BTreeMap<String, NodeConfig>) -> io::Result<Vec<quic::Identity>> {
     nodes
         .iter()
+        .filter(|(_, node)| !node.peer)
         .map(|(name, node)| {
             let (publish, subscribe) = protocol::principal_grants(name);
             Ok(quic::Identity {
@@ -811,6 +827,7 @@ rift.config.nodes.node1={address='10.0.0.11'}",
                 min_free_disk_mb: 0,
                 labels: BTreeSet::new(),
                 token_env: "RIFT_NODE_NODE2_TOKEN".into(),
+                peer: false,
             },
         );
         let login = |name: &str, token: &str| quic::Identity {

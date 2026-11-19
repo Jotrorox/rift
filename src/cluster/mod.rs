@@ -52,6 +52,7 @@ pub mod membership;
 pub mod network;
 pub mod node;
 pub mod operations;
+pub mod peer_nodes;
 pub mod players;
 pub mod queues;
 pub mod quic;

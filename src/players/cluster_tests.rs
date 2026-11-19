@@ -76,13 +76,25 @@ async fn login(
     name: &str,
     server: &str,
 ) -> io::Result<Session> {
+    login_with(players, counter, uuid, name, server, PROTOCOL).await
+}
+
+/// [`login`] with a client on `protocol`.
+async fn login_with(
+    players: &Players,
+    counter: u64,
+    uuid: u8,
+    name: &str,
+    server: &str,
+    protocol: i32,
+) -> io::Result<Session> {
     let roster = players.roster().clone();
     let connection = roster.identity().connection_id(counter);
     let reservation = roster.claim_name(name, connection).await?;
     let registration = reservation
         .claim_player([uuid; 16], server, None, false)
         .await?;
-    let (handle, actions) = players.register(connection, &[uuid; 16], name, PROTOCOL, server);
+    let (handle, actions) = players.register(connection, &[uuid; 16], name, protocol, server);
     Ok(Session {
         connection,
         _registration: registration,
@@ -580,6 +592,61 @@ async fn a_fenced_peer_refuses_logins_and_disconnects_after_the_grace() {
     let message = catalog::notice(Notice::ClusterPartition);
     assert_eq!(a.disconnect_all(message.clone()).await, 1);
     assert_eq!(next(&mut alice).await, PlayerAction::Kick(message));
+}
+
+#[tokio::test]
+async fn a_draining_peer_spreads_transferable_players_and_disconnects_the_others() {
+    use crate::extensions::HandOff;
+    let cluster = MemoryCluster::new();
+    let a = peer(&cluster, 1, 1);
+    let mut alice = login(&a, 1, 1, "Alice", "lobby").await.unwrap();
+    let mut bob = login(&a, 2, 2, "Bob", "lobby").await.unwrap();
+    // 1.8 knows no Transfer packet.
+    let mut carol = login_with(&a, 3, 3, "Carol", "lobby", 47).await.unwrap();
+    assert_eq!(a.local_sessions(), 3);
+    let message = catalog::notice(Notice::ClusterLeaving);
+    let targets = vec![
+        ("10.0.0.2".to_owned(), 25565),
+        ("10.0.0.3".to_owned(), 25566),
+    ];
+    let done = a.hand_off(&targets, message.clone()).await;
+    assert_eq!(
+        done,
+        HandOff {
+            transferred: 2,
+            disconnected: 1
+        }
+    );
+    // One target each, in turn.
+    assert_eq!(
+        next(&mut alice).await,
+        PlayerAction::Handoff {
+            host: "10.0.0.2".into(),
+            port: 25565,
+            fallback: message.clone(),
+        }
+    );
+    assert_eq!(
+        next(&mut bob).await,
+        PlayerAction::Handoff {
+            host: "10.0.0.3".into(),
+            port: 25566,
+            fallback: message.clone(),
+        }
+    );
+    assert_eq!(next(&mut carol).await, PlayerAction::Kick(message.clone()));
+    // Without a peer to go to, everyone is asked to reconnect.
+    let done = a.hand_off(&[], message.clone()).await;
+    assert_eq!(
+        done,
+        HandOff {
+            transferred: 0,
+            disconnected: 3
+        }
+    );
+    for session in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(next(session).await, PlayerAction::Kick(message.clone()));
+    }
 }
 
 /// Peer 2 of a cluster held Alice and Dave, was cut off and expired, and

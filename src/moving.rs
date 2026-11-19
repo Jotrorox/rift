@@ -210,11 +210,53 @@ impl Drop for Registration {
     }
 }
 
+/// Moves this cluster peer handed to the leader, with the leader's latest
+/// report of each, which [`describe`] shows like a move of this process.
+static FORWARDED: LazyLock<Mutex<BTreeMap<String, Value>>> = LazyLock::new(Mutex::default);
+
+fn forwarded() -> std::sync::MutexGuard<'static, BTreeMap<String, Value>> {
+    FORWARDED.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// A move of `instance` this cluster peer handed to the leader: shows the
+/// leader's reports of it in [`describe`] until dropped.
+pub(crate) struct Forwarded {
+    instance: String,
+}
+
+impl Forwarded {
+    pub(crate) fn new(instance: &str) -> Self {
+        Self {
+            instance: instance.to_owned(),
+        }
+    }
+
+    /// The leader's latest [`describe`] of the move; `null` while it does
+    /// not run it (yet, or any more).
+    pub(crate) fn report(&self, report: Value) {
+        if report.is_null() {
+            forwarded().remove(&self.instance);
+        } else {
+            forwarded().insert(self.instance.clone(), report);
+        }
+    }
+}
+
+impl Drop for Forwarded {
+    fn drop(&mut self) {
+        forwarded().remove(&self.instance);
+    }
+}
+
 /// The running move of `instance`, if any: its nodes, phase and, while it
 /// copies, how far the copy got. `total_*` are `null` when the old node's
-/// agent does not report the size of the folder.
+/// agent does not report the size of the folder. On a cluster follower, a
+/// move it handed to the leader shows the leader's latest report.
 pub(crate) fn describe(instance: &str) -> Option<Value> {
-    let running = running().get(instance)?.clone();
+    let local = running().get(instance).cloned();
+    let Some(running) = local else {
+        return forwarded().get(instance).cloned();
+    };
     let (phase, cancelling) = *running.state();
     let copied = running.copied();
     Some(json!({
@@ -733,6 +775,15 @@ mod tests {
         drop(registration);
         assert!(describe("moving-test-1").is_none());
         assert!(cancel("moving-test-1").unwrap_err().contains("not moving"));
+        // A move handed to the cluster leader shows the leader's report.
+        let shown = Forwarded::new("moving-test-1");
+        shown.report(json!({"to": "node4", "phase": "copying"}));
+        assert_eq!(describe("moving-test-1").unwrap()["to"], "node4");
+        shown.report(Value::Null);
+        assert!(describe("moving-test-1").is_none());
+        shown.report(json!({"to": "node4", "phase": "committing"}));
+        drop(shown);
+        assert!(describe("moving-test-1").is_none());
         // Once committing, it is too late.
         let registration = Registration::new("moving-test-2", "node1", "node2", false).unwrap();
         assert!(registration.running.enter(Phase::Committing));

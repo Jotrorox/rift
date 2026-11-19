@@ -41,16 +41,20 @@ pub mod watch;
 #[cfg(test)]
 mod tests;
 
-use super::{Cluster, Component};
+use super::{Cluster, Component, Role, settings::host_of};
 use crate::{
-    config::ClusterConfig, extensions::Players, players::PlayerRegistry,
+    config::ClusterConfig,
+    extensions::{HandOff, Players},
+    players::PlayerRegistry,
     service_state::ServiceStates,
+    text::catalog::{self, Notice},
 };
 use claims::{ClaimComponent, ClaimShared, RaftClaims};
 use std::{
     collections::BTreeMap,
     io,
     sync::{Arc, Mutex, PoisonError, Weak},
+    time::Duration,
 };
 use tokio::{task::JoinHandle, time::Instant};
 
@@ -116,7 +120,115 @@ impl Presence {
     pub fn stop(&self) {
         self.shared.stop();
     }
+
+    /// Hand this peer's players to the other peers as it leaves
+    /// (docs/clustering.md, "Rolling restarts"): from now on its probes say
+    /// it admits nobody; 1.20.5+ clients get the Transfer packet to the
+    /// public address of a peer that takes players
+    /// ([`Presence::transfer_targets`]), spread over those peers in turn,
+    /// and every other player is disconnected with `cluster.leaving`.
+    pub async fn hand_off(&self) -> HandOff {
+        self.shared.start_draining();
+        let players = &self.shared.players;
+        if players.local_sessions() == 0 {
+            return HandOff::default();
+        }
+        let targets: Vec<(String, u16)> = self
+            .transfer_targets()
+            .await
+            .iter()
+            .filter_map(|address| {
+                let (_, port) = address.rsplit_once(':')?;
+                Some((host_of(address).to_owned(), port.parse().ok()?))
+            })
+            .collect();
+        let done = players
+            .hand_off(&targets, catalog::notice(Notice::ClusterLeaving))
+            .await;
+        log_info!(
+            "cluster: leaving: transferred {} players to other peers and disconnected {}",
+            done.transferred,
+            done.disconnected
+        );
+        done
+    }
+
+    /// The public addresses (`public_address` in `cluster.toml`) of the
+    /// other peers that take players now: up, not expired, a voter or a
+    /// learner, and admitting logins by their answer to a probe. A peer of
+    /// an earlier release, whose answer does not say, counts while this
+    /// peer heard from it within half of `cluster.peer_timeout`. Waits up
+    /// to five seconds for one while some peer has a public address.
+    pub async fn transfer_targets(&self) -> Vec<String> {
+        let deadline = Instant::now() + HANDOFF_WAIT;
+        loop {
+            let (candidates, found) = self.probe_targets().await;
+            if !found.is_empty() || candidates == 0 || Instant::now() >= deadline {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// The peers with a public address that may take players, and those of
+    /// them that answered that they admit logins, by name.
+    async fn probe_targets(&self) -> (usize, Vec<String>) {
+        let peers = match self.shared.cluster.peers() {
+            Ok(peers) => peers,
+            Err(error) => {
+                log_warn!("cluster: leaving: peer table: {error}");
+                return (0, Vec::new());
+            }
+        };
+        let half = self.shared.cluster.shared().peer_timeout / 2;
+        let fresh = u64::try_from(half.as_millis()).unwrap_or(u64::MAX);
+        let mut probes = tokio::task::JoinSet::new();
+        let mut candidates = 0;
+        for peer in peers {
+            if peer.this_peer
+                || !peer.up
+                || peer.expired
+                || !matches!(peer.role, Role::Voter | Role::Learner)
+            {
+                continue;
+            }
+            let Some(address) = peer.public_address else {
+                continue;
+            };
+            candidates += 1;
+            let recent = peer.last_heard_ms.is_some_and(|heard| heard <= fresh);
+            let name = peer.name;
+            let shared = self.shared.clone();
+            probes.spawn(async move {
+                let message = presence::PresenceMessage::Probe;
+                let admits = match presence::request(&shared, &name, &message, HANDOFF_PROBE).await
+                {
+                    Ok(presence::PresenceReply::Probe {
+                        admits: Some(admits),
+                        ..
+                    }) => admits,
+                    Ok(presence::PresenceReply::Probe { admits: None, .. }) => recent,
+                    _ => false,
+                };
+                admits.then_some((name, address))
+            });
+        }
+        let mut found = Vec::new();
+        while let Some(answer) = probes.join_next().await {
+            if let Ok(Some(target)) = answer {
+                found.push(target);
+            }
+        }
+        found.sort();
+        let addresses = found.into_iter().map(|(_, address)| address).collect();
+        (candidates, addresses)
+    }
 }
+
+/// How long a peer that leaves waits for another peer to take its players.
+const HANDOFF_WAIT: Duration = Duration::from_secs(5);
+/// How long it waits for each peer's answer to its probe.
+const HANDOFF_PROBE: Duration = Duration::from_secs(1);
 
 /// Make `players` (whose roster is `registry`, the one passed to
 /// [`components`]) one peer of `cluster`:

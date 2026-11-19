@@ -28,7 +28,7 @@ pub(crate) mod players;
 pub mod queue;
 mod scheduler;
 pub(crate) mod storage;
-pub use players::{PlayerAction, PlayerHandle, Players, Profile, routing};
+pub use players::{HandOff, PlayerAction, PlayerHandle, Players, Profile, routing};
 pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[

@@ -43,6 +43,55 @@ pub(crate) fn kept_running(directory: &Path) -> bool {
     kept::recorded(directory).is_some()
 }
 
+/// The pid of the server Rift started with `keep_running` in `directory`,
+/// if that process still runs there.
+pub(crate) fn kept_pid(directory: &Path) -> Option<u32> {
+    kept::recorded(directory).map(|process| process.pid())
+}
+
+/// Start `command` in `directory` as a server with `keep_running` (see
+/// [`kept`]): it outlives this process, reads its console from a FIFO in
+/// its directory and is recorded there, so a later process adopts it. The
+/// launch is otherwise [`spawn_process`]'s. Used by a cluster peer's
+/// embedded node agent; local servers start through their worker.
+pub(crate) fn spawn_kept(
+    command: &[String],
+    directory: &Path,
+    environment: &crate::config::ProcessEnvironment,
+    isolation: &crate::config::Isolation,
+    memory_limit: Option<(&str, crate::config::MemoryLimit)>,
+) -> io::Result<tokio::process::Child> {
+    if !kept::SUPPORTED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "keep_running requires Linux or macOS",
+        ));
+    }
+    let console = kept::console(directory)?;
+    let mut child = backend::spawn_with(
+        command,
+        directory,
+        environment,
+        isolation,
+        memory_limit,
+        Some(console),
+    )?;
+    // Without its record the next process could not adopt it.
+    if let Some(pid) = child.id()
+        && let Err(error) = kept::record(directory, pid)
+    {
+        let _ = child.start_kill();
+        kept::forget(directory);
+        return Err(error);
+    }
+    Ok(child)
+}
+
+/// Send `line` to the console of the kept server in `directory`.
+pub(crate) fn write_kept_console(directory: &Path, line: &str) -> io::Result<()> {
+    kept::write_console(directory, line)
+}
+
 /// Stop such a server outside a supervisor: `stop` on its console, then a
 /// kill after `grace`. Does nothing without a recorded running process.
 pub(crate) fn stop_kept(directory: &Path, grace: Duration) -> io::Result<()> {

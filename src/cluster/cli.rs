@@ -147,10 +147,17 @@ async fn init(flags: Flags) -> io::Result<()> {
                         database_path.display()
                     );
                 }
-                // Servers on this host become servers on this peer's node.
+                // Servers on this host become servers on this peer's node,
+                // which its embedded agent serves (unless `nodes.<peer>`
+                // names a `rift node` agent of its own).
+                let mut config = config.clone();
+                super::peer_nodes::add(
+                    &mut config.nodes,
+                    &BTreeMap::from([(settings.peer.clone(), super::peer_nodes::own(&settings))]),
+                );
                 let store = crate::instance_store::Store::new(Arc::new(database))?;
-                for converted in store.convert_local_instances(config, &settings.peer)? {
-                    print_converted(&settings.peer, &converted);
+                for converted in store.convert_local_instances(&config, &settings.peer)? {
+                    print_converted(&settings, &config, &converted);
                 }
             }
         }
@@ -316,8 +323,13 @@ async fn compact_first_log(cluster: &Cluster) -> io::Result<()> {
     Ok(())
 }
 
-/// Say where an instance that moved to `peer`'s node keeps its files.
-fn print_converted(peer: &str, converted: &crate::instance_store::ConvertedInstance) {
+/// Say where an instance that moved to the peer's node keeps its files.
+fn print_converted(
+    settings: &Settings,
+    config: &Config,
+    converted: &crate::instance_store::ConvertedInstance,
+) {
+    let peer = &settings.peer;
     let root = converted
         .from
         .to_str()
@@ -325,18 +337,43 @@ fn print_converted(peer: &str, converted: &crate::instance_store::ConvertedInsta
         .and_then(|(from, to)| from.strip_suffix(to))
         .map(|root| root.trim_end_matches(['/', '\\']).to_owned())
         .filter(|root| !root.is_empty());
-    match root {
-        Some(root) => println!(
-            "rift: instance {} now runs on node {peer}; run that node's agent with --root {root} to keep its folder {}",
+    let embedded = config.nodes.get(peer).is_none_or(|node| node.peer);
+    if !embedded {
+        // `nodes.<peer>`: a `rift node` agent of its own, with its --root.
+        match root {
+            Some(root) => println!(
+                "rift: instance {} now runs on node {peer}; run that node's agent with --root {root} to keep its folder {}",
+                converted.name,
+                converted.from.display()
+            ),
+            None => println!(
+                "rift: instance {} now runs on node {peer}, in {} below that node's --root; move its folder {} there",
+                converted.name,
+                converted.to.display(),
+                converted.from.display()
+            ),
+        }
+        return;
+    }
+    // The embedded agent keeps its servers below the peer's directory.
+    let directory = settings.directory.join(&converted.to);
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    if same(&converted.from, &directory) {
+        println!(
+            "rift: instance {} now runs on node {peer} (this peer's own node), in its folder {}",
             converted.name,
             converted.from.display()
-        ),
-        None => println!(
-            "rift: instance {} now runs on node {peer}, in {} below that node's --root; move its folder {} there",
+        );
+    } else {
+        println!(
+            "rift: instance {} now runs on node {peer} (this peer's own node), in {}; move its folder {} there before starting this peer",
             converted.name,
-            converted.to.display(),
+            directory.display(),
             converted.from.display()
-        ),
+        );
     }
 }
 
@@ -417,6 +454,9 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     let cluster = Cluster::start(settings, options).await?;
     database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
     super::install_global(cluster.clone());
+    // A witness holds template blobs, so it counts toward the voters an
+    // upload must reach before its manifest commits.
+    super::files::attach_witness(&cluster).await?;
     log_info!("cluster: witness {name} running; Ctrl-C stops it");
     tokio::signal::ctrl_c().await?;
     cluster.shutdown().await;

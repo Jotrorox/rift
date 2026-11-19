@@ -127,6 +127,8 @@ pub struct Sim {
     pub shared: ClusterConfig,
     /// Registered beside [`Counter`] at every start.
     pub components: Option<ExtraComponents>,
+    /// `[labels]` of each peer's `cluster.toml`, by index.
+    pub labels: BTreeMap<usize, BTreeMap<String, String>>,
     root: PathBuf,
     peers: Vec<Option<Cluster>>,
     /// The instance database of each running peer.
@@ -155,6 +157,7 @@ impl Sim {
                 ..ClusterConfig::default()
             },
             components: None,
+            labels: BTreeMap::new(),
             root,
             peers: (0..count).map(|_| None).collect(),
             databases: (0..count).map(|_| None).collect(),
@@ -194,10 +197,11 @@ impl Sim {
                 .filter(|other| *other != index)
                 .map(|other| self.address(other))
                 .collect(),
-            labels: BTreeMap::new(),
+            labels: self.labels.get(&index).cloned().unwrap_or_default(),
             public_address: None,
             witness: false,
             directory,
+            node: super::settings::NodeSettings::default(),
         }
     }
 
@@ -213,7 +217,15 @@ impl Sim {
         if !components.supported().contains(&EntryKind::Config) {
             components.register(Arc::new(Counter))?;
         }
-        self.wait_released(index).await;
+        if !self.wait_released(index).await {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                format!(
+                    "p{index}: the instance database of its previous start is still open 10 s after it stopped ({} strong references): something the peer started still holds its cluster or database",
+                    self.released[index].strong_count()
+                ),
+            ));
+        }
         let settings = self.settings(index);
         std::fs::create_dir_all(&settings.directory)?;
         let database = Arc::new(Database::open_with(
@@ -245,10 +257,16 @@ impl Sim {
 
     /// Wait (on the virtual clock, at most 10 s) until the instance database
     /// peer `index` opened last is closed: its aborted tasks drop their
-    /// handles a moment after a crash.
-    async fn wait_released(&self, index: usize) {
+    /// handles a moment after a crash. Whether it is closed.
+    async fn wait_released(&self, index: usize) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while self.released[index].upgrade().is_some() && Instant::now() < deadline {
+        loop {
+            if self.released[index].strong_count() == 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -324,7 +342,16 @@ impl Sim {
             cluster.shutdown().await;
         }
         self.databases[index] = None;
-        self.wait_released(index).await;
+        let started = Instant::now();
+        if !self.wait_released(index).await {
+            // The wait itself moved the virtual clock past timeouts (peer
+            // expiry, elections) the test may rely on: say so.
+            eprintln!(
+                "sim: p{index} crashed, but its instance database is still open after {:?} ({} strong references)",
+                started.elapsed(),
+                self.released[index].strong_count()
+            );
+        }
     }
 
     pub async fn restart(&mut self, index: usize) -> Cluster {
@@ -665,8 +692,18 @@ async fn a_member_without_its_raft_file_is_refused_until_replaced() {
     sim.shutdown().await;
 }
 
+/// Leader changes: one instance per demand, fenced and reconciled agents,
+/// stop holds after a peer expiry (step 7).
+mod agent_tests;
 /// The replicated instance database with real stores (step 3).
 mod database_tests;
+/// Applied events (`rift.events.instances`) on every peer, once (step 7).
+mod events_tests;
+/// Leader-only requests (moves, backups, warming) a follower hands the
+/// leader for its operator (step 7).
+mod forward_tests;
 /// Leader tasks: server states, term-tagged writes, forwarded requests and
 /// stop vetoes (step 7).
 mod leader_tests;
+/// Peers as nodes: labels from `cluster.toml`, the embedded agent (step 7).
+mod peer_node_tests;

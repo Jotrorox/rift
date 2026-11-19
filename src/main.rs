@@ -60,7 +60,10 @@ const DEFAULT_CONFIG_PATH: &str = "rift.lua";
 
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translation <on|off>]]\n\
     Backend may also be a DNS hostname with a port.\n\
-    rift --config <path>\n\
+    rift --config <path> [--adopt-deployed]\n\
+    With a cluster.toml beside the configuration, Rift runs as a cluster peer: a new peer without\n\
+    the file receives the deployed configuration, and --adopt-deployed replaces a hand-edited file\n\
+    with the deployed one (keeping it as <file>.hand-edited) instead of refusing to start.\n\
     rift init [path] (generate configuration; default ./rift.lua)\n\
     rift check [--strict] [path] (validate configuration; default ./rift.lua)\n\
     rift --check [--strict] [path] (alias for rift check; default ./rift.lua)\n\
@@ -326,10 +329,19 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             );
             return Ok(());
         }
-        [flag, path] if flag == "--config" => (
-            Config::load_unrestored(Path::new(path))?,
-            Some(PathBuf::from(path)),
-        ),
+        [flag, path] if flag == "--config" => match Config::load_unrestored(Path::new(path)) {
+            Ok(config) => (config, Some(PathBuf::from(path))),
+            // A new cluster peer receives the deployed configuration at
+            // this path once it is attached (`files::start`).
+            Err(error) if error.kind() == io::ErrorKind::NotFound && peer.is_some() => {
+                let mut config = Config::default();
+                if let Some(peer) = &peer {
+                    config.instance_database = peer.default_database();
+                }
+                (config, Some(PathBuf::from(path)))
+            }
+            Err(error) => return Err(error),
+        },
         [listen, backend] => (Config::from_addresses(listen, backend)?, None),
         [listen, backend, flag, value] if flag == "--translation" => {
             let mut config = Config::from_addresses(listen, backend)?;

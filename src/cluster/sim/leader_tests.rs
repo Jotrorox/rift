@@ -6,7 +6,7 @@
 //! The stores' synchronous APIs block their thread until the write is
 //! applied, so the tests call them on a thread of their own, as the
 //! database tests do.
-use super::{Sim, until};
+use super::Sim;
 use crate::{
     cluster::leader::{self, Coordination},
     config::Config,
@@ -14,7 +14,8 @@ use crate::{
     managed::{Coordinator, ManagedServers},
     players::PlayerRegistry,
 };
-use std::{io, sync::Arc, time::Duration};
+use std::{fmt::Debug, io, sync::Arc, time::Duration};
+use tokio::time::Instant;
 
 /// Run `work` on a thread outside the runtime and wait for it.
 async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
@@ -25,8 +26,29 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     receiver.await.expect("the thread finished")
 }
 
+/// Poll `probe` on the virtual clock until its first part holds; after
+/// `timeout` the panic names `what` and shows the second part, the state
+/// the test saw last.
+async fn eventually<T: Debug>(what: &str, timeout: Duration, probe: impl Fn() -> (bool, T)) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (done, seen) = probe();
+        if done {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: not reached in {timeout:?}; last seen: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Nodes need the QUIC messaging listener (validation only: nothing binds
+/// it here).
 const CONFIG: &str = "rift.config.listeners.public='127.0.0.1:0'
 rift.config.routes.public='game'
+rift.config.messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}
 rift.config.nodes.a={address='10.0.0.1'}
 rift.config.templates.t={server_jar='paper.jar'}
 rift.config.service_groups.game={template='t',storage='disposable',port_range={30000,30099},nodes={'a'}}";
@@ -97,11 +119,15 @@ async fn server_states_reach_every_peer_and_a_deposed_leader_is_refused() {
     }
     let term = peers[leader].coordination.acting_term().unwrap();
     peers[leader].coordination.record("lobby", running(1), term);
-    for peer in &peers {
-        let coordination = peer.coordination.clone();
-        until(Duration::from_secs(5), move || {
-            coordination.recorded("lobby") == Some(running(1))
-        })
+    for (index, peer) in peers.iter().enumerate() {
+        eventually(
+            &format!("p{index} mirrors lobby running(1)"),
+            Duration::from_secs(5),
+            || {
+                let recorded = peer.coordination.recorded("lobby");
+                (recorded == Some(running(1)), recorded)
+            },
+        )
         .await;
     }
 
@@ -137,11 +163,15 @@ async fn server_states_reach_every_peer_and_a_deposed_leader_is_refused() {
     })
     .await
     .unwrap();
-    for peer in &peers {
-        let coordination = peer.coordination.clone();
-        until(Duration::from_secs(5), move || {
-            coordination.recorded("lobby") == Some(running(2))
-        })
+    for (index, peer) in peers.iter().enumerate() {
+        eventually(
+            &format!("p{index} mirrors lobby running(2)"),
+            Duration::from_secs(5),
+            || {
+                let recorded = peer.coordination.recorded("lobby");
+                (recorded == Some(running(2)), recorded)
+            },
+        )
         .await;
     }
     stop(peers).await;
@@ -167,14 +197,18 @@ async fn followers_hand_requests_to_the_leader_and_mirror_its_record() {
     // every peer mirrors the stop the leader records.
     peers[follower].managed.stop("game-1").await.unwrap();
     assert_eq!(automatic(&peers[leader]), Some(false));
-    for peer in &peers {
-        let managed = peer.managed.clone();
-        until(Duration::from_secs(30), move || {
-            managed
-                .snapshot()
-                .into_iter()
-                .any(|server| server.name == "game-1" && !server.automatic_enabled)
-        })
+    for (index, peer) in peers.iter().enumerate() {
+        eventually(
+            &format!("p{index} mirrors the stop of game-1"),
+            Duration::from_secs(30),
+            || {
+                let snapshot = peer.managed.snapshot();
+                let stopped = snapshot
+                    .iter()
+                    .any(|server| server.name == "game-1" && !server.automatic_enabled);
+                (stopped, (snapshot, peer.coordination.recorded("game-1")))
+            },
+        )
         .await;
     }
 

@@ -91,7 +91,9 @@ pub struct Snapshot {
     /// The `rift.perms.*` bus service, shared by every generation.
     pub perms: Arc<rift::permissions::control::Bus>,
     authenticator: Option<Arc<Authenticator>>,
-    forwarding_secret: Option<Arc<[u8]>>,
+    /// Also the secret a cluster peer's embedded node agent writes into new
+    /// instances (`crate::cluster_runtime`).
+    pub(crate) forwarding_secret: Option<Arc<[u8]>>,
 }
 
 impl Snapshot {
@@ -1147,7 +1149,7 @@ pub async fn handle(
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
                         // Tab lists and boss bars are state and apply after the next join.
                         // Dialogs are dropped: configuration closes every screen.
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::Handoff { .. } | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                     }
                     match action {
                         PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
@@ -1161,6 +1163,14 @@ pub async fn handle(
                         }
                         PlayerAction::Kick(reason) => {
                             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                            break;
+                        }
+                        // A cluster peer that drains sends its players to another peer.
+                        PlayerAction::Handoff { host, port, fallback } => {
+                            let sent = matches!(timeout(HANDSHAKE_TIMEOUT, session.transfer_client(&host, port)).await, Ok(Ok(true)));
+                            if !sent {
+                                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&fallback)).await;
+                            }
                             break;
                         }
                         // Forwarded plugin messages are addressed to a server, not to
@@ -3025,6 +3035,11 @@ fn seal_forwarding_secret(
         .nodes
         .get(node)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown node"))?;
+    // A cluster peer's embedded agent has the forwarding secret of its own
+    // process, which every peer shares.
+    if settings.peer {
+        return Ok(());
+    }
     let token = rift::node::token(node, &settings.token_env)?;
     prepare.forwarding_secret = Some(rift::node::seal::seal(&token, node, secret)?);
     Ok(())
@@ -3346,6 +3361,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         if peer.is_none() {
             background.spawn(reconcile_nodes(receiver.clone()));
         }
+    } else if peer.is_some() {
+        // Without a QUIC listener a cluster peer still has the peer-nodes,
+        // whose embedded agents report over the cluster's bus.
+        background.spawn(snapshot.nodes.listen()?);
     }
     let (admin_commands, mut admin_requests) = mpsc::channel(16);
     background.spawn(permission_bus);
@@ -3366,6 +3385,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     match &peer {
         Some(peer) => {
             crate::cluster_runtime::lead(&peer.cluster, receiver.clone());
+            peer.follow_keep_running(receiver.clone());
             let sender = forwarded_instances.clone();
             peer.coordination
                 .set_instance_handler(Arc::new(move |request: serde_json::Value| {
@@ -3386,6 +3406,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     });
                     answer
                 }));
+            // Moves, backups, restores and cache warming: followers hand
+            // them to the leader, which commits moves in this loop.
+            crate::cluster_runtime::serve_requests(
+                peer,
+                receiver.clone(),
+                admin_commands.clone(),
+                app.workflows.clone(),
+            );
             let leave = leave.clone();
             peer.coordination.set_leave_handler(Arc::new(move || {
                 let _ = leave.try_send(());
@@ -3469,6 +3497,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut instance_change: Option<InstanceChange> = None;
     let mut reload_pending = false;
     loop {
+        // How the scaler decided this round's instance change, if it did.
+        let mut decided: Option<rift::cluster::leader::Acting> = None;
         let (operation, reply, admin_reply, actor) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
@@ -3496,7 +3526,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     }
                     Ok((next, response)) => {
                         publish(&mut snapshot, next, &current, &mut health, &metrics).await;
-                        instance_event(&snapshot, &response);
+                        // A cluster peer announced it when the write applied
+                        // (`rift::instance_store::events`), like every peer.
+                        if peer.is_none() {
+                            instance_event(&snapshot, &response);
+                        }
                         Ok(response)
                     }
                     Err(error) => Err(error),
@@ -3510,18 +3544,19 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             // A cluster peer follows the registry the leader writes.
             update = next_update(&mut peer), if instance_change.is_none() => {
                 let Some(update) = update else { continue };
-                let (mut instances, mut moved) = (None, None);
+                let (mut instances, mut moved, mut peer_nodes) = (None, None, None);
                 let mut pending = Some(update);
                 while let Some(update) = pending.take() {
                     match update {
                         crate::cluster_runtime::Update::Instances(ready) => instances = Some(ready),
                         crate::cluster_runtime::Update::Moved(entries) => moved = Some(entries),
+                        crate::cluster_runtime::Update::PeerNodes(nodes) => peer_nodes = Some(nodes),
                     }
                     pending = peer.as_mut().and_then(|peer| peer.updates.try_recv().ok());
                 }
                 let active = snapshot.clone();
                 instance_change = Some(InstanceChange {
-                    task: tokio::spawn(crate::cluster_runtime::follow(active, instances, moved)),
+                    task: tokio::spawn(crate::cluster_runtime::follow(active, instances, moved, peer_nodes)),
                     reply: None,
                     admin_reply: None,
                 });
@@ -3548,28 +3583,31 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 break;
             }
             _ = scaling_check.tick(), if instance_change.is_none() => {
-                // In a cluster only the leader scales, with the reservations
-                // the other peers reported.
-                let remote = match &peer {
-                    Some(peer) if peer.coordination.acting_term().is_none() => continue,
-                    Some(peer) => peer.coordination.remote_reservations(),
-                    None => BTreeMap::new(),
-                };
-                match scaler.next_with(&snapshot, &remote, Instant::now()) {
-                    Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
-                    Some(crate::scaling::Change::Start(name)) => {
+                // In a cluster only the leader scales, once it caught up
+                // with its term, with the reservations the other peers
+                // reported; an instance change it decides runs in that term.
+                let coordination = peer.as_ref().map(|peer| &peer.coordination);
+                let decision = rift::cluster::leader::decide(coordination, |remote| {
+                    scaler.next_with(&snapshot, remote, Instant::now())
+                });
+                let Some(decision) = decision else { continue };
+                match decision.change {
+                    crate::scaling::Change::Instance(operation) => {
+                        decided = Some(decision.acting);
+                        (operation, None, None, "scaler".to_owned())
+                    }
+                    crate::scaling::Change::Start(name) => {
                         if let Err(error) = snapshot.managed.request_scale_start(&name) {
                             log_warn!("automatic start of {name} rejected: {error}");
                         }
                         continue;
                     }
-                    Some(crate::scaling::Change::Stop(name)) => {
+                    crate::scaling::Change::Stop(name) => {
                         if let Err(error) = snapshot.managed.request_stop(&name) {
                             log_warn!("stop of {name} in a stopped group rejected: {error}");
                         }
                         continue;
                     }
-                    None => continue,
                 }
             }
             _ = service_check.tick() => {
@@ -3597,24 +3635,26 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             let active = snapshot.clone();
             let task = match &peer {
                 None => tokio::spawn(async move { change_instance(operation, &active).await }),
-                // The leader decides in its term; a follower asks the leader.
+                // The leader runs it in its term (the scaler's decision in
+                // the term it was decided in, so a deposed leader's is
+                // refused rather than handed to the next leader); a follower
+                // asks the leader.
                 Some(peer) => {
+                    use rift::cluster::leader::Acting;
                     let coordination = peer.coordination.clone();
-                    match coordination.acting_term() {
-                        Some(term) => tokio::spawn(rift::cluster::leader::in_term(
-                            term,
-                            crate::cluster_runtime::leader_change(
-                                coordination,
-                                operation,
-                                actor,
-                                active,
-                            ),
-                        )),
-                        None => tokio::spawn(crate::cluster_runtime::forward_change(
+                    let acting = decided.unwrap_or_else(|| Acting::of(Some(&coordination)));
+                    match acting {
+                        Acting::Follows => tokio::spawn(crate::cluster_runtime::forward_change(
                             coordination,
                             operation,
                             active,
                         )),
+                        acting => tokio::spawn(acting.run(crate::cluster_runtime::leader_change(
+                            coordination,
+                            operation,
+                            actor,
+                            active,
+                        ))),
                     }
                 }
             };

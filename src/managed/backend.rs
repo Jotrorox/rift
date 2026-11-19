@@ -371,7 +371,7 @@ pub(crate) fn spawn(
 /// pipe, leads its own session instead of only its own group, and neither a
 /// dropped handle nor Rift's death kills it. Its log, isolation and memory
 /// limit (`memory_limit`, with the server's name) are the same.
-fn spawn_with(
+pub(super) fn spawn_with(
     command: &[String],
     directory: &std::path::Path,
     environment: &ProcessEnvironment,

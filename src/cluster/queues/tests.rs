@@ -99,12 +99,21 @@ impl Net {
             .cloned()
     }
 
-    /// Wait until peer `index`'s view of `game` satisfies `condition`.
+    /// Wait until peer `index`'s view of `game` satisfies `condition`; the
+    /// panic shows the last view it had.
     async fn sees(&self, index: usize, condition: impl Fn(&DestinationView) -> bool) {
-        until(WAIT, || {
-            self.game(index).is_some_and(|view| condition(&view))
-        })
-        .await;
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let view = self.game(index);
+            if view.as_ref().is_some_and(&condition) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "p{index} did not see the expected view of game in {WAIT:?}; its last view: {view:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn set_meta(&self, index: usize, id: u64, key: &str, value: &str) {
@@ -201,7 +210,9 @@ async fn players_on_three_peers_queue_and_enter_in_network_order() {
     .await;
     assert_eq!(first.queued_target().unwrap(), None);
     assert!(first.reserve("game").is_err());
-    vip.reserve("game").unwrap();
+    // A queued player enters as a session switches for its queue: the
+    // transfer reserves, and its completion takes the ticket out of line.
+    vip.before_transfer("game", "queue").await.unwrap();
     vip.ready("game").await;
     net.sees(a, |view| {
         view.head == head(&name_a, 10) && view.others_used == 2
@@ -222,7 +233,7 @@ async fn players_on_three_peers_queue_and_enter_in_network_order() {
         first.queued_target().unwrap().as_deref() == Some("game")
     })
     .await;
-    first.reserve("game").unwrap();
+    first.before_transfer("game", "queue").await.unwrap();
     first.ready("game").await;
     drop(vip);
     net.sees(b, |view| view.head == head(&name_b, 11)).await;
@@ -231,7 +242,7 @@ async fn players_on_three_peers_queue_and_enter_in_network_order() {
     })
     .await;
     assert_eq!(third.queued_target().unwrap(), None);
-    second.reserve("game").unwrap();
+    second.before_transfer("game", "queue").await.unwrap();
     second.ready("game").await;
     net.sees(leader, |view| view.priorities.len() == 1).await;
     drop((first, second, third, direct, bypasser));

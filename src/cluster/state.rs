@@ -1376,6 +1376,28 @@ pub fn prepare_from_backup(state_file: &Path, backup: &Path) -> io::Result<()> {
         [membership],
     )
     .map_err(sql_error)?;
+    // What the old cluster's peers held while they ran: player claims, node
+    // sessions, bus addresses and configuration reports. Their holders are
+    // no members of the new cluster, and a claim nobody releases would keep
+    // its player out.
+    for table in [
+        "cluster_claims",
+        "bus_node_sessions",
+        "bus_addresses",
+        "config_peers",
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if exists {
+            conn.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(sql_error)?;
+        }
+    }
     Ok(())
 }
 

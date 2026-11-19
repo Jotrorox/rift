@@ -127,6 +127,8 @@ notices! {
         "The network is full. Please try again later.",
     ClusterPartition => "cluster.partition_message" []
         "This proxy lost contact with the rest of the network. Please reconnect.",
+    ClusterLeaving => "cluster.leaving" []
+        "This proxy is restarting. Please reconnect.",
     // Connections in play.
     ConnectionLostNoFallback => "connection.lost_no_fallback" []
         "The server connection was lost and no fallback was available.",

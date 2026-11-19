@@ -92,6 +92,23 @@ pub enum PlayerAction {
     },
     /// Close the dialog Rift showed, if it is still open.
     ClearDialog,
+    /// Leave this proxy: a 1.20.5+ client in configuration or play gets the
+    /// Transfer packet to `host:port` (another peer of the cluster); any
+    /// other is disconnected with `fallback`. Sent by a peer that drains.
+    Handoff {
+        host: String,
+        port: u16,
+        fallback: Text,
+    },
+}
+
+/// What [`Players::hand_off`] did: sessions told to go to another peer, and
+/// sessions told to reconnect. A session that did not take the action in
+/// time counts in neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandOff {
+    pub transferred: usize,
+    pub disconnected: usize,
 }
 
 /// The serde form of a boss bar, which the protocol type does not have.
@@ -1796,6 +1813,54 @@ impl Players {
             }
         }
         kicked
+    }
+
+    /// How many players are connected to this process.
+    pub fn local_sessions(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Send every player of this peer elsewhere as the peer drains: clients
+    /// that know the Transfer packet (1.20.5+) go to `targets` (`host`,
+    /// `port`) in turn, so they spread over the other peers; the others, and
+    /// everyone when there is no target, are disconnected with `message`.
+    /// A session whose client turns out not to be transferable when the
+    /// action arrives is disconnected with `message` as well.
+    pub async fn hand_off(&self, targets: &[(String, u16)], message: Text) -> HandOff {
+        let sessions: Vec<_> = self
+            .lock()
+            .values()
+            .map(|entry| (entry.protocol, entry.actions.clone()))
+            .collect();
+        let mut done = HandOff::default();
+        let mut next = 0;
+        for (protocol, actions) in sessions {
+            let transferable = crate::protocol::ProtocolVersion::new(protocol)
+                .is_ok_and(|version| version.has_transfer());
+            let action = match targets.get(next % targets.len().max(1)) {
+                Some((host, port)) if transferable => {
+                    next += 1;
+                    PlayerAction::Handoff {
+                        host: host.clone(),
+                        port: *port,
+                        fallback: message.clone(),
+                    }
+                }
+                _ => PlayerAction::Kick(message.clone()),
+            };
+            let transfer = matches!(action, PlayerAction::Handoff { .. });
+            if matches!(
+                tokio::time::timeout(DISCONNECT_WAIT, actions.send(action)).await,
+                Ok(Ok(()))
+            ) {
+                if transfer {
+                    done.transferred += 1;
+                } else {
+                    done.disconnected += 1;
+                }
+            }
+        }
+        done
     }
 
     /// Claim this peer's players again after it rejoined the cluster. A

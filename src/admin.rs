@@ -964,6 +964,59 @@ pub(crate) fn audited(args: &[String]) -> (String, String) {
     }
 }
 
+/// A command that runs on the cluster leader only, as a follower hands it
+/// over (`cluster_runtime::forward`).
+enum LeaderOnly {
+    Move(crate::moving::Request),
+    /// The request kind, its body and how long to wait for the leader.
+    Other(&'static str, Value, Duration),
+}
+
+/// The leader-only command `args` names, if it is one: moves, backups and
+/// restores, and cache warming.
+fn leader_only(args: &[String]) -> Result<Option<LeaderOnly>, String> {
+    use crate::cluster_runtime::{BACKUP, FORGET_BACKUPS, MOVE_CANCEL, RESTORE, SHORT_WAIT, WARM};
+    Ok(Some(match args {
+        [command, rest @ ..] if command == "move" => match crate::moving::Command::parse(rest)? {
+            crate::moving::Command::Move(request) => LeaderOnly::Move(request),
+            crate::moving::Command::Cancel(server) => {
+                LeaderOnly::Other(MOVE_CANCEL, json!({ "server": server }), SHORT_WAIT)
+            }
+        },
+        [command, instance] if command == "backup" => LeaderOnly::Other(
+            BACKUP,
+            json!({ "instance": instance }),
+            crate::backups::DEADLINE,
+        ),
+        [command, action, instance, which] if command == "backups" && action == "forget" => {
+            LeaderOnly::Other(
+                FORGET_BACKUPS,
+                json!({ "instance": instance, "snapshot": which }),
+                crate::backups::DEADLINE,
+            )
+        }
+        [command, rest @ ..] if command == "restore" => {
+            let request = crate::backups::Restore::parse(rest)?;
+            LeaderOnly::Other(
+                RESTORE,
+                json!({
+                    "instance": request.instance,
+                    "snapshot": request.snapshot,
+                    "node": request.node,
+                }),
+                crate::backups::DEADLINE,
+            )
+        }
+        [command] if command == "warm" => {
+            LeaderOnly::Other(WARM, json!({ "template": null }), DOWNLOAD_DEADLINE)
+        }
+        [command, template] if command == "warm" => {
+            LeaderOnly::Other(WARM, json!({ "template": template }), DOWNLOAD_DEADLINE)
+        }
+        _ => return Ok(None),
+    }))
+}
+
 pub(crate) async fn execute(
     args: &[String],
     snapshot: Arc<Snapshot>,
@@ -971,6 +1024,20 @@ pub(crate) async fn execute(
     commands: &mpsc::Sender<Command>,
     actor: &str,
 ) -> Result<Value, String> {
+    // A cluster follower hands leader-only work to the leader, which runs
+    // it for `actor`.
+    if let Some(coordination) = crate::cluster_runtime::follower()
+        && let Some(work) = leader_only(args)?
+    {
+        return match work {
+            LeaderOnly::Move(request) => {
+                crate::cluster_runtime::forward_move(coordination, actor.to_owned(), request).await
+            }
+            LeaderOnly::Other(kind, body, wait) => {
+                crate::cluster_runtime::forward(&coordination, kind, actor, body, wait).await
+            }
+        };
+    }
     let control = &snapshot.control;
     let enabled = |value: &str| match value {
         "on" => Ok(true),

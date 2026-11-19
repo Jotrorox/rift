@@ -145,7 +145,18 @@ fn renderings(config: &Config) -> Vec<(&'static str, String)> {
         ("templates", format!("{:?}", config.templates)),
         ("template_sources", format!("{:?}", config.template_sources)),
         ("service_groups", format!("{:?}", config.service_groups)),
-        ("nodes", format!("{:?}", config.nodes)),
+        (
+            "nodes",
+            // Peer-nodes come from the peer table, not from `rift.lua`.
+            format!(
+                "{:?}",
+                config
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| !node.peer)
+                    .collect::<Vec<_>>()
+            ),
+        ),
         (
             "instance_database",
             format!("{:?}", config.instance_database),

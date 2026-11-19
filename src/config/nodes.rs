@@ -24,7 +24,13 @@ pub struct NodeConfig {
     pub min_free_disk_mb: usize,
     pub labels: BTreeSet<String>,
     /// Environment variable holding the agent's messaging and file token.
+    /// Empty for a cluster peer's own node, whose agent needs none.
     pub token_env: String,
+    /// A cluster peer as a node (docs/clustering.md, "Servers on the peers'
+    /// own hosts"): not from `rift.config.nodes` but from the peer table,
+    /// served by the agent embedded in that peer's process, without a
+    /// token or a QUIC login. See [`crate::cluster::peer_nodes`].
+    pub peer: bool,
 }
 
 impl NodeConfig {
@@ -189,6 +195,7 @@ pub(super) fn parse(root: &Table) -> Result<BTreeMap<String, NodeConfig>, String
                 min_free_disk_mb,
                 labels,
                 token_env,
+                peer: false,
             },
         );
     }
@@ -297,13 +304,18 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         if node.memory_mb == Some(0) {
             return Err(format!("{path}.memory_mb: expected a positive integer"));
         }
+        // A cluster peer's own node has no token: its agent runs in the
+        // peer's process and logs in to nothing.
+        if node.peer {
+            continue;
+        }
         if !valid_env(&node.token_env) || !tokens.insert(node.token_env.as_str()) {
             return Err(format!(
                 "{path}.token_env: expected a unique environment variable name"
             ));
         }
     }
-    if !nodes.is_empty() {
+    if nodes.values().any(|node| !node.peer) {
         let messaging = config
             .messaging
             .as_ref()
@@ -335,22 +347,35 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             continue;
         };
         let path = format!("service_groups.{name}.nodes");
-        if nodes.is_empty() {
+        // Before a peer knows the peer-nodes of its cluster, any valid peer
+        // name may be one, and labels cannot be checked yet.
+        let pending = crate::cluster::peer_nodes::pending();
+        if nodes.is_empty() && !pending {
             return Err(format!("{path}: no nodes are configured"));
         }
         for node in &selector.names {
-            if !nodes.contains_key(node) {
-                return Err(format!("{path}: unknown node {node:?}"));
+            if !nodes.contains_key(node) && !crate::cluster::peer_nodes::may_be_peer(node) {
+                return Err(format!("{path}: unknown node {node:?}{}", peer_hint()));
             }
         }
-        if !nodes
-            .iter()
-            .any(|(node, definition)| selector.matches(node, definition))
+        if !pending
+            && !nodes
+                .iter()
+                .any(|(node, definition)| selector.matches(node, definition))
         {
-            return Err(format!("{path}: no configured node matches"));
+            return Err(format!("{path}: no configured node matches{}", peer_hint()));
         }
     }
     Ok(())
+}
+
+/// On a cluster peer: where peer-nodes come from, for errors about nodes.
+fn peer_hint() -> &'static str {
+    if crate::cluster::settings::local_peer().is_some() {
+        " (in a cluster every peer is a node named after itself, with the labels of its cluster.toml)"
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]

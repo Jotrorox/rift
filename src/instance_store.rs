@@ -1758,6 +1758,48 @@ impl Store {
         );
     }
 
+    /// Announce every creation, removal and move through `events` when it
+    /// applies here, whether the write was made here or applied from another
+    /// peer (a cluster's `rift.events.instances`, see [`events`]), under the
+    /// rules of [`Store::watch_states`].
+    pub fn watch_events(&self, events: Arc<events::InstanceEvents>) -> io::Result<()> {
+        let label = self.database.label().to_owned();
+        let connection = self.database.lock();
+        events.seed(
+            ready_instances(read_records(&connection).map_err(|e| self.error(e))?),
+            read_moved_servers(&connection).map_err(|e| self.error(e))?,
+        );
+        let instances = events.clone();
+        let instances_label = label.clone();
+        self.remember(
+            self.database
+                .on_change(&["instances"], move |connection, _| {
+                    match read_records(connection) {
+                        Ok(records) => instances.instances(ready_instances(records)),
+                        Err(error) => {
+                            log_error!(
+                                "instance database {instances_label}: instance changes not announced: {error}"
+                            )
+                        }
+                    }
+                }),
+        );
+        self.remember(
+            self.database
+                .on_change(
+                    &["moved_servers"],
+                    move |connection, _| match read_moved_servers(connection) {
+                        Ok(moved) => events.moved(moved),
+                        Err(error) => {
+                            log_error!("instance database {label}: moves not announced: {error}")
+                        }
+                    },
+                ),
+        );
+        drop(connection);
+        Ok(())
+    }
+
     /// Ports registered on this host, including unfinished creations.
     pub fn reserved_ports(&self) -> io::Result<BTreeSet<u16>> {
         self.reserved_ports_on(None)
@@ -1774,8 +1816,18 @@ impl Store {
     }
 }
 
+pub mod events;
 #[cfg(test)]
 mod tests;
+
+/// The ready registrations among `records`, as `Config.instances` holds them.
+fn ready_instances(records: Vec<Record>) -> BTreeMap<String, ServiceInstance> {
+    records
+        .into_iter()
+        .filter(|record| record.phase == "ready")
+        .map(|record| (record.name, record.definition.instance))
+        .collect()
+}
 
 pub fn check_configured_port(config: &Config, name: &str, port: u16) -> io::Result<()> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));

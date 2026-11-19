@@ -303,6 +303,13 @@ pub fn cluster(config: &Config, path: &Path, report: &mut Report) {
             .push(format!("cluster: {} is set", settings.token_env)),
         Err(error) => report.errors.push(error.to_string()),
     }
+    if settings.public_address.is_none() && !settings.witness {
+        report.warnings.push(format!(
+            "{}: no public_address: a peer that drains cannot send 1.20.5+ players to {}, and when no peer has one they get a reconnect message instead",
+            rift::cluster::Settings::path_beside(path).display(),
+            settings.peer
+        ));
+    }
     match rift::cluster::quic::check(&settings) {
         Ok(()) => report.notes.push(format!(
             "cluster: peer {} loads {}, {} and {}",
@@ -398,9 +405,36 @@ pub async fn cluster_peers(config: &Config, path: &Path, report: &mut Report) {
             .errors
             .push("cluster: there is no leader: no logins, writes or scaling".into());
     }
+    // Replication lag is known on the leader only: a follower asks it.
+    let leader_view = if status["is_leader"] == true {
+        Some(status.clone())
+    } else if status["leader"].is_null() {
+        None
+    } else {
+        ask(&["cluster", "status", "--leader"]).await.ok()
+    };
+    let lags: std::collections::BTreeMap<String, u64> = leader_view
+        .iter()
+        .flat_map(|view| view["peers"].as_array().into_iter().flatten())
+        .filter_map(|peer| {
+            let name = peer["name"].as_str()?.to_owned();
+            Some((name, peer["lag"].as_u64()?))
+        })
+        .collect();
+    if leader_view.is_none() && !status["leader"].is_null() {
+        report.notes.push(
+            "cluster: the leader's status was not available; how far peers are behind was not checked".into(),
+        );
+    }
     for peer in status["peers"].as_array().into_iter().flatten() {
         let name = peer["name"].as_str().unwrap_or("?");
+        let lag = lags.get(name).copied().filter(|lag| *lag > 1000);
         if peer["this_peer"] == true {
+            if let Some(lag) = lag {
+                report.warnings.push(format!(
+                    "cluster: this peer ({name}) is {lag} entries behind the leader"
+                ));
+            }
             continue;
         }
         if peer["expired"] == true {
@@ -423,9 +457,7 @@ pub async fn cluster_peers(config: &Config, path: &Path, report: &mut Report) {
                 "cluster: peer {name} runs rift {version}, this one {own}; finish the rolling upgrade"
             ));
         }
-        if let Some(lag) = peer["lag"].as_u64()
-            && lag > 1000
-        {
+        if let Some(lag) = lag {
             report.warnings.push(format!(
                 "cluster: peer {name} is {lag} entries behind the leader"
             ));

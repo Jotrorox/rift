@@ -1355,7 +1355,7 @@ impl Cluster {
                 incarnation: self.inner.incarnation,
                 address: settings.advertise.clone(),
                 public_address: settings.public_address.clone(),
-                labels: settings.labels.clone(),
+                labels: settings.announced_labels(),
                 witness: settings.witness,
                 version: VERSION.to_owned(),
                 kinds: self.inner.links.identity().kinds.clone(),

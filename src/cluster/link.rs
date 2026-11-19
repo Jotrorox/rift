@@ -588,6 +588,10 @@ impl Links {
         for link in links {
             link.conn.close("shutting down");
         }
+        // Handlers hold what they serve (players, coordination, queues),
+        // which may hold this peer's cluster: drop them, so a stopped peer
+        // releases its replica and instance database.
+        self.inner.handlers.write().unwrap().clear();
     }
 
     fn answer(&self, peer: &str, reply: Bytes) -> io::Result<Bytes> {

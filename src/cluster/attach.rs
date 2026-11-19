@@ -119,6 +119,9 @@ pub async fn database(
     let cluster = Cluster::start(settings, options).await?;
     database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
     wait_for_state(&cluster).await?;
+    // Every peer is a node: configurations evaluated from now on have the
+    // peer-nodes, which follow the peer table.
+    let _ = super::peer_nodes::load(&cluster)?;
     let _ = DATABASE.set(database.clone());
     Ok(Attached { cluster, database })
 }
