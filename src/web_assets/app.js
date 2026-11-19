@@ -97,6 +97,7 @@
     for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample", "server-list-favicon-choose", "server-list-favicon-remove"]) $(id).disabled = !$("server-list-enabled").checked;
     $("server-list-favicon-picker").classList.toggle("disabled", !$("server-list-enabled").checked);
     for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players", "tab-list-names", "tab-list-format"]) $(id).disabled = !$("tab-list-enabled").checked;
+    $("tab-list-groups").disabled = !$("tab-list-enabled").checked || $("tab-list-players").value !== "group";
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
     for (const { button, unavailable } of state.templateButtons) button.disabled = state.busy || unavailable || !allowed("servers");
@@ -899,7 +900,8 @@
     $("tab-list-enabled").checked = Boolean(list);
     $("tab-list-header").value = componentText(list?.header);
     $("tab-list-footer").value = componentText(list?.footer);
-    $("tab-list-players").value = list?.players === "network" ? "network" : "server";
+    $("tab-list-players").value = ["network", "group"].includes(list?.players) ? list.players : "server";
+    $("tab-list-groups").value = (list?.groups || []).join(", ");
     $("tab-list-names").value = list?.names === "all" ? "all" : "network";
     $("tab-list-format").value = list?.format || "";
     state.settingsDirty.tabList = false;
@@ -911,9 +913,15 @@
       const parsed = componentValue($(`tab-list-${key}`).value);
       if (parsed !== undefined) value[key] = parsed;
     }
-    if ($("tab-list-players").value === "network") value.players = "network";
+    const players = $("tab-list-players").value;
+    if (players === "network" || players === "group") value.players = players;
+    if (players === "group") {
+      const groups = $("tab-list-groups").value.split(",").map((group) => group.trim()).filter(Boolean);
+      if (new Set(groups).size !== groups.length) throw new Error("Name each service group once.");
+      if (groups.length) value.groups = groups;
+    }
     if ($("tab-list-names").value === "all") value.names = "all";
-    if (!Object.keys(value).length) throw new Error("Set a header, a footer, list everyone on the network or name every player, or turn the tab list off.");
+    if (!Object.keys(value).length) throw new Error("Set a header, a footer, list a service group or the network or name every player, or turn the tab list off.");
     const format = $("tab-list-format").value.trim();
     if (format) {
       if (!format.includes("{name}")) throw new Error("The name format must contain {name}.");

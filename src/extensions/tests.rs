@@ -190,11 +190,19 @@ async fn a_hidden_player_is_missing_for_viewers_without_the_node() {
     };
     let tab = crate::tab_list::TabList {
         header: Some(serde_json::json!("{online}/{server_online}")),
-        network: true,
+        players: crate::tab_list::Players::Network,
         ..Default::default()
     };
     let check_hidden = |server: &str| {
-        let view = crate::tab_list::view(&roster, as_alice, Some(&tab), None, "Alice", "lobby-2");
+        let view = crate::tab_list::view(
+            &roster,
+            as_alice,
+            Some(&tab),
+            None,
+            "Alice",
+            "lobby-2",
+            |_| None,
+        );
         let names: Vec<_> = view.players.unwrap().into_iter().map(|e| e.name).collect();
         assert!(!names.contains(&"Staff".to_owned()), "{names:?}");
         assert_eq!(view.header.unwrap().0, serde_json::json!("2/2"));
@@ -205,6 +213,7 @@ async fn a_hidden_player_is_missing_for_viewers_without_the_node() {
             None,
             "Moderator",
             "lobby-2",
+            |_| None,
         );
         let expected: usize = if server == "lobby-2" { 0 } else { 1 };
         assert_eq!(
@@ -302,13 +311,21 @@ async fn network_tab_entries_show_the_prefix_and_suffix_of_the_listed_player() {
     let bob_session = join(bob, "Bob", "game");
     let _carol = join(carol, "Carol", "game");
     let tab = crate::tab_list::TabList {
-        network: true,
+        players: crate::tab_list::Players::Network,
         ..Default::default()
     };
     let entries = |server: &str| {
-        crate::tab_list::view(&roster, Viewer::System, Some(&tab), None, "Alice", server)
-            .players
-            .unwrap()
+        crate::tab_list::view(
+            &roster,
+            Viewer::System,
+            Some(&tab),
+            None,
+            "Alice",
+            server,
+            |_| None,
+        )
+        .players
+        .unwrap()
     };
     let listed = entries("lobby");
     assert_eq!(listed.len(), 2);

@@ -1,5 +1,7 @@
 //! `rift.config.tab_list`: a proxy-owned tab list header and footer, and
-//! optionally every player on the network in each player's tab list.
+//! optionally the players on other servers in each player's tab list: every
+//! server on the network, or the other instances of the viewer's service
+//! group ([`Players`]). By default a player sees only their own backend's.
 //!
 //! Header and footer text may use `{player}`, `{server}`, `{online}` and
 //! `{server_online}`. With `names = "all"`, the entries backends list
@@ -14,6 +16,7 @@ use crate::{
     protocol::TabView,
 };
 use serde_json::Value as Json;
+use std::collections::BTreeSet;
 
 /// Rendered text that would exceed this many bytes keeps its placeholders.
 const MAX_RENDERED_BYTES: usize = 16 * 1024;
@@ -23,14 +26,60 @@ pub struct TabList {
     /// A plain string or a chat component.
     pub header: Option<Json>,
     pub footer: Option<Json>,
-    /// List players on other servers as well as the backend's own entries.
-    pub network: bool,
+    /// Which players on other servers are listed besides the backend's own
+    /// entries.
+    pub players: Players,
     /// Also name and order the entries backends list (`names = "all"`).
     pub backend_names: bool,
     /// How a player's name is shown, as legacy text with `{prefix}`,
     /// `{name}`, `{suffix}`, `{group}` and `{server}`. `None` shows the
     /// prefix and suffix around the name, and nothing without either.
     pub format: Option<String>,
+}
+
+/// Who a player's tab list shows besides the entries their backend lists
+/// itself (`tab_list.players`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Players {
+    /// Only the current backend's players (`"server"`).
+    #[default]
+    Server,
+    /// Everyone on the network (`"network"`).
+    Network,
+    /// Everyone on the instances of the viewer's service group (`"group"`),
+    /// when that group is one of these; `None` is every service group. A
+    /// player on any other server sees only that backend's players.
+    Groups(Option<BTreeSet<String>>),
+}
+
+impl Players {
+    /// Whether a player on `server` is shown the players on `other`, a
+    /// different server. `group_of` names a server's service group.
+    fn lists<'a>(
+        &self,
+        group_of: &impl Fn(&str) -> Option<&'a str>,
+        server: &str,
+        other: &str,
+    ) -> bool {
+        match self {
+            Self::Server => false,
+            Self::Network => true,
+            Self::Groups(groups) => group_of(server).is_some_and(|group| {
+                groups.as_ref().is_none_or(|groups| groups.contains(group))
+                    && group_of(other) == Some(group)
+            }),
+        }
+    }
+
+    /// Whether any player on `server` is shown players on other servers.
+    fn any<'a>(&self, group_of: &impl Fn(&str) -> Option<&'a str>, server: &str) -> bool {
+        match self {
+            Self::Server => false,
+            Self::Network => true,
+            Self::Groups(groups) => group_of(server)
+                .is_some_and(|group| groups.as_ref().is_none_or(|groups| groups.contains(group))),
+        }
+    }
 }
 
 /// A header and footer for one player, set through `rift.players.tab_list`.
@@ -41,14 +90,16 @@ pub struct Override {
     pub footer: Option<Json>,
 }
 
-/// The tab list one player should see on `server`.
-pub fn view(
+/// The tab list one player should see on `server`. `group_of` names the
+/// service group a server is an instance of, for [`Players::Groups`].
+pub fn view<'a>(
     registry: &PlayerRegistry,
     viewer: Viewer<'_>,
     config: Option<&TabList>,
     custom: Option<&Override>,
     player: &str,
     server: &str,
+    group_of: impl Fn(&str) -> Option<&'a str>,
 ) -> TabView {
     let pick = |custom: Option<&Json>, configured: Option<&Json>| custom.or(configured).cloned();
     let header = pick(
@@ -77,8 +128,12 @@ pub fn view(
     TabView {
         header,
         players: config
-            .is_some_and(|config| config.network)
-            .then(|| registry.tab_entries(server, viewer)),
+            .filter(|config| config.players.any(&group_of, server))
+            .map(|config| {
+                registry.tab_entries(server, viewer, |other| {
+                    config.players.lists(&group_of, server, other)
+                })
+            }),
         names: config
             .is_some_and(|config| config.backend_names)
             .then(|| registry.tab_names()),
@@ -115,6 +170,86 @@ mod tests {
     use crate::protocol::{TabEntry, TabName};
     use serde_json::json;
     use std::{collections::BTreeMap, sync::Arc};
+
+    /// [`super::view`] on a network without service groups.
+    fn view(
+        registry: &PlayerRegistry,
+        viewer: Viewer<'_>,
+        config: Option<&TabList>,
+        custom: Option<&Override>,
+        player: &str,
+        server: &str,
+    ) -> TabView {
+        super::view(registry, viewer, config, custom, player, server, |_| None)
+    }
+
+    #[test]
+    fn server_scope_lists_nobody_from_other_servers() {
+        let registry = Arc::new(PlayerRegistry::default());
+        let _alice = registry.register([1; 16], "Alice", "lobby").unwrap();
+        let _bob = registry.register([2; 16], "Bob", "survival").unwrap();
+        // The default scope, which a header alone also uses.
+        let config = TabList {
+            header: Some(json!("hi")),
+            ..TabList::default()
+        };
+        assert_eq!(config.players, Players::Server);
+        let view = view(
+            &registry,
+            Viewer::System,
+            Some(&config),
+            None,
+            "Alice",
+            "lobby",
+        );
+        assert_eq!(view.players, None);
+    }
+
+    #[test]
+    fn group_scope_lists_the_other_instances_of_listed_groups_only() {
+        let registry = Arc::new(PlayerRegistry::default());
+        let _alice = registry.register([1; 16], "Alice", "bedwars-1").unwrap();
+        let _bob = registry.register([2; 16], "Bob", "bedwars-2").unwrap();
+        let _carol = registry.register([3; 16], "Carol", "skywars-1").unwrap();
+        let _dave = registry.register([4; 16], "Dave", "lobby").unwrap();
+        let _erin = registry.register([5; 16], "Erin", "skywars-2").unwrap();
+        let group_of = |server: &str| -> Option<&'static str> {
+            match server {
+                "bedwars-1" | "bedwars-2" => Some("bedwars"),
+                "skywars-1" | "skywars-2" => Some("skywars"),
+                _ => None,
+            }
+        };
+        let names = |config: &TabList, server: &str| -> Option<Vec<String>> {
+            super::view(
+                &registry,
+                Viewer::System,
+                Some(config),
+                None,
+                "Viewer",
+                server,
+                group_of,
+            )
+            .players
+            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+        };
+        let every = TabList {
+            players: Players::Groups(None),
+            ..TabList::default()
+        };
+        assert_eq!(names(&every, "bedwars-1"), Some(vec!["Bob".into()]));
+        assert_eq!(names(&every, "bedwars-2"), Some(vec!["Alice".into()]));
+        assert_eq!(names(&every, "skywars-1"), Some(vec!["Erin".into()]));
+        // A static server belongs to no group and keeps the backend's list.
+        assert_eq!(names(&every, "lobby"), None);
+        let bedwars = TabList {
+            players: Players::Groups(Some(BTreeSet::from(["bedwars".to_owned()]))),
+            ..TabList::default()
+        };
+        assert_eq!(names(&bedwars, "bedwars-1"), Some(vec!["Bob".into()]));
+        assert_eq!(names(&bedwars, "skywars-1"), None);
+        assert_eq!(names(&bedwars, "lobby"), None);
+    }
 
     #[test]
     fn placeholders_render_in_strings_and_components() {
@@ -264,7 +399,7 @@ mod tests {
         bob.set_properties(std::slice::from_ref(&skin));
         assert_ne!(registry.generation(), before);
         let config = TabList {
-            network: true,
+            players: Players::Network,
             ..TabList::default()
         };
         let view = view(
@@ -295,7 +430,7 @@ mod tests {
         let _bob = registry.register([2; 16], "Bob", "survival").unwrap();
         let _carol = registry.register([3; 16], "Carol", "survival").unwrap();
         let config = TabList {
-            network: true,
+            players: Players::Network,
             ..TabList::default()
         };
         let entries = || {
@@ -353,7 +488,7 @@ mod tests {
         let _bob = registry.register([3; 16], "Bob", "lobby-1").unwrap();
         let config = TabList {
             header: Some(json!("{online} online, {server_online} here")),
-            network: true,
+            players: Players::Network,
             ..TabList::default()
         };
         let names = |view: TabView| -> Vec<String> {

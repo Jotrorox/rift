@@ -1907,7 +1907,7 @@ fn tab_list_parses_text_components_and_player_scope() {
         Some(crate::tab_list::TabList {
             header: Some(serde_json::json!("Welcome {player}")),
             footer: Some(serde_json::json!({ "text": "{online} online", "color": "gray" })),
-            network: true,
+            players: crate::tab_list::Players::Network,
             ..Default::default()
         })
     );
@@ -1917,7 +1917,8 @@ fn tab_list_parses_text_components_and_player_scope() {
     )
     .unwrap();
     let list = config.tab_list.unwrap();
-    assert!(list.backend_names && !list.network && list.header.is_none());
+    assert!(list.backend_names && list.header.is_none());
+    assert_eq!(list.players, crate::tab_list::Players::Server);
     assert_eq!(list.format.as_deref(), Some("{prefix}{name} &7[{server}]"));
     let config = Config::from_lua(
         &with_security("tab_list = { names = 'network', header = 'x' }"),
@@ -1930,8 +1931,64 @@ fn tab_list_parses_text_components_and_player_scope() {
         "tab.lua",
     )
     .unwrap();
-    assert!(!config.tab_list.unwrap().network);
+    assert_eq!(
+        config.tab_list.unwrap().players,
+        crate::tab_list::Players::Server
+    );
     assert_eq!(Config::from_lua(VALID, "tab.lua").unwrap().tab_list, None);
+}
+
+#[test]
+fn tab_list_group_scope_names_existing_service_groups() {
+    let groups = "service_groups = { \
+                  bedwars = { command = {'java'}, port_range = {25600, 25601} }, \
+                  skywars = { command = {'java'}, port_range = {25610, 25611} } }";
+    let parse = |tab_list: &str| {
+        Config::from_lua(
+            &with_security(&format!("{groups}, tab_list = {tab_list}")),
+            "tab.lua",
+        )
+    };
+    let players = |tab_list: &str| parse(tab_list).unwrap().tab_list.unwrap().players;
+    assert_eq!(
+        players("{ players = 'group' }"),
+        crate::tab_list::Players::Groups(None)
+    );
+    assert_eq!(
+        players("{ players = 'group', groups = { 'bedwars' } }"),
+        crate::tab_list::Players::Groups(Some(std::collections::BTreeSet::from([
+            "bedwars".to_owned()
+        ])))
+    );
+    for (tab_list, expected) in [
+        (
+            "{ players = 'group', groups = { 'duels' } }",
+            "tab_list.groups: unknown service group \"duels\"",
+        ),
+        (
+            "{ players = 'group', groups = { 'bedwars', 'bedwars' } }",
+            "tab_list.groups: duplicate",
+        ),
+        (
+            "{ players = 'group', groups = {} }",
+            "tab_list.groups: name at least one",
+        ),
+        (
+            "{ players = 'group', groups = 'bedwars' }",
+            "tab_list.groups",
+        ),
+        (
+            "{ players = 'network', groups = { 'bedwars' } }",
+            "tab_list.groups: needs players = \"group\"",
+        ),
+        (
+            "{ header = 'x', groups = { 'bedwars' } }",
+            "tab_list.groups: needs players = \"group\"",
+        ),
+    ] {
+        let error = parse(tab_list).unwrap_err().to_string();
+        assert!(error.contains(expected), "{tab_list}: {error}");
+    }
 }
 
 #[test]

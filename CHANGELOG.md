@@ -57,6 +57,12 @@ and are listed under **SDKs**.
   instance in place or onto another node, which recovers the instances of a
   dead node in one command. Agents need the new `backup` feature: upgrade them
   together with the controller. See [backups](docs/backups.md).
+- `tab_list.players = "group"` lists the players on the other instances of a
+  player's service group, so a BedWars round shows every BedWars player but
+  not the lobby. `tab_list.groups` limits this to some service groups; players
+  elsewhere see only their own server, which stays the default. The
+  dashboard's Tab list page offers it too. See
+  [service group players](docs/server-list.md#service-group-players).
 - `tab_list.names = "all"` gives the entries backends list themselves the
   same rank names and order as Rift's own entries for players on other
   servers, so a backend without a tab plugin (such as Pumpkin) shows

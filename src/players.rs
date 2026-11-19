@@ -198,15 +198,24 @@ impl PlayerRegistry {
         }
     }
 
-    /// Tab list entries for every connected player who is not on `server`
-    /// and whom `viewer` may see.
-    pub fn tab_entries(&self, server: &str, viewer: Viewer<'_>) -> Vec<TabEntry> {
+    /// Tab list entries for every connected player who is not on `server`,
+    /// is on a server `listed` accepts, and whom `viewer` may see.
+    pub fn tab_entries(
+        &self,
+        server: &str,
+        viewer: Viewer<'_>,
+        listed: impl Fn(&str) -> bool,
+    ) -> Vec<TabEntry> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .players
             .values()
-            .filter(|player| player.server != server && viewer.sees_player(player))
+            .filter(|player| {
+                player.server != server
+                    && listed(player.server.as_str())
+                    && viewer.sees_player(player)
+            })
             .map(|player| TabEntry {
                 uuid: player.uuid,
                 name: player.name.clone(),
