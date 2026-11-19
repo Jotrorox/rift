@@ -99,6 +99,47 @@ and are listed under **SDKs**.
   its size and modification time, which moved files now keep. What the source
   deleted meanwhile is dropped. Both agents need the new `move_resume`
   feature; with older agents a move starts over as before.
+- Plugins can ship their own messages in a `messages.toml` beside
+  `plugin.toml` or `init.lua`, with translations under `[languages.<tag>]`.
+  A `message` object, `{ message = "invited", args = { from = name } }`,
+  sends one wherever text goes and is rendered in the language of the player
+  who sees it; one `broadcast` reaches every player in their own language.
+  Operators reword a plugin's message in `text.messages` and `text.languages`
+  by its qualified key, such as `["party:invited"]`, and `rift:queue.full`
+  names one of Rift's own messages from a plugin or `rift.lua`. `rift check`
+  checks every template and replacement without running plugin code and
+  prints each plugin's message and language counts. See
+  [plugin messages](docs/text.md#plugin-messages).
+- A markup or message argument can be a style, `{ style = "<#55ffff><bold>" }`,
+  that wraps whatever the template puts between `<team>` and `</team>`, so an
+  operator who rewords a message keeps a color the plugin computes. See
+  [style arguments](docs/text.md#style-arguments).
+- Markup has `<transition:red:blue:0.5>` for one color along the stops, a
+  phase on `<gradient>` to animate it, `<rainbow:!>` for a reversed rainbow,
+  and `<sprite:item/diamond>` and `<head:Notch>`, which clients from 1.21.9
+  show. See [markup tags](docs/text.md#markup-tags).
+- The plugin contract `rift:plugin@0.2.1` adds the `text` interface:
+  `render`, `plain`, `to-legacy` and `to-mini` convert text with markup,
+  legacy codes and messages resolved in a given language, for bus payloads,
+  HTTP responses and logs, or to check a configured template in `init`. A
+  plugin that calls it sets `min_api = "0.2.1"`; components built against
+  0.2.0 keep loading. Lua gets `rift.text.render(text, language)`,
+  `rift.text.message(key, args)` and an optional `language` on
+  `rift.text.plain`, `to_legacy` and `to_mini`. See
+  [the host API](docs/plugins.md#host-api) and
+  [`rift.text`](docs/text.md#rifttext-in-lua).
+
+### Changed
+
+- A markup argument now wins over a theme style of the same name. Before, the
+  theme style was applied and the argument never shown, so a plugin's
+  `<info>` argument vanished on a network whose theme has an `info` style.
+- `<rainbow>` takes a phase from -1 to 1 instead of 0 to 1.
+- `transition`, `sprite` and `head` are built-in tags now, so a theme style
+  or a markup argument can no longer have one of these names.
+- `text.messages` and each `text.languages` table hold up to 1024 entries
+  instead of 256, since replacements for plugin messages count too.
+  `text.theme` stays at 256 styles.
 
 ### Nodes
 
@@ -171,6 +212,20 @@ and are listed under **SDKs**.
 - New component `moved_servers`, schema 1: where `rift admin move` put named
   servers. Older releases ignore it and run those servers where the
   configuration says, without their folder there.
+
+### SDKs
+
+- Rust `rift-plugin` 0.2.1, Go `github.com/Jotrorox/rift/sdk/go` v0.2.1 and
+  the C SDK implement `rift:plugin@0.2.1`. They build messages
+  (`text::message`, `rift.Msg`, `rift_msg`), style arguments and escaped
+  markup, and components with translations (arguments and a fallback), key
+  bindings, sprites, heads, a font, a shadow, a decoration turned off,
+  `change_page` clicks and item and entity hovers. They wrap the `text`
+  interface: `text::render`, `plain`, `to_legacy` and `to_mini` in Rust,
+  `rift.RenderText`, `PlainText`, `ToLegacy` and `ToMini` in Go, and
+  `rift_text_render`, `rift_text_to_plain`, `rift_text_to_legacy` and
+  `rift_text_to_mini` in C. See [Rust](docs/plugins-rust.md#text),
+  [Go](docs/plugins-go.md#text) and [C](docs/plugins-c.md#rich-text-builders).
 
 ## [0.1.0] - 2026-11-16
 

@@ -202,7 +202,7 @@ let diamond = text::Component::sprite("item/diamond")
 - `text::mini` takes `arg` (shown as written), `arg_component` and
   `arg_style` (a [style argument](text.md#style-arguments): markup made only of formatting
   tags). `text::message(key)` takes the same three. A message comes from the
-  plugin's `messages.toml`; see [Styled text](text.md).
+  plugin's `messages.toml`; see [plugin messages](text.md#plugin-messages).
 - `text::escape(&str)` escapes text for splicing into markup. An argument
   needs no escaping.
 - `text::render(text, language)`, `text::plain`, `text::to_legacy` and

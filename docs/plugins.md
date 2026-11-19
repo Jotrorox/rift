@@ -25,6 +25,7 @@ plugin, `hello`, in all four languages with identical behavior.
 | Let a bus service decide logins | [Decisions answered over the message bus](remote-decisions.md) |
 | Know the events and their answers | [Plugin events and commands](plugin-events.md) |
 | Message, kick or transfer players | [Online players API](players-api.md) |
+| Style text, ship messages in each player's language | [Styled text](text.md), [plugin messages](text.md#plugin-messages) |
 | Store data, schedule work, call HTTP | [Host services](host-services.md) |
 | Write a persistent plugin | [Lua](plugins-lua.md), [Rust](plugins-rust.md), [C](plugins-c.md), [Go](plugins-go.md) |
 | Operate plugins: restarts, reloads, logs | [Running plugins](plugin-operations.md) |
@@ -137,10 +138,12 @@ anything starts.
 ## `messages.toml`
 
 A plugin folder, persistent or script mode, may hold a `messages.toml` beside
-its `plugin.toml`: the plugin's own messages, in each player's language,
-which the operator can reword by qualified key (`party:invited`). Rift reads
-and checks it with the configuration, without running plugin code. See
-[plugin messages](text.md#plugin-messages).
+its `plugin.toml` or `init.lua`: the plugin's own messages, in each player's
+language, which the operator can reword by qualified key (`party:invited`).
+Rift reads and checks it with the configuration, without running plugin code,
+and `rift check` prints its message and language counts. A changed file
+applies on the next reload without restarting the plugin. The `hello`
+examples ship one. See [plugin messages](text.md#plugin-messages).
 
 ## Host API
 
@@ -257,8 +260,9 @@ interfaces, but never changes an existing type or adds a case to an existing
 enum or variant, since exports are checked exactly.
 
 A host function a component calls needs a host that has it: such a plugin names
-the release in [`min_api`](#plugintoml). Breaking changes move to the next
-minor version until 1.0.
+the release in [`min_api`](#plugintoml). `0.2.1` added the `text` interface,
+so a plugin that calls it sets `min_api = "0.2.1"`. Breaking changes move to
+the next minor version until 1.0.
 
 ## Moving from 0.1
 

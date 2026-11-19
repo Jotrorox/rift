@@ -166,7 +166,7 @@ diamond := rift.Sprite("item/diamond").Shadow("#000000", 0.5).HoverItem("minecra
 - `rift.Mini` takes `Arg` (shown as written), `ArgComponent` and `ArgStyle`
   (a [style argument](text.md#style-arguments): markup made only of formatting tags).
   `rift.Msg(key)` takes the same three. A message comes from the plugin's
-  `messages.toml`; see [Styled text](text.md). It is `Msg` because
+  `messages.toml`; see [plugin messages](text.md#plugin-messages). It is `Msg` because
   `rift.Message` is the decision that shows a player text.
 - `rift.Escape(s)` escapes text for splicing into markup. An argument needs no
   escaping.

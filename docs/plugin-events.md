@@ -344,3 +344,5 @@ a player's choice. `set-language` stores a tag of 2–16 bytes of `a-z0-9_`
 - Rift's own messages to that player (queue notices, refusals, `/server`
   output) come from [`text.languages`](text.md#languages): the exact tag, then
   its language (`de` for `de_at`), then `text.messages`.
+- [Plugin messages](text.md#plugin-messages) sent to that player follow the
+  same order ([whose language](text.md#whose-language)).

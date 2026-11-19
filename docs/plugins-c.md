@@ -348,7 +348,7 @@ free(safe);
   [style argument](text.md#style-arguments): markup made only of formatting tags).
   `rift_msg(key)` takes `rift_msg_arg`, `rift_msg_arg_component` and
   `rift_msg_arg_style`, and `rift_msg_finish` returns the JSON. A message
-  comes from the plugin's `messages.toml`; see [Styled text](text.md). It is
+  comes from the plugin's `messages.toml`; see [plugin messages](text.md#plugin-messages). It is
   `rift_msg` because `rift_message` sends a player text.
 - `rift_text_escape(text)` returns a malloc'd copy escaped for splicing into
   markup. An argument needs no escaping.

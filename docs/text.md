@@ -11,6 +11,10 @@ tooltips, dialogs, the MOTD, the version name and the hover lines of the
 server list. Rift itself parses, validates and renders the text, so Lua, the
 WebAssembly SDKs, the message bus and the configuration cannot disagree.
 
+Rift's own messages and a plugin's can follow each player's language, with
+the operator's theme and wording: see [Rift's own messages](#rifts-own-messages),
+[languages](#languages) and [plugin messages](#plugin-messages).
+
 > [!NOTE]
 > Markup is always explicit. Rift shows a bare string exactly as written and
 > never reads markup, legacy codes or JSON out of it, so text relayed from a
@@ -50,7 +54,7 @@ Where you can write it:
 | --- | --- |
 | `rift.lua`, extensions, `on_status`, Lua plugins | A table where a string would go, or `rift.text.mini(markup, args)`, which returns a component table |
 | Message bus replies | A JSON object as the `reason`: `{"action": "deny", "reason": {"mini": "<red>Banned"}}` |
-| WebAssembly plugins | The contract's [`text`](plugin-events.md#text) type is `plain(string)` or `json(string)`, the objects as JSON text. The SDK builders produce the JSON form ([Rust](plugins-rust.md), [Go](plugins-go.md), [C](plugins-c.md)) |
+| WebAssembly plugins | The contract's [`text`](plugin-events.md#text) type is `plain(string)` or `json(string)`, the objects as JSON text. The SDK builders produce the JSON form ([Rust](plugins-rust.md#text), [Go](plugins-go.md#text), [C](plugins-c.md#rich-text-builders)) |
 | Configuration | Any text setting (`server_list`, `tab_list`, `deny_message`, ...) takes the tables, and `text.messages` and `text.languages` take markup directly |
 
 ## `rift.text` in Lua
@@ -66,16 +70,21 @@ Where you can write it:
 | `rift.text.to_mini(text, language)` | Markup for a component |
 | `rift.text.escape(text)` | `text` escaped so it can be spliced into markup safely |
 
-`language` is optional and only matters for messages in the text: a tag such
-as `de` or `de_de`, without it the default. An invalid tag is an error. In a
-persistent Lua plugin a key without `:` is one of the plugin's own messages;
-in `rift.lua` and script-mode plugins keys are qualified. WebAssembly plugins
-have the same functions in the contract's `text` interface (since
-`rift:plugin@0.2.1`).
+`language` is optional and only matters for [messages](#plugin-messages) in
+the text: a tag such as `de` or `de_de` (`de-DE` is normalized). Without it,
+messages render in the default language, even inside a hook for a player with
+another language. An invalid tag is an error. In a persistent Lua plugin a key
+without `:` is one of the plugin's own messages; in `rift.lua` and script-mode
+plugins keys are qualified. WebAssembly plugins have the same conversions in
+the contract's `text` interface since `rift:plugin@0.2.1`
+([host API](plugins.md#host-api)); `escape` is a function of each SDK.
 
 ## Markup tags
 
 The tag syntax is the one many Minecraft developers know from MiniMessage.
+Rift is stricter: an unknown tag is an error, and `<selector>`, `<score>`,
+`<nbt>` and `<pride>` are not markup; the JSON form still carries the first
+three.
 
 | Tag | Effect |
 | --- | --- |
@@ -122,9 +131,9 @@ Gradients, transitions and rainbows:
   of the way from the first stop to the last. `0` is the first stop and `1`
   the last.
 - **`<gradient>` with a phase** starts `phase` of the way along the stops
-  and moves as far as it would without one. Past the last stop it runs back
-  to the first, so a phase of `1` on two stops goes from the second color
-  back to the first. A plugin animates text by sending the same template
+  and moves as far as it would without one. Past the last stop it wraps
+  around, blending from the last stop into the first and on, so a phase of
+  `1` on two stops goes from the second color back to the first. A plugin animates text by sending the same template
   with a moving phase.
 - **`<rainbow>`** takes a hue from -1 to 1 to start at; `-0.25` is the same
   hue as `0.75`. `!` before it runs the rainbow backwards: `<rainbow:!>`,
@@ -163,6 +172,12 @@ The JSON form is the same object: `{"mini": "<team>[<tag>]</team>", "args":
   hover. An empty string styles nothing.
 - The object takes only `style`.
 - `</team>` closes it, and every tag opened inside it.
+- It works in `mini` and `message` objects. A plugin message declares it
+  under [`styles`](#plugin-messages) instead of `args`.
+- The template decides what the style wraps, so an operator who rewords a
+  message keeps a color the plugin computes, such as a team color.
+- The SDKs write it with `arg_style` (Rust), `ArgStyle` (Go) and
+  `rift_mini_arg_style` or `rift_msg_arg_style` (C).
 
 ## Legacy codes
 
@@ -206,8 +221,9 @@ rift.setup {
 | `plain` | none | Unstyled `/perms` lines |
 
 Style names are 1–64 characters of `a-z`, `0-9`, `_` and `-`, and may not be
-built-in tags. A configuration's own theme applies to the markup elsewhere in
-the same configuration.
+built-in tags. A theme holds at most 256 styles. A configuration's own theme
+applies to the markup elsewhere in the same configuration and to every
+plugin's messages.
 
 ## Rift's own messages
 
@@ -325,15 +341,16 @@ finds:
 
 Tags are 2–16 bytes of `a-z`, `0-9` and `_`; `de-DE` is normalized to
 `de_de`. A configuration may hold at most 64 languages. `text.messages` and
-each language hold at most 1024 entries, counting
-[plugin messages](#plugin-messages). Rift checks keys and templates when the
-configuration loads, like `text.messages`.
+each language hold at most 1024 entries, counting the replacements for
+[plugin messages](#operator-replacements). Rift checks keys and templates
+when the configuration loads, like `text.messages`.
 
 ## Plugin messages
 
-A plugin can ship its own messages in a `messages.toml` beside its
-`plugin.toml`. Rift renders them in each player's language with the network's
-theme, and the operator can reword any of them without touching the plugin.
+A plugin can ship its own messages in a `messages.toml` in its folder, beside
+`plugin.toml` or `init.lua`. Rift renders them in each player's language with
+the network's theme, and the operator can reword any of them without touching
+the plugin.
 
 ```toml
 # plugins/party/messages.toml
@@ -361,9 +378,11 @@ invited = "<accent><from></accent> hat dich in eine Party eingeladen."
 The plugin folder's name is the catalog's **namespace**. Both persistent
 plugins and script-mode folders may ship the file. `rift` is reserved for
 Rift's own messages, so a folder named `rift` may not have one. Rift reads the
-file with the configuration, without running plugin code: at startup, in
-`rift check` and on a reload. A changed file takes effect on the next reload
-without restarting the plugin. A plugin without the file has an empty catalog.
+file of every plugin the configuration enables, without running plugin code:
+at startup, in `rift check` and on a reload. A changed file takes effect on
+the next reload without restarting the plugin
+([reloads](plugin-operations.md#reloads)). A plugin without the file has an
+empty catalog.
 
 ### Send a message
 
@@ -385,17 +404,23 @@ rift.players.message(player, { message = "party:invited", args = { from = ctx.na
   plugin has one at the call.
 - A **qualified** key names any catalog: `party:invited`, or
   `rift:queue.full` for one of [Rift's own messages](#rifts-own-messages) as
-  the operator styled it.
+  the operator styled it. A `rift:` message takes the arguments listed in
+  the table there.
 - `rift.lua`, script-mode plugins and bus services always use qualified keys.
   A script-mode plugin names its own messages with its folder name, such as
   `party:invited`.
 - `args` takes what `mini` arguments take: strings and numbers (shown as
   written, never parsed), components (which may hold `mini` or `message`
-  objects themselves) and [style arguments](#style-arguments).
-- Rift checks the call: an unknown key, a missing argument, an argument the
-  message does not declare, or content where the message declares a style is
-  an error at the call, whoever the recipient is. A `broadcast` with a bad
-  message fails even when nobody is online.
+  objects themselves) and [style arguments](#style-arguments). Format
+  numbers, dates and plurals before you pass them; a template has no
+  formatting of its own.
+- Rift checks the call: an unknown namespace or key, a missing argument, an
+  argument the message does not declare, or content where the message
+  declares a style (or a style where it declares content) is an error at the
+  call, whoever the recipient is. A `broadcast` with a bad message fails even
+  when nobody is online.
+- `rift.text.message(key, args)` in Lua and the SDKs' `text::message` (Rust),
+  `rift.Msg` (Go) and `rift_msg` (C) build the object.
 
 ### Whose language
 
@@ -451,6 +476,10 @@ step the operator's template wins over the plugin's:
 
 ### Checks and limits
 
+Parsing is strict, like `plugin.toml`: an unknown key, a value of the wrong
+type, a name in both `args` and `styles`, or a language key missing from
+`[messages]` is an error that names the file and the key.
+
 `rift check` and every configuration load check the catalogs:
 
 - every template parses with the arguments and styles its message declares
@@ -461,15 +490,14 @@ step the operator's template wins over the plugin's:
   for a day does not break the configuration. Rift ignores such a
   replacement.
 
-`rift check` prints each plugin's message and language counts:
+`rift check` prints each plugin's message and language counts, at the end of
+a persistent plugin's line or on a line of its own for a script-mode folder,
+and the warnings:
 
 ```text
 rift: plugin party: mode script, sandboxed; messages 4, languages 1
+rift: warning: text.messages["lobby:welcome"]: no enabled plugin has the namespace "lobby"; the replacement is ignored
 ```
-
-Parsing is strict, like `plugin.toml`: an unknown key, a value of the wrong
-type, a name in both `args` and `styles`, or a language key missing from
-`[messages]` is an error that names the file and the key.
 
 | Limit | Value |
 | --- | --- |
