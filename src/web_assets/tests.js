@@ -987,6 +987,23 @@ async function testWebAssets(appSource, statusSource) {
     assert(bodies[0].names === "all" && bodies[0].format === "{prefix}{name} &7{server}", "Names were not kept");
     assert(bodies[1] === null, "Disabled tab list was not removed");
   });
+  await test("the tab list lists a service group, naming the groups only in group mode", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.tab_list = { header: null, footer: null, players: "group", groups: ["bedwars", "skywars"], names: "network", format: null };
+    await flush();
+    assert(h.element("tab-list-players").value === "group" && h.element("tab-list-groups").value === "bedwars, skywars", "Groups not rendered");
+    const bodies = [];
+    h.model.intercept = (path, options) => { if (options.method === "PUT") { bodies.push(JSON.parse(options.body).definition); return h.response({ revision: "rev-1" }); } return null; };
+    h.element("tab-list-groups").value = " bedwars ,, duels "; await h.element("tab-list-form").emit("submit"); await flush();
+    assert(bodies[0].players === "group" && JSON.stringify(bodies[0].groups) === JSON.stringify(["bedwars", "duels"]), "Groups not sent");
+    h.element("tab-list-groups").value = ""; await h.element("tab-list-form").emit("submit"); await flush();
+    assert(bodies[1].players === "group" && !("groups" in bodies[1]), "Every group was not sent as no list");
+    h.element("tab-list-players").value = "server"; h.element("tab-list-groups").value = "bedwars"; h.element("tab-list-names").value = "all";
+    await h.element("tab-list-form").emit("change");
+    assert(h.element("tab-list-groups").disabled, "Groups stayed editable outside group mode");
+    await h.element("tab-list-form").emit("submit"); await flush();
+    assert(!("players" in bodies[2]) && !("groups" in bodies[2]), "Groups sent outside group mode");
+  });
   const PLAYER = "0123456789abcdef0123456789abcdef";
   // A small /api/perms model; `calls` records every write with its parsed body.
   function permsModel(h, overrides = {}) {

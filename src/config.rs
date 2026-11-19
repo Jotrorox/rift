@@ -1608,6 +1608,19 @@ impl Config {
                 }
             }
         }
+        if let Some(crate::tab_list::TabList {
+            players: crate::tab_list::Players::Groups(Some(groups)),
+            ..
+        }) = &self.tab_list
+        {
+            for group in groups {
+                if !self.service_groups.contains_key(group) {
+                    return Err(invalid(format!(
+                        "tab_list.groups: unknown service group {group:?}"
+                    )));
+                }
+            }
+        }
         for (backend, access) in &self.network.access {
             if !self.is_destination(backend) {
                 return Err(invalid(format!(

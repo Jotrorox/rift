@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(list.hosts["play.example.com"].motd, Some(json!("Host")));
         let tab_list = config.tab_list.unwrap();
         assert_eq!(tab_list.header, Some(json!("Hi {player}")));
-        assert!(tab_list.network);
+        assert_eq!(tab_list.players, rift::tab_list::Players::Network);
         assert_eq!(
             source
                 .matches("__rift_operator_config.server_list = ")
