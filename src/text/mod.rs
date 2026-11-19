@@ -28,6 +28,7 @@ pub mod color;
 pub mod legacy;
 pub(crate) mod lua;
 pub mod markup;
+pub mod messages;
 pub mod schema;
 
 pub use markup::{Arg, Args, Styles};

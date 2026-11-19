@@ -237,6 +237,12 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             {
                 eprintln!("rift: warning: {warning}");
             }
+            // Strict check reports these as errors instead.
+            if !strict {
+                for warning in config.text.warnings() {
+                    eprintln!("rift: warning: {warning}");
+                }
+            }
             if strict {
                 let path = fs::canonicalize(path)?;
                 let mut report = check::strict(&config, &path);

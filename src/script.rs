@@ -12,7 +12,7 @@ use crate::hooks::{ConnectionInfo, RouteDecision, RouteError};
 
 mod modules;
 mod source;
-pub(crate) use modules::PersistentPlugins;
+pub(crate) use modules::{PersistentPlugins, ScriptPlugins};
 pub(crate) use source::ScriptSource;
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 256 * 1024;

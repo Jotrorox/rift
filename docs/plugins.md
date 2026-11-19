@@ -134,6 +134,14 @@ WebAssembly enforces all three grants; Lua does not:
 grants Lua does not enforce, so the trust each plugin gets is visible before
 anything starts.
 
+## `messages.toml`
+
+A plugin folder, persistent or script mode, may hold a `messages.toml` beside
+its `plugin.toml`: the plugin's own messages, in each player's language,
+which the operator can reword by qualified key (`party:invited`). Rift reads
+and checks it with the configuration, without running plugin code. See
+[plugin messages](text.md#plugin-messages).
+
 ## Host API
 
 Every engine exposes the same host API; the

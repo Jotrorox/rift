@@ -125,7 +125,8 @@ pub struct Config {
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
-    /// The theme and Rift's own messages (`text = { theme, messages }`).
+    /// The theme, Rift's own messages (`text = { theme, messages }`) and the
+    /// `messages.toml` catalogues of the enabled plugins.
     pub text: std::sync::Arc<crate::text::catalog::Catalog>,
     /// `players = { record_ip }`: whether the player directory remembers
     /// the address a player last joined from. Default `true`.
@@ -930,7 +931,8 @@ impl Config {
                 "config",
             )?;
             // First, so markup elsewhere in this configuration uses its theme.
-            let text = text::parse(&root)?;
+            // The script has run, so every `rift.plugin` call is known.
+            let text = text::parse(&root, plugin_messages(&lua, &source)?)?;
             let _theme = crate::text::catalog::loading(text.styles().clone());
             let listeners = addresses(
                 root.get("listeners").map_err(|e| e.to_string())?,
@@ -2405,6 +2407,42 @@ fn table(value: Value, path: &str) -> Result<Table, String> {
             value.type_name()
         )),
     }
+}
+
+/// The `messages.toml` catalogue of every plugin the configuration enabled
+/// with `rift.plugin`, persistent or script mode, by namespace (its folder
+/// name). A plugin without the file has an empty one; a file that does not
+/// parse fails the load.
+fn plugin_messages(
+    lua: &mlua::Lua,
+    source: &crate::script::ScriptSource,
+) -> Result<Vec<(String, crate::text::messages::Messages)>, String> {
+    let persistent = lua
+        .app_data_ref::<crate::script::PersistentPlugins>()
+        .map(|records| {
+            records
+                .0
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let scripts = lua
+        .app_data_ref::<crate::script::ScriptPlugins>()
+        .map(|records| records.0.clone())
+        .unwrap_or_default();
+    persistent
+        .into_iter()
+        .chain(scripts)
+        .map(|name| {
+            let messages = match source.plugin_messages.get(&name) {
+                None => Default::default(),
+                Some(Ok(messages)) => messages.clone(),
+                Some(Err(error)) => return Err(format!("plugin {name}: {error}")),
+            };
+            Ok((name, messages))
+        })
+        .collect()
 }
 
 fn string(value: Value, path: &str) -> Result<String, String> {

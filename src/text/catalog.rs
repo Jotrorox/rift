@@ -33,9 +33,27 @@
 //! not when a player triggers it. The defaults keep Rift's wording from
 //! before the catalogue and are unstyled, so nothing changes until an
 //! operator styles them.
+//!
+//! The catalogue also holds each enabled plugin's `messages.toml`
+//! ([`messages`]) under the plugin's folder name, its namespace. The
+//! operator replaces those in the same tables by qualified key:
+//!
+//! ```lua
+//! text = {
+//!   messages = { ["party:invited"] = "<accent><from></accent> wants you in their party." },
+//!   languages = { fr = { ["party:invited"] = "<accent><from></accent> vous invite." } },
+//! }
+//! ```
+//!
+//! For each step of the language order the operator's template wins over
+//! the plugin's: `text.languages[tag]`, then the plugin's
+//! `[languages.<tag>]`, the same pair for the language part, then
+//! `text.messages` and the plugin's `[messages]`. Callers send any of them
+//! with [`Catalog::message`].
 use super::{
     Text,
-    markup::{self, Arg, Args, Styles},
+    markup::{self, Arg, Args, Style, Styles},
+    messages::{self, Message, Messages},
 };
 use serde_json::Value as Json;
 use std::{
@@ -201,41 +219,116 @@ impl Notice {
     }
 }
 
-/// The theme and the message templates in effect.
+/// The theme, Rift's own message templates and every enabled plugin's
+/// catalogue, with the operator's replacements for both.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Catalog {
     styles: Styles,
     messages: BTreeMap<Notice, String>,
     /// `text.languages`: templates by lowercase language tag.
     languages: BTreeMap<String, BTreeMap<Notice, String>>,
+    /// Plugin catalogues by namespace (the plugin's folder name).
+    namespaces: BTreeMap<String, Namespace>,
+    /// Replacements for a namespace no enabled plugin has; `rift check
+    /// --strict` makes them errors.
+    warnings: Vec<String>,
+}
+
+/// One plugin's `messages.toml` and the operator's replacements for it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Namespace {
+    plugin: Messages,
+    /// `text.messages["namespace:key"]` by key.
+    replaced: BTreeMap<String, String>,
+    /// `text.languages[tag]["namespace:key"]` by tag, then key.
+    replaced_in: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Catalog {
     /// A catalogue from theme styles and message templates by key, both
-    /// checked here. Styles extend and replace the built-in theme.
+    /// checked here. Styles extend and replace the built-in theme. A
+    /// qualified key (`party:invited`) replaces a plugin's message; see
+    /// [`Catalog::with_messages`].
     pub fn new<'a>(
         theme: impl IntoIterator<Item = (&'a str, &'a str)>,
         messages: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<Self, String> {
+        Self::themed(theme)?.with_messages(messages)
+    }
+
+    /// A catalogue with theme styles only, which extend and replace the
+    /// built-in theme. Add plugins next, then the operator's replacements.
+    pub fn themed<'a>(theme: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self, String> {
         let mut styles = Styles::default();
         for (name, markup) in theme {
             styles
                 .set(name, markup)
                 .map_err(|error| format!("text.theme: {error}"))?;
         }
-        let mut catalog = Self {
+        Ok(Self {
             styles,
-            messages: BTreeMap::new(),
-            languages: BTreeMap::new(),
-        };
-        for (key, template) in messages {
-            let notice = Notice::from_key(key).ok_or_else(|| {
-                format!("text.messages: unknown message {key:?}; see docs/text.md for the keys")
-            })?;
-            catalog.check(notice, template)?;
-            catalog.messages.insert(notice, template.to_owned());
+            ..Self::default()
+        })
+    }
+
+    /// Add an enabled plugin's catalogue under its namespace, the plugin's
+    /// folder name. Every template must parse with the theme and with the
+    /// arguments and styles its message declares. Add plugins before the
+    /// operator's replacements, which are checked against them.
+    pub fn with_plugin(mut self, namespace: &str, messages: Messages) -> Result<Self, String> {
+        let label = format!("plugin {namespace}: {}", messages::FILE);
+        for (key, message) in messages.iter() {
+            self.check_message(
+                &format!("{label}: [messages] {key:?}"),
+                message,
+                &message.text,
+            )?;
+            for (tag, template) in &message.languages {
+                self.check_message(
+                    &format!("{label}: [languages.{tag}] {key:?}"),
+                    message,
+                    template,
+                )?;
+            }
         }
-        Ok(catalog)
+        self.namespaces.insert(
+            namespace.to_owned(),
+            Namespace {
+                plugin: messages,
+                ..Namespace::default()
+            },
+        );
+        Ok(self)
+    }
+
+    /// Add `text.messages`. An unqualified key is one of Rift's own
+    /// messages; `namespace:key` replaces a plugin's. A key the namespace of
+    /// an added plugin lacks is an error; a namespace no added plugin has is
+    /// a [warning](Catalog::warnings) and the replacement is ignored.
+    pub fn with_messages<'a>(
+        mut self,
+        messages: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, String> {
+        let path = "text.messages";
+        for (key, template) in messages {
+            match qualified(path, key)? {
+                None => {
+                    let notice = Notice::from_key(key).ok_or_else(|| {
+                        format!("{path}: unknown message {key:?}; see docs/text.md for the keys")
+                    })?;
+                    self.check(notice, template)?;
+                    self.messages.insert(notice, template.to_owned());
+                }
+                Some((namespace, name)) => {
+                    if self.check_replacement(path, namespace, name, template)? {
+                        self.namespace_mut(namespace)
+                            .replaced
+                            .insert(name.to_owned(), template.to_owned());
+                    }
+                }
+            }
+        }
+        Ok(self)
     }
 
     /// Add the messages of one language (`text.languages[tag]`), checked
@@ -250,11 +343,24 @@ impl Catalog {
         let path = format!("text.languages.{language}");
         let mut templates = BTreeMap::new();
         for (key, template) in messages {
-            let notice = Notice::from_key(key).ok_or_else(|| {
-                format!("{path}: unknown message {key:?}; see docs/text.md for the keys")
-            })?;
-            self.check_at(&path, notice, template)?;
-            templates.insert(notice, template.to_owned());
+            match qualified(&path, key)? {
+                None => {
+                    let notice = Notice::from_key(key).ok_or_else(|| {
+                        format!("{path}: unknown message {key:?}; see docs/text.md for the keys")
+                    })?;
+                    self.check_at(&path, notice, template)?;
+                    templates.insert(notice, template.to_owned());
+                }
+                Some((namespace, name)) => {
+                    if self.check_replacement(&path, namespace, name, template)? {
+                        self.namespace_mut(namespace)
+                            .replaced_in
+                            .entry(language.clone())
+                            .or_default()
+                            .insert(name.to_owned(), template.to_owned());
+                    }
+                }
+            }
         }
         self.languages.insert(language, templates);
         Ok(self)
@@ -263,6 +369,29 @@ impl Catalog {
     /// The language tags with messages of their own.
     pub fn languages(&self) -> impl Iterator<Item = &str> {
         self.languages.keys().map(String::as_str)
+    }
+
+    /// The catalogue of the plugin `namespace`, if an enabled plugin has it
+    /// (a plugin without `messages.toml` has an empty one).
+    pub fn namespace(&self, namespace: &str) -> Option<&Messages> {
+        self.namespaces
+            .get(namespace)
+            .map(|namespace| &namespace.plugin)
+    }
+
+    /// Every enabled plugin's catalogue by namespace, sorted; for message
+    /// and language counts.
+    pub fn namespaces(&self) -> impl Iterator<Item = (&str, &Messages)> {
+        self.namespaces
+            .iter()
+            .map(|(name, namespace)| (name.as_str(), &namespace.plugin))
+    }
+
+    /// Replacements Rift ignored because no enabled plugin has their
+    /// namespace. `rift check` and every load print them; `rift check
+    /// --strict` fails on them.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// A template must parse with the message's arguments and no others.
@@ -281,6 +410,54 @@ impl Catalog {
         Text::component(component, &label).map(drop)
     }
 
+    /// A plugin template must parse with the arguments and styles its
+    /// message declares and no others.
+    fn check_message(&self, label: &str, message: &Message, template: &str) -> Result<(), String> {
+        if template.is_empty() || template.len() > messages::MAX_TEMPLATE_BYTES {
+            return Err(format!(
+                "{label} must contain 1..={} bytes",
+                messages::MAX_TEMPLATE_BYTES
+            ));
+        }
+        let component = markup::parse(template, &message_samples(message), &self.styles)
+            .map_err(|error| format!("{label}: {error}"))?;
+        Text::component(component, label).map(drop)
+    }
+
+    /// Check the operator's `template` for `namespace:name` at `path`.
+    /// `Ok(false)`: no added plugin has the namespace, so the replacement
+    /// is ignored with a warning.
+    fn check_replacement(
+        &mut self,
+        path: &str,
+        namespace: &str,
+        name: &str,
+        template: &str,
+    ) -> Result<bool, String> {
+        let label = format!("{path}[\"{namespace}:{name}\"]");
+        let Some(space) = self.namespaces.get(namespace) else {
+            self.warnings.push(format!(
+                "{label}: no enabled plugin has the namespace {namespace:?}; the replacement is ignored"
+            ));
+            return Ok(false);
+        };
+        let message = space.plugin.get(name).ok_or_else(|| {
+            format!(
+                "{path}: unknown message \"{namespace}:{name}\"; plugin {namespace} has no message {name:?} in its {}",
+                messages::FILE
+            )
+        })?;
+        self.check_message(&label, message, template)?;
+        Ok(true)
+    }
+
+    /// The namespace of an added plugin.
+    fn namespace_mut(&mut self, namespace: &str) -> &mut Namespace {
+        self.namespaces
+            .get_mut(namespace)
+            .expect("checked by check_replacement")
+    }
+
     pub fn styles(&self) -> &Styles {
         &self.styles
     }
@@ -295,11 +472,11 @@ impl Catalog {
     /// The template for `notice` in `language`: the exact tag, then the
     /// part before its first `_`, then [`Catalog::markup`].
     pub fn markup_in(&self, notice: Notice, language: Option<&str>) -> &str {
-        let translated = language.and_then(|tag| {
-            let own = |tag: &str| self.languages.get(tag)?.get(&notice);
-            own(tag).or_else(|| own(tag.split('_').next()?))
-        });
-        translated.map_or_else(|| self.markup(notice), String::as_str)
+        first_template(language, |tag| match tag {
+            Some(tag) => self.languages.get(tag)?.get(&notice).map(String::as_str),
+            None => Some(self.markup(notice)),
+        })
+        .unwrap_or(notice.default_markup())
     }
 
     /// `notice` with `args` filled in. Text that renders without formatting
@@ -310,15 +487,239 @@ impl Catalog {
 
     /// [`Catalog::render`] in an explicit language instead of the session's.
     pub fn render_in(&self, notice: Notice, args: &Args, language: Option<&str>) -> Text {
-        let label = notice.key();
+        self.render_template(
+            notice.key(),
+            self.markup_in(notice, language),
+            notice.default_markup(),
+            args,
+            || notice.default_markup().to_owned(),
+        )
+    }
+
+    /// The message `key` as a JSON text component, ready to splice into a
+    /// larger component; see [`Catalog::message_text`].
+    pub fn message(
+        &self,
+        caller: Option<&str>,
+        key: &str,
+        args: &Args,
+        language: Option<&str>,
+    ) -> Result<Json, String> {
+        Ok(match self.message_text(caller, key, args, language)? {
+            Text::Plain(text) => serde_json::json!({ "text": text }),
+            Text::Component(component) => component,
+        })
+    }
+
+    /// The message `key`, as written by a caller in the namespace `caller`
+    /// (a plugin's folder name; `None` for `rift.lua` and bus callers),
+    /// rendered with `args` in `language` (a normalised tag such as
+    /// `de_at`; `None` for the default) and the theme.
+    ///
+    /// - A key without `:` belongs to the caller's own namespace, which a
+    ///   caller without one cannot use.
+    /// - `namespace:key` names a plugin's message: `party:invited`.
+    /// - `rift:key` names one of Rift's own notices as the operator styled
+    ///   it: `rift:queue.full`. Its arguments are the notice's, and it has
+    ///   no styles.
+    ///
+    /// The call is checked: an unknown namespace or key, a missing
+    /// argument, an argument the message does not declare, and content
+    /// where it declares a style (or a style where it declares content)
+    /// are errors. Templates are looked up in the operator's
+    /// `text.languages[tag]`, the plugin's `[languages.<tag>]`, the same
+    /// pair for the language part of the tag, then `text.messages` and the
+    /// plugin's `[messages]`. Once a call is accepted only size can fail a
+    /// render; Rift then falls back to the plugin's default template, then
+    /// to its words.
+    pub fn message_text(
+        &self,
+        caller: Option<&str>,
+        key: &str,
+        args: &Args,
+        language: Option<&str>,
+    ) -> Result<Text, String> {
+        match key.split_once(':') {
+            Some((messages::RESERVED, name)) => self.notice_message(name, args, language),
+            Some((namespace, name)) => self.plugin_message(namespace, name, args, language),
+            None => match caller {
+                Some(caller) => self.plugin_message(caller, key, args, language),
+                None => Err(format!(
+                    "message {key:?}: only a plugin has messages of its own; name a message as namespace:key, such as \"party:invited\" or \"rift:queue.full\""
+                )),
+            },
+        }
+    }
+
+    fn notice_message(
+        &self,
+        name: &str,
+        args: &Args,
+        language: Option<&str>,
+    ) -> Result<Text, String> {
+        let label = format!("message \"{}:{name}\"", messages::RESERVED);
+        let notice = Notice::from_key(name).ok_or_else(|| {
+            format!("{label}: Rift has no such message; see docs/text.md for the keys")
+        })?;
+        check_call(&label, args, notice.args(), &[])?;
+        Ok(self.render_in(notice, args, language))
+    }
+
+    fn plugin_message(
+        &self,
+        namespace: &str,
+        name: &str,
+        args: &Args,
+        language: Option<&str>,
+    ) -> Result<Text, String> {
+        let label = format!("message \"{namespace}:{name}\"");
+        let space = self
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| format!("{label}: no enabled plugin has the namespace {namespace:?}"))?;
+        let message = space.plugin.get(name).ok_or_else(|| {
+            format!(
+                "{label}: plugin {namespace} has no such message in its {}",
+                messages::FILE
+            )
+        })?;
+        let content: Vec<&str> = message.args.iter().map(String::as_str).collect();
+        let styles: Vec<&str> = message.styles.iter().map(String::as_str).collect();
+        check_call(&label, args, &content, &styles)?;
+        let template = first_template(language, |tag| match tag {
+            Some(tag) => space
+                .replaced_in
+                .get(tag)
+                .and_then(|templates| templates.get(name))
+                .or_else(|| message.languages.get(tag))
+                .map(String::as_str),
+            None => Some(space.replaced.get(name).unwrap_or(&message.text).as_str()),
+        })
+        .unwrap_or(message.text.as_str());
+        Ok(
+            self.render_template(&label, template, &message.text, args, || {
+                self.words(name, message)
+            }),
+        )
+    }
+
+    /// `template` with `args`; when it does not render (only size can fail
+    /// a checked template), `default`, then `words`.
+    fn render_template(
+        &self,
+        label: &str,
+        template: &str,
+        default: &str,
+        args: &Args,
+        words: impl FnOnce() -> String,
+    ) -> Text {
         let rendered = |template: &str| {
             markup::parse(template, args, &self.styles)
                 .and_then(|component| simplify(component, label))
         };
-        rendered(self.markup_in(notice, language))
-            .or_else(|_| rendered(notice.default_markup()))
-            .unwrap_or_else(|_| Text::Plain(notice.default_markup().to_owned()))
+        rendered(template)
+            .or_else(|_| rendered(default))
+            .unwrap_or_else(|_| Text::Plain(words()))
     }
+
+    /// The words of a plugin message's default template with empty
+    /// arguments, as plain text within its limit; the key when it has none.
+    fn words(&self, key: &str, message: &Message) -> String {
+        let mut args = Args::new();
+        for name in &message.args {
+            args.insert(name, Arg::Text(String::new()));
+        }
+        for name in &message.styles {
+            args.insert(name, Arg::Style(Style::default()));
+        }
+        let mut words = markup::parse(&message.text, &args, &self.styles)
+            .map(|component| Text::Component(component).to_string())
+            .unwrap_or_default();
+        let mut end = words.len().min(super::MAX_PLAIN_BYTES);
+        while !words.is_char_boundary(end) {
+            end -= 1;
+        }
+        words.truncate(end);
+        if words.is_empty() {
+            key.clone_into(&mut words);
+        }
+        words
+    }
+}
+
+/// The first template `at` has for `language`: at the exact tag, then at
+/// the part before its first `_`, then at `None`, the default.
+fn first_template<'a>(
+    language: Option<&str>,
+    at: impl Fn(Option<&str>) -> Option<&'a str>,
+) -> Option<&'a str> {
+    language
+        .and_then(|tag| at(Some(tag)).or_else(|| at(Some(tag.split('_').next()?))))
+        .or_else(|| at(None))
+}
+
+/// The namespace and key of a configuration table's `namespace:key`, or
+/// `None` for an unqualified key: one of Rift's own messages.
+fn qualified<'k>(path: &str, key: &'k str) -> Result<Option<(&'k str, &'k str)>, String> {
+    let Some((namespace, name)) = key.split_once(':') else {
+        return Ok(None);
+    };
+    if namespace == messages::RESERVED {
+        return Err(format!(
+            "{path}: {key:?}: write Rift's own messages without \"{}:\", as {name:?}",
+            messages::RESERVED
+        ));
+    }
+    if !crate::plugins::manifest::valid_name(namespace) || !messages::valid_key(name) {
+        return Err(format!(
+            "{path}: {key:?} is not a message key; a plugin's message is namespace:key, such as \"party:invited\""
+        ));
+    }
+    Ok(Some((namespace, name)))
+}
+
+/// A call must give every declared argument, content for content and a
+/// style for a style, and nothing else.
+fn check_call(label: &str, args: &Args, content: &[&str], styles: &[&str]) -> Result<(), String> {
+    for name in args.names() {
+        let style = matches!(args.get(name), Some(Arg::Style(_)));
+        if content.contains(&name) {
+            if style {
+                return Err(format!(
+                    "{label}: <{name}> is a content argument, not a style"
+                ));
+            }
+        } else if styles.contains(&name) {
+            if !style {
+                return Err(format!(
+                    "{label}: <{name}> is a style argument; pass a style, not content"
+                ));
+            }
+        } else {
+            return Err(format!("{label}: the message has no argument <{name}>"));
+        }
+    }
+    if let Some(name) = content
+        .iter()
+        .chain(styles)
+        .find(|name| args.get(name).is_none())
+    {
+        return Err(format!("{label}: argument <{name}> is missing"));
+    }
+    Ok(())
+}
+
+/// Each argument of a plugin message as placeholder text and each style as
+/// an empty style, for checking templates.
+fn message_samples(message: &Message) -> Args {
+    let mut args = Args::new();
+    for name in &message.args {
+        args.insert(name, Arg::Text("x".into()));
+    }
+    for name in &message.styles {
+        args.insert(name, Arg::Style(Style::default()));
+    }
+    args
 }
 
 /// Each argument as placeholder text, for checking templates.
@@ -631,5 +1032,443 @@ mod tests {
         assert_eq!(accept["text"], "[Accept]");
         assert_eq!(accept["click_event"]["command"], "/party accept");
         assert_eq!(accept["hover_event"]["value"]["text"], "Join the party");
+        // docs/text.md, "Plugin messages".
+        let party = Messages::parse(
+            r#"
+[messages]
+created = "<good>Party created."
+invited = { text = "<accent><from></accent> invited you to a party.", args = ["from"] }
+full    = { text = "<bad>The party is full (<size>/<max>).", args = ["size", "max"] }
+tagged  = { text = "<team>[<tag>]</team> <name>", args = ["tag", "name"], styles = ["team"] }
+
+[languages.de]
+created = "<good>Party erstellt."
+invited = "<accent><from></accent> hat dich in eine Party eingeladen."
+"#,
+            "party",
+        )
+        .unwrap();
+        let catalog = Catalog::themed([])
+            .unwrap()
+            .with_plugin("party", party)
+            .unwrap()
+            .with_messages([(
+                "party:invited",
+                "<accent><from></accent> wants you in their party.",
+            )])
+            .unwrap()
+            .with_language(
+                "fr",
+                [("party:invited", "<accent><from></accent> vous invite.")],
+            )
+            .unwrap();
+        assert!(catalog.warnings().is_empty());
+        let invited = |language| {
+            catalog
+                .message_text(
+                    Some("party"),
+                    "invited",
+                    &Args::new().text("from", "Steve"),
+                    language,
+                )
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(invited(None), "Steve wants you in their party.");
+        assert_eq!(invited(Some("fr_fr")), "Steve vous invite.");
+        assert_eq!(
+            invited(Some("de_de")),
+            "Steve hat dich in eine Party eingeladen."
+        );
+    }
+
+    const PARTY: &str = r#"
+[messages]
+created = "Created."
+invited = { text = "<accent><from></accent> invited you.", args = ["from"] }
+tagged = { text = "<team>[<tag>]</team> <name>", args = ["tag", "name"], styles = ["team"] }
+
+[languages.de]
+created = "Erstellt."
+invited = "<from> hat dich eingeladen."
+
+[languages.de_at]
+created = "Gegründet."
+"#;
+
+    /// A catalogue with the plugin `party` enabled.
+    fn party() -> Catalog {
+        Catalog::themed([])
+            .unwrap()
+            .with_plugin("party", Messages::parse(PARTY, "party").unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn plugin_messages_follow_the_language_order_with_operator_replacements() {
+        let created = |catalog: &Catalog, language| {
+            catalog
+                .message_text(Some("party"), "created", &Args::new(), language)
+                .unwrap()
+        };
+        let plain = |text: &str| Text::Plain(text.into());
+        let catalog = party();
+        assert_eq!(created(&catalog, None), plain("Created."));
+        assert_eq!(created(&catalog, Some("de_de")), plain("Erstellt."));
+        assert_eq!(created(&catalog, Some("de_at")), plain("Gegründet."));
+        assert_eq!(created(&catalog, Some("fr_fr")), plain("Created."));
+        // Step 3: `text.messages` beats the plugin's default.
+        let catalog = party().with_messages([("party:created", "Made.")]).unwrap();
+        assert_eq!(created(&catalog, None), plain("Made."));
+        assert_eq!(created(&catalog, Some("fr_fr")), plain("Made."));
+        assert_eq!(created(&catalog, Some("de_de")), plain("Erstellt."));
+        // Step 2: the operator's language part beats the plugin's, but not
+        // the plugin's exact tag, which is step 1.
+        let catalog = catalog
+            .with_language("de", [("party:created", "Gemacht.")])
+            .unwrap();
+        assert_eq!(created(&catalog, Some("de_de")), plain("Gemacht."));
+        assert_eq!(created(&catalog, Some("de")), plain("Gemacht."));
+        assert_eq!(created(&catalog, Some("de_at")), plain("Gegründet."));
+        // Step 1: the operator's exact tag beats everything.
+        let catalog = catalog
+            .with_language("de-AT", [("party:created", "Servus.")])
+            .unwrap();
+        assert_eq!(created(&catalog, Some("de_at")), plain("Servus."));
+        assert_eq!(created(&catalog, Some("de_de")), plain("Gemacht."));
+        assert_eq!(created(&catalog, Some("fr_fr")), plain("Made."));
+        // A message the language lacks comes from the default.
+        assert_eq!(
+            catalog
+                .message_text(Some("party"), "tagged", &tagged_args(), Some("de_at"))
+                .unwrap()
+                .to_string(),
+            "[AB] Steve"
+        );
+        // Rift's own messages are untouched.
+        assert_eq!(
+            catalog.render_in(Notice::QueueLeft, &Args::new(), Some("de")),
+            plain("Left the queue.")
+        );
+        assert_eq!(catalog.languages().collect::<Vec<_>>(), ["de", "de_at"]);
+    }
+
+    fn tagged_args() -> Args {
+        Args::new()
+            .style("team", markup::style_arg("<red><bold>").unwrap())
+            .text("tag", "AB")
+            .text("name", "Steve")
+    }
+
+    #[test]
+    fn messages_are_sent_by_key_and_checked_at_the_call() {
+        let catalog = party();
+        let from = Args::new().text("from", "Steve");
+        let invited = catalog
+            .message(Some("party"), "invited", &from, None)
+            .unwrap();
+        assert_eq!(
+            Text::Component(invited.clone()).to_string(),
+            "Steve invited you."
+        );
+        assert!(
+            invited.to_string().contains("\"color\":\"aqua\""),
+            "{invited}"
+        );
+        // A qualified key reaches the same message from anywhere.
+        assert_eq!(
+            catalog.message(None, "party:invited", &from, None).unwrap(),
+            invited
+        );
+        assert_eq!(
+            catalog
+                .message(Some("other"), "party:invited", &from, None)
+                .unwrap(),
+            invited
+        );
+        assert_eq!(
+            catalog
+                .message_text(Some("party"), "invited", &from, Some("de_de"))
+                .unwrap(),
+            Text::Plain("Steve hat dich eingeladen.".into())
+        );
+        // Plain text is a component with text alone.
+        assert_eq!(
+            catalog
+                .message(None, "party:created", &Args::new(), None)
+                .unwrap(),
+            json!({"text": "Created."})
+        );
+        // `rift:` names Rift's own messages as the operator styled them.
+        let queued = Args::new().text("server", "lobby").text("position", "3");
+        assert_eq!(
+            catalog
+                .message_text(Some("party"), "rift:queue.joined", &queued, Some("de"))
+                .unwrap(),
+            catalog.render_in(Notice::QueueJoined, &queued, Some("de"))
+        );
+        // Style arguments wrap what the template puts inside them.
+        let tagged = catalog
+            .message(None, "party:tagged", &tagged_args(), None)
+            .unwrap();
+        assert_eq!(Text::Component(tagged.clone()).to_string(), "[AB] Steve");
+        assert!(tagged.to_string().contains("\"color\":\"red\""), "{tagged}");
+        let style = || Arg::Style(Style::default());
+        let with = |args: &[(&str, Arg)]| {
+            let mut all = Args::new();
+            for (name, value) in args {
+                all.insert(name, value.clone());
+            }
+            all
+        };
+        let text = |value: &str| Arg::Text(value.into());
+        for (caller, key, args, expected) in [
+            (
+                None,
+                "invited",
+                from.clone(),
+                "message \"invited\": only a plugin has messages of its own",
+            ),
+            (
+                Some("party"),
+                "nope",
+                Args::new(),
+                "message \"party:nope\": plugin party has no such message in its messages.toml",
+            ),
+            (
+                None,
+                "other:created",
+                Args::new(),
+                "message \"other:created\": no enabled plugin has the namespace \"other\"",
+            ),
+            (
+                Some("other"),
+                "created",
+                Args::new(),
+                "no enabled plugin has the namespace \"other\"",
+            ),
+            (
+                None,
+                "rift:queue.nope",
+                Args::new(),
+                "message \"rift:queue.nope\": Rift has no such message",
+            ),
+            (
+                None,
+                "party:invited",
+                Args::new(),
+                "message \"party:invited\": argument <from> is missing",
+            ),
+            (
+                None,
+                "party:invited",
+                with(&[("from", text("x")), ("to", text("y"))]),
+                "message \"party:invited\": the message has no argument <to>",
+            ),
+            (
+                None,
+                "party:created",
+                from.clone(),
+                "the message has no argument <from>",
+            ),
+            (
+                None,
+                "party:invited",
+                with(&[("from", style())]),
+                "<from> is a content argument, not a style",
+            ),
+            (
+                None,
+                "party:tagged",
+                with(&[("team", text("x")), ("tag", text("t")), ("name", text("n"))]),
+                "<team> is a style argument",
+            ),
+            (
+                None,
+                "party:tagged",
+                with(&[("tag", text("t")), ("name", text("n"))]),
+                "argument <team> is missing",
+            ),
+            (
+                None,
+                "rift:queue.left",
+                with(&[("server", text("x"))]),
+                "message \"rift:queue.left\": the message has no argument <server>",
+            ),
+            (
+                None,
+                "rift:switch.failed",
+                with(&[("reason", style())]),
+                "<reason> is a content argument",
+            ),
+            (
+                None,
+                "rift:switch.failed",
+                Args::new(),
+                "argument <reason> is missing",
+            ),
+        ] {
+            let error = catalog.message(caller, key, &args, None).unwrap_err();
+            assert!(error.contains(expected), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_message_that_does_not_render_with_its_arguments_falls_back() {
+        // Too many painted characters for the replacement: the plugin's
+        // default template.
+        let catalog = party()
+            .with_messages([(
+                "party:invited",
+                "<gradient:red:blue><from></gradient> invited you.",
+            )])
+            .unwrap();
+        let long = Args::new().text("from", "x".repeat(1000));
+        let text = catalog
+            .message_text(None, "party:invited", &long, None)
+            .unwrap();
+        assert!(text.to_string().ends_with("x invited you."), "{text}");
+        assert!(
+            matches!(&text, Text::Component(component) if component.to_string().contains("aqua")),
+            "{text:?}"
+        );
+        // Too large for every template: the default's words.
+        let huge = Args::new().text("from", "x".repeat(40 * 1024));
+        let text = catalog
+            .message_text(None, "party:invited", &huge, None)
+            .unwrap();
+        assert!(
+            matches!(&text, Text::Plain(words) if words.trim() == "invited you."),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_templates_and_replacements_are_checked_at_load() {
+        let plugin = |text: &str| {
+            Catalog::themed([])
+                .unwrap()
+                .with_plugin("party", Messages::parse(text, "party").unwrap())
+        };
+        for (text, expected) in [
+            (
+                "[messages]\na = \"<bolt>x\"",
+                "plugin party: messages.toml: [messages] \"a\": <bolt> at byte 0: unknown tag",
+            ),
+            (
+                "[messages]\na = \"Hi <name>\"",
+                "<name> at byte 3: unknown tag",
+            ),
+            (
+                "[messages]\na = { text = \"<name>\", args = [\"name\"] }\n[languages.de]\na = \"<nom>\"",
+                "plugin party: messages.toml: [languages.de] \"a\": <nom> at byte 0: unknown tag",
+            ),
+            (
+                "[messages]\na = { text = \"<color:orange>x\" }",
+                "is not a colour name",
+            ),
+        ] {
+            let error = plugin(text).unwrap_err();
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+        // Templates use the theme of the configuration being loaded.
+        assert!(plugin("[messages]\na = \"<brand>x\"").is_err());
+        Catalog::themed([("brand", "<gold>")])
+            .unwrap()
+            .with_plugin(
+                "party",
+                Messages::parse("[messages]\na = \"<brand>x\"", "party").unwrap(),
+            )
+            .unwrap();
+        plugin("[messages]\na = { text = \"<team>x</team>\", styles = [\"team\"] }").unwrap();
+        for (entry, expected) in [
+            (
+                ("party:nope", "x"),
+                "text.messages: unknown message \"party:nope\"; plugin party has no message \"nope\" in its messages.toml",
+            ),
+            (
+                ("party:invited", "<from> <to>"),
+                "text.messages[\"party:invited\"]: <to> at byte 7: unknown tag",
+            ),
+            (("party:tagged", "<team>x</team> <bolt>"), "unknown tag"),
+            (
+                ("party:created", ""),
+                "text.messages[\"party:created\"] must contain 1..=4096 bytes",
+            ),
+            (
+                ("rift:queue.left", "x"),
+                "write Rift's own messages without \"rift:\"",
+            ),
+            (("party:", "x"), "is not a message key"),
+            (("par ty:x", "x"), "is not a message key"),
+            (
+                ("queue.nope", "x"),
+                "text.messages: unknown message \"queue.nope\"; see docs/text.md for the keys",
+            ),
+        ] {
+            let error = party().with_messages([entry]).unwrap_err();
+            assert!(error.contains(expected), "{entry:?}: {error}");
+        }
+        let error = party()
+            .with_language("de", [("party:invited", "<to>")])
+            .unwrap_err();
+        assert!(
+            error.starts_with("text.languages.de[\"party:invited\"]: <to> at byte 0"),
+            "{error}"
+        );
+        let error = party()
+            .with_language("de", [("party:nope", "x")])
+            .unwrap_err();
+        assert!(
+            error.starts_with("text.languages.de: unknown message \"party:nope\""),
+            "{error}"
+        );
+        // An enabled plugin without messages.toml has an empty catalogue, so
+        // an unknown key there is an error too.
+        let catalog = party().with_plugin("empty", Messages::default()).unwrap();
+        assert!(
+            catalog
+                .clone()
+                .with_messages([("empty:x", "y")])
+                .unwrap_err()
+                .contains("unknown message \"empty:x\"")
+        );
+        let counts: Vec<_> = catalog
+            .namespaces()
+            .map(|(name, messages)| (name, messages.len(), messages.languages().count()))
+            .collect();
+        assert_eq!(counts, [("empty", 0, 0), ("party", 3, 2)]);
+        assert_eq!(catalog.namespace("party").unwrap().len(), 3);
+        assert!(catalog.namespace("other").is_none());
+    }
+
+    #[test]
+    fn replacements_for_a_plugin_that_is_not_enabled_are_warnings() {
+        let catalog = party()
+            .with_messages([("other:created", "<bolt>")])
+            .unwrap()
+            .with_language("de", [("other:created", "x")])
+            .unwrap();
+        assert_eq!(
+            catalog.warnings(),
+            [
+                "text.messages[\"other:created\"]: no enabled plugin has the namespace \"other\"; the replacement is ignored",
+                "text.languages.de[\"other:created\"]: no enabled plugin has the namespace \"other\"; the replacement is ignored",
+            ]
+        );
+        assert!(
+            catalog
+                .message(None, "other:created", &Args::new(), None)
+                .is_err()
+        );
+        assert!(Catalog::default().warnings().is_empty());
+        // Unqualified keys stay Rift's own, exactly as before.
+        assert_eq!(
+            Catalog::new([], [("queue.left", "Bye.")]).unwrap(),
+            Catalog::themed([])
+                .unwrap()
+                .with_messages([("queue.left", "Bye.")])
+                .unwrap()
+        );
     }
 }

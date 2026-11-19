@@ -313,9 +313,114 @@ finds:
 4. the built-in English text.
 
 Tags are 2–16 bytes of `a-z`, `0-9` and `_`; `de-DE` is normalized to
-`de_de`. A configuration may hold at most 64 languages with 256 messages
-each. Rift checks keys and templates when the configuration loads, like
-`text.messages`.
+`de_de`. A configuration may hold at most 64 languages. `text.messages` and
+each language hold at most 1024 entries, counting
+[plugin messages](#plugin-messages). Rift checks keys and templates when the
+configuration loads, like `text.messages`.
+
+## Plugin messages
+
+A plugin can ship its own messages in a `messages.toml` beside its
+`plugin.toml`. Rift renders them in each player's language with the network's
+theme, and the operator can reword any of them without touching the plugin.
+
+```toml
+# plugins/party/messages.toml
+[messages]
+created = "<good>Party created."
+invited = { text = "<accent><from></accent> invited you to a party.", args = ["from"] }
+full    = { text = "<bad>The party is full (<size>/<max>).", args = ["size", "max"] }
+tagged  = { text = "<team>[<tag>]</team> <name>", args = ["tag", "name"], styles = ["team"] }
+
+[languages.de]
+created = "<good>Party erstellt."
+invited = "<accent><from></accent> hat dich in eine Party eingeladen."
+```
+
+- `[messages]` holds the defaults. A value is a template, or a table with
+  `text`, the `args` the template may use and the
+  [`styles`](#style-arguments) it may use.
+- `[languages.<tag>]` holds templates only, for keys in `[messages]`. A
+  language uses the arguments and styles its default declares and need not
+  translate every key. Tags are normalized like `text.languages` tags.
+- Templates are [markup](#markup-tags) with the operator's [theme](#theme).
+- A key with a `.` must be quoted, as in `"queue.full" = "..."`: TOML reads a
+  bare `queue.full` as a table.
+
+The plugin folder's name is the catalog's **namespace**. Both persistent
+plugins and script-mode folders may ship the file. `rift` is reserved for
+Rift's own messages, so a folder named `rift` may not have one. Rift reads the
+file with the configuration, without running plugin code: at startup, in
+`rift check` and on a reload. A changed file takes effect on the next reload
+without restarting the plugin. A plugin without the file has an empty catalog.
+
+A plugin sends its messages by key; a key with a namespace, such as
+`party:invited` or `rift:queue.full`, names another catalog's message.
+
+### Operator replacements
+
+The operator rewords a plugin's message in `text.messages` and
+`text.languages`, by its qualified key `namespace:key`:
+
+```lua
+rift.setup {
+    text = {
+        messages = {
+            ["party:invited"] = "<accent><from></accent> wants you in their party.",
+        },
+        languages = {
+            fr = { ["party:invited"] = "<accent><from></accent> vous invite." },
+        },
+    },
+}
+```
+
+A key without a namespace stays one of [Rift's own messages](#rifts-own-messages),
+so existing configurations do not change. Write those without `rift:`.
+
+Rift takes the first template it finds for the player's language. At each
+step the operator's template wins over the plugin's:
+
+1. `text.languages[tag]`, else the plugin's `[languages.<tag>]`, for the exact
+   tag (`de_at`),
+2. the same pair for the language part (`de`),
+3. `text.messages`, else the plugin's `[messages]`.
+
+### Checks and limits
+
+`rift check` and every configuration load check the catalogs:
+
+- every template parses with the arguments and styles its message declares
+  and no others, and with the theme of the configuration;
+- a replacement names a message that exists. An unknown key in the namespace
+  of an enabled plugin is an error. A namespace no enabled plugin has is a
+  warning, and an error with `rift check --strict`, so that disabling a plugin
+  for a day does not break the configuration. Rift ignores such a
+  replacement.
+
+`rift check` prints each plugin's message and language counts:
+
+```text
+rift: plugin party: mode script, sandboxed; messages 4, languages 1
+```
+
+Parsing is strict, like `plugin.toml`: an unknown key, a value of the wrong
+type, a name in both `args` and `styles`, or a language key missing from
+`[messages]` is an error that names the file and the key.
+
+| Limit | Value |
+| --- | --- |
+| `messages.toml` | at most 256 KiB |
+| Messages per catalog | 256 |
+| Languages per catalog | 64 |
+| Key | 1–64 characters of `a-z`, `0-9`, `_`, `-` and `.` |
+| Template | 1–4096 bytes |
+| Arguments and styles per message | 16 |
+| Argument and style names | 1–64 characters of `a-z`, `0-9`, `_` and `-`, not a built-in tag |
+
+Only size can make an accepted message fail to render: arguments can push a
+component past 32 KiB. Rift then falls back to the plugin's default template,
+then to the message's words.
 
 ## How each client sees it
 
