@@ -289,7 +289,12 @@ async fn a_new_leader_rebuilds_the_order_from_resubmitted_tickets() {
         view.mine.get(&21) == Some(&2) && view.head == head(&name_a, 20)
     })
     .await;
-    assert_eq!(net.runtimes[new].queue_lengths()["game"], 3);
+    // The new leader's own count follows once every peer has resubmitted;
+    // b's view above may still be the one the old leader sent.
+    until(WAIT, || {
+        net.runtimes[new].queue_lengths().get("game") == Some(&3)
+    })
+    .await;
     // Admission goes on under the new leader, in the same order.
     drop(occupant);
     until(WAIT, || {
