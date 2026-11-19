@@ -88,7 +88,8 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
 }
 
 /// Markup arguments from a Lua table: strings and numbers are shown as
-/// written, tables are chat components.
+/// written, `{ style = "<red>" }` is a style, other tables are chat
+/// components.
 fn arguments(args: Option<Table>) -> Result<Args, String> {
     let mut parsed = Args::new();
     let Some(args) = args else {
@@ -113,16 +114,40 @@ fn arguments(args: Option<Table>) -> Result<Args, String> {
             Value::Integer(number) => Arg::Text(number.to_string()),
             Value::Number(number) => Arg::Text(number.to_string()),
             Value::Boolean(value) => Arg::Text(value.to_string()),
-            value @ Value::Table(_) => match Text::lua(value, &label)? {
-                Text::Plain(text) => Arg::Text(text),
-                Text::Component(component) => Arg::Component(component),
-            },
+            Value::Table(table) => {
+                let style = table
+                    .raw_get::<Value>("style")
+                    .map_err(|error| format!("{label}: {error}"))?;
+                if style.is_nil() {
+                    match Text::lua(Value::Table(table), &label)? {
+                        Text::Plain(text) => Arg::Text(text),
+                        Text::Component(component) => Arg::Component(component),
+                    }
+                } else {
+                    Arg::Style(style_argument(&table, style, &label)?)
+                }
+            }
             value => return Err(format!("{label}: unsupported {}", value.type_name())),
         };
         parsed.insert(&name, arg);
     }
     parsed.validate("rift.text.mini")?;
     Ok(parsed)
+}
+
+/// A style argument: a table with only `style`, markup made only of
+/// formatting tags.
+fn style_argument(table: &Table, style: Value, label: &str) -> Result<markup::Style, String> {
+    if table.pairs::<Value, Value>().count() != 1 {
+        return Err(format!("{label}: a style argument takes only style"));
+    }
+    let Value::String(source) = style else {
+        return Err(format!("{label}: style must be a string of markup"));
+    };
+    let source = source
+        .to_str()
+        .map_err(|_| format!("{label}: style must be UTF-8"))?;
+    markup::style_arg(&source).map_err(|error| format!("{label}: {error}"))
 }
 
 /// A JSON value as Lua: arrays are sequences, objects tables.
@@ -208,5 +233,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown tag"), "{error}");
+    }
+
+    #[test]
+    fn lua_style_arguments_wrap_template_text() {
+        assert_eq!(
+            eval(
+                r#"local t = rift.text.mini("<team>[<tag>]</team>",
+                       { team = { style = "<#55ffff><bold>" }, tag = "x" })
+                   return t.color .. "|" .. tostring(t.bold) .. "|" .. t.text"#
+            ),
+            "#55ffff|true|[x]"
+        );
+        assert_eq!(
+            eval(r#"return rift.text.mini("<s>a</s>", { s = { style = "" } }).text"#),
+            "a"
+        );
+        let lua = Lua::new();
+        let api = lua.create_table().unwrap();
+        install(&lua, &api).unwrap();
+        lua.globals().set("rift", api).unwrap();
+        let error = |code: &str| lua.load(code).eval::<Value>().unwrap_err().to_string();
+        let extra = error(r#"return rift.text.mini("<s>a", { s = { style = "<red>", x = 1 } })"#);
+        assert!(
+            extra.contains("a style argument takes only style"),
+            "{extra}"
+        );
+        let text = error(r#"return rift.text.mini("<s>a", { s = { style = "<red>words" } })"#);
+        assert!(text.contains("only formatting tags are allowed"), "{text}");
+        let number = error(r#"return rift.text.mini("<s>a", { s = { style = 1 } })"#);
+        assert!(
+            number.contains("style must be a string of markup"),
+            "{number}"
+        );
     }
 }

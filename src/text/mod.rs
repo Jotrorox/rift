@@ -344,6 +344,20 @@ fn authoring(
                         Json::String(text) => Arg::Text(text.clone()),
                         Json::Number(number) => Arg::Text(number.to_string()),
                         Json::Bool(value) => Arg::Text(value.to_string()),
+                        // `{"style": "<red>"}`: no component has a `style` key.
+                        Json::Object(object) if object.contains_key("style") => {
+                            if object.len() != 1 {
+                                return Err(format!(
+                                    "args.{name}: a style argument takes only style"
+                                ));
+                            }
+                            let source = object["style"].as_str().ok_or_else(|| {
+                                format!("args.{name}.style must be a string of markup")
+                            })?;
+                            let style = markup::style_arg(source)
+                                .map_err(|error| format!("args.{name}.style: {error}"))?;
+                            Arg::Style(style)
+                        }
                         Json::Object(_) | Json::Array(_) => {
                             let mut component = value.clone();
                             expand(&mut component, styles, depth + 1)?;
@@ -354,7 +368,9 @@ fn authoring(
                     args.insert(name, arg);
                 }
             }
-            Some(_) => return Err("args must be an object of names to text or components".into()),
+            Some(_) => {
+                return Err("args must be an object of names to text, components or styles".into());
+            }
         }
         args.validate("args")?;
         return markup::parse(markup, &args, styles).map(Some);
@@ -642,6 +658,39 @@ mod tests {
             Text::Component(json!({"text": "", "extra": [
                 {"text": "["}, {"text": "Admin", "color": "gold"}, {"text": "]"},
             ]}))
+        );
+        assert_eq!(
+            Text::component(
+                json!({"mini": "<team>[<tag>]</team>",
+                       "args": {"team": {"style": "<#55ffff><bold>"}, "tag": "x"}}),
+                "m"
+            )
+            .unwrap(),
+            Text::Component(json!({"text": "[x]", "color": "#55ffff", "bold": true}))
+        );
+        assert_eq!(
+            Text::component(
+                json!({"mini": "<team>x", "args": {"team": {"style": "<red>", "color": "red"}}}),
+                "m"
+            )
+            .unwrap_err(),
+            "m: args.team: a style argument takes only style"
+        );
+        assert_eq!(
+            Text::component(
+                json!({"mini": "<team>x", "args": {"team": {"style": 1}}}),
+                "m"
+            )
+            .unwrap_err(),
+            "m: args.team.style must be a string of markup"
+        );
+        assert_eq!(
+            Text::component(
+                json!({"mini": "<team>x", "args": {"team": {"style": "<red>words"}}}),
+                "m"
+            )
+            .unwrap_err(),
+            "m: args.team.style: only formatting tags are allowed, found text \"words\""
         );
         assert_eq!(
             Text::component(json!({"mini": "x", "color": "red"}), "m").unwrap_err(),

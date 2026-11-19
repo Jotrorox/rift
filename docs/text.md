@@ -55,7 +55,7 @@ Where you can write it:
 
 | Function | Returns |
 | --- | --- |
-| `rift.text.mini(markup, args)` | A component table. `args` maps names to strings or numbers (shown as written) or component tables |
+| `rift.text.mini(markup, args)` | A component table. `args` maps names to strings or numbers (shown as written), component tables or [styles](#style-arguments) |
 | `rift.text.legacy(text, marker)` | A component table from `&` codes (or another marker) |
 | `rift.text.to_legacy(text)` | A string with `§` codes |
 | `rift.text.plain(text)` | The words without formatting |
@@ -70,8 +70,9 @@ The tag syntax is the one many Minecraft developers know from MiniMessage.
 | --- | --- |
 | `<red>`, `<#ff8800>`, `<color:red>`, `<c:#ff8800>` | Color. The 16 names, plus `grey` and `dark_grey` |
 | `<bold>` `<b>`, `<italic>` `<i>` `<em>`, `<underlined>` `<u>`, `<strikethrough>` `<st>`, `<obfuscated>` `<obf>` | Decoration. `<!bold>` or `<bold:false>` turns it off |
-| `<gradient:red:#5555ff[:...]>` | One color per character, interpolated between two or more stops |
-| `<rainbow>`, `<rainbow:0.5>` | A rainbow, optionally starting at another hue (0..1) |
+| `<gradient:red:#5555ff[:...][:phase]>` | One color per character, interpolated between two or more stops, shifted by `phase` |
+| `<transition:red:#5555ff[:...][:phase]>` | One color for the whole text: the point `phase` along the stops |
+| `<rainbow>`, `<rainbow:0.5>`, `<rainbow:!>`, `<rainbow:!0.5>` | A rainbow, optionally starting at another hue (-1..1). `!` reverses it |
 | `<hover:show_text:'markup'>` | Hover text. Also `show_item:id[:count]` and `show_entity:type:uuid[:'name']` |
 | `<click:run_command:/spawn>` | Click. Also `suggest_command`, `open_url` (http and https only), `copy_to_clipboard` and `change_page` |
 | `<insert:text>` | Text inserted into chat on shift-click |
@@ -79,9 +80,11 @@ The tag syntax is the one many Minecraft developers know from MiniMessage.
 | `<shadow:black[:0.5]>`, `<!shadow>` | Text shadow color and opacity (default 0.25) |
 | `<newline>` `<br>` | Line break |
 | `<key:key.jump>` | The player's key binding |
+| `<sprite:[atlas:]sprite>` | A sprite from an atlas: `<sprite:item/diamond>`, `<sprite:blocks:block/stone>` |
+| `<head:name>`, `<head:uuid>`, `<head:name:false>` | A player's head. `false` leaves out the hat layer |
 | `<lang:key[:'arg']...>`, `<lang_or:key:'fallback'[:'arg']...>` | Translation; the arguments are markup |
 | `<reset>` | Closes every open tag |
-| `<name>` | An argument, or a [theme](#theme) style such as `<accent>` |
+| `<name>` | An argument, or a [theme](#theme) style such as `<accent>`. An argument wins over a theme style of the same name |
 
 Rules:
 
@@ -98,6 +101,58 @@ Rules:
   `<bolt> at byte 3: unknown tag; not built in, an argument or a style`.
   Typos show up at the call or when the configuration loads, not in game.
 
+Gradients, transitions and rainbows:
+
+- **Phase.** `phase` is a number from -1 to 1, default 0, as in MiniMessage.
+  A trailing argument of `<gradient>` or `<transition>` that is a number is
+  the phase; no color name is a number. A negative phase is `1 + phase` along
+  the stops in reverse order, so `-1` reverses them.
+- **`<transition>`** colors the whole text with one color: the point `phase`
+  of the way from the first stop to the last. `0` is the first stop and `1`
+  the last.
+- **`<gradient>` with a phase** starts `phase` of the way along the stops
+  and moves as far as it would without one. Past the last stop it runs back
+  to the first, so a phase of `1` on two stops goes from the second color
+  back to the first. A plugin animates text by sending the same template
+  with a moving phase.
+- **`<rainbow>`** takes a hue from -1 to 1 to start at; `-0.25` is the same
+  hue as `0.75`. `!` before it runs the rainbow backwards: `<rainbow:!>`,
+  `<rainbow:!0.5>`.
+
+Sprites and heads:
+
+- They write `object` content, which clients before 1.21.9 cannot show; Rift
+  leaves it out for them.
+- `<sprite:item/diamond>` is a sprite of the default atlas
+  (`{"object": "atlas", "sprite": "item/diamond"}`); with two arguments the
+  first is the atlas. Quote a namespaced id, which contains `:`:
+  `<sprite:'minecraft:items':'minecraft:item/diamond'>`.
+- `<head:Notch>` is the head of a player name: 1 to 16 letters, digits and
+  `_`. A UUID, with or without dashes, is the player's id instead.
+  `<head:Notch:false>` leaves out the outer (hat) layer.
+
+## Style arguments
+
+An argument can be a style instead of content. Its tag wraps whatever the
+template puts inside it:
+
+```lua
+rift.text.mini("<team>[<tag>]</team> <name>", {
+    team = { style = "<#55ffff><bold>" },
+    tag = clan,
+    name = ctx.name,
+})
+```
+
+The JSON form is the same object: `{"mini": "<team>[<tag>]</team>", "args":
+{"team": {"style": "<#55ffff><bold>"}, "tag": "x"}}`.
+
+- The value is markup made only of formatting tags, the same rule as a
+  [theme](#theme) style: color, decoration, font, shadow, insert, click and
+  hover. An empty string styles nothing.
+- The object takes only `style`.
+- `</team>` closes it, and every tag opened inside it.
+
 ## Legacy codes
 
 | Code | Effect |
@@ -112,8 +167,10 @@ A marker that does not start a known code is kept as written.
 ## Theme
 
 Named styles are tags in every piece of markup: plugins, the bus, the
-configuration and Rift's own messages. Define them in the configuration as
-markup made only of formatting tags:
+configuration and Rift's own messages. An argument of the same name wins, so
+a plugin's `<info>` argument is shown even when the theme has an `info`
+style. Define them in the configuration as markup made only of formatting
+tags:
 
 ```lua
 rift.setup {
