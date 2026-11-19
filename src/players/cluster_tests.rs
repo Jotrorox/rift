@@ -486,7 +486,7 @@ async fn every_peer_counts_and_lists_the_whole_network() {
             .map(|player| player.name)
             .collect();
         assert_eq!(names, ["Alice", "Bob", "Carol"]);
-        let entries = roster.tab_entries("survival", Viewer::Public);
+        let entries = roster.tab_entries("survival", Viewer::Public, |_| true);
         assert_eq!(entries.len(), 2);
         let mut listed: Vec<_> = players
             .list(None)

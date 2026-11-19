@@ -118,7 +118,8 @@ rift.config.tab_list = {
     -- A string (section-sign codes work) or a chat component table.
     header = { text = "My Network", color = "gold", bold = true },
     footer = "\u{00A7}7{online} players online \u{00A7}8| \u{00A7}7You are on {server}",
-    players = "network", -- "server" (the default) lists only the current backend's players.
+    players = "network", -- "server" (the default) lists only the current backend's players;
+                         -- "group" lists the player's service group.
     names = "all",       -- Rank names on the backend's own entries too.
     format = "{prefix}{name}{suffix} &8{server}",
 }
@@ -127,7 +128,8 @@ rift.config.tab_list = {
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `header`, `footer` | none | Text above and below the list. Each is limited to 4096 bytes before placeholders are replaced. |
-| `players` | `"server"` | `"server"` lists only the current backend's players. `"network"` adds the players on every other backend. |
+| `players` | `"server"` | `"server"` lists only the current backend's players. `"group"` adds the players on the other instances of the player's service group; see [service group players](#service-group-players). `"network"` adds the players on every other backend. |
+| `groups` | every service group | With `players = "group"`, the service groups whose instances share a list. Up to 64 names of `service_groups`. |
 | `names` | `"network"` | `"network"` puts rank names on the entries Rift adds. `"all"` also renames the backend's own entries; see [names on every entry](#names-on-every-entry). |
 | `format` | `{prefix}{name}{suffix}` | How names are shown; see [name format](#name-format). Up to 256 bytes, and it must contain `{name}`. |
 
@@ -166,6 +168,27 @@ other backend.
   never listed twice and moving between servers needs no cleanup.
 - Entries Rift adds show the player's skin when authentication is enabled and
   the default skin otherwise, with full signal bars and no game mode.
+
+### Service group players
+
+With `players = "group"`, a player on an instance of a service group also sees
+the players on that group's other instances, and nobody else: a BedWars
+player sees every BedWars round, not the lobby.
+
+```lua
+rift.config.tab_list = {
+    players = "group",
+    groups = { "bedwars", "skywars" }, -- Omit to share every service group's list.
+}
+```
+
+- A player on a static backend, or on an instance of a group `groups` does
+  not name, sees only that backend's players, as with `"server"`.
+- Entries Rift adds behave as with `"network"`: no duplicates, the player's
+  skin, and the backend's own entries left alone.
+- Moving between instances or groups updates the list within half a second.
+- `{online}` still counts the whole network and `{server_online}` the
+  player's backend.
 
 ### Prefixes, suffixes and order
 

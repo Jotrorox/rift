@@ -942,7 +942,7 @@ async fn tab_list_shows_header_footer_and_players_on_other_servers() {
         let mut fixture = SessionFixture::with_tab_list(rift::tab_list::TabList {
             header: Some(serde_json::json!("Hi {player}")),
             footer: Some(serde_json::json!("{online} on {server}")),
-            network: true,
+            players: rift::tab_list::Players::Network,
             ..Default::default()
         })
         .await;

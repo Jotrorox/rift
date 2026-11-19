@@ -1131,6 +1131,7 @@ pub async fn handle(
                         tab_override.as_ref(),
                         session.player_name().unwrap_or_default(),
                         &current_backend,
+                        |server: &str| live_snapshot.config.instances.get(server).map(|instance| instance.group.as_str()),
                     );
                     timeout(HANDSHAKE_TIMEOUT, session.sync_tab_list(&view)).await??;
                     tab_synced = Some(tab_key);

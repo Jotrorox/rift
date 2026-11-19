@@ -1627,10 +1627,19 @@ fn definition_values(config: &Config) -> Value {
         value
     });
     let tab_list = config.tab_list.as_ref().map(|list| {
+        use rift::tab_list::Players;
         json!({
             "header": list.header,
             "footer": list.footer,
-            "players": if list.network { "network" } else { "server" },
+            "players": match list.players {
+                Players::Server => "server",
+                Players::Network => "network",
+                Players::Groups(_) => "group",
+            },
+            "groups": match &list.players {
+                Players::Groups(Some(groups)) => json!(groups),
+                _ => Value::Null,
+            },
             "names": if list.backend_names { "all" } else { "network" },
             "format": list.format,
         })
