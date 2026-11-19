@@ -201,6 +201,7 @@ impl Client {
             }
         }
         let tls = rift_messaging::tls_client_config(&config.ca).map_err(config_error)?;
+        let servers = servers(&config);
         let (snapshot_path, fallback) = match config.offline_policy {
             OfflinePolicy::Deny => (None, None),
             OfflinePolicy::LastSnapshot(path) => (Some(path), None),
@@ -231,7 +232,7 @@ impl Client {
             shared.load_snapshot(path);
         }
         let target = Target {
-            servers: servers(&config),
+            servers,
             next: AtomicUsize::new(0),
             tls,
             token: token.into(),
