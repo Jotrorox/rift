@@ -121,7 +121,8 @@ pub async fn database(
     wait_for_state(&cluster).await?;
     // Every peer is a node: configurations evaluated from now on have the
     // peer-nodes, which follow the peer table.
-    let _ = super::peer_nodes::load(&cluster)?;
+    // The task follows the peer table and ends with the cluster.
+    drop(super::peer_nodes::load(&cluster)?);
     let _ = DATABASE.set(database.clone());
     Ok(Attached { cluster, database })
 }

@@ -109,8 +109,10 @@ async fn the_embedded_agent_starts_a_server_on_the_peer_node_its_labels_select()
         ),
         row("eu-3", "10.0.0.3:7444", &[("pool", "games")], true),
     ];
-    let mut config = Config::default();
-    config.nodes = peer_nodes::from_rows(&rows, None);
+    let config = Config {
+        nodes: peer_nodes::from_rows(&rows, None),
+        ..Config::default()
+    };
     // A witness runs no agent and is no node.
     assert!(!config.nodes.contains_key("eu-3"));
     assert_eq!(config.nodes["eu-2"].memory_mb, Some(4096));
