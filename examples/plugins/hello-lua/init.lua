@@ -1,6 +1,7 @@
 -- hello-lua: the Lua example plugin, behaving exactly like hello-rs, hello-c
--- and hello-go (see examples/plugins/README.md). Each handler body would
--- work unchanged in rift.lua.
+-- and hello-go (see examples/plugins/README.md). Each handler body except
+-- the hello command's, which sends a message of the plugin's own, would work
+-- unchanged in rift.lua.
 local _, config = ...
 local deny = config.deny
 
@@ -14,7 +15,8 @@ rift.command("hello", {
     permission = "hello.use",
     suggest = "players",
     run = function(ctx)
-        return { message = "Hello, " .. ctx.name .. "!" }
+        -- The text lives in messages.toml, translated per player.
+        return { message = rift.text.message("greeting", { name = ctx.name }) }
     end,
 })
 

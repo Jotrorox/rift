@@ -1,0 +1,7 @@
+# The plugin's message catalogue (see docs/text.md, "Plugin messages"): the
+# reply to /hello, sent by key and rendered in each player's language.
+[messages]
+greeting = { text = "Hello, <name>!", args = ["name"] }
+
+[languages.de]
+greeting = "Hallo, <name>!"

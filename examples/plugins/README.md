@@ -11,12 +11,15 @@ Four persistent plugins that behave identically, one per supported language:
 | [`vanish-lua`](vanish-lua) | Lua | nothing to build | [Visibility](../../docs/permissions.md#visibility): `/vanish` through the `rift.visible-to` meta key |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.2.0` (`wit/rift-plugin.wit`). A
-plugin directory holds a `plugin.toml` manifest and the entry it names: the
-built `.wasm`, or `init.lua`.
+against the `plugin` world of `rift:plugin@0.2.1` (`wit/rift-plugin.wit`). A
+plugin directory holds a `plugin.toml` manifest and the entry it names (the
+built `.wasm`, or `init.lua`), and may hold a `messages.toml` with the
+plugin's own messages and their translations
+([plugin messages](../../docs/text.md#plugin-messages)). Each `hello` example
+ships the same `messages.toml`: the reply to `/hello`, in English and German.
 
-To try one, copy its folder (with the built `.wasm`) to `plugins/<name>/` next
-to `rift.lua` and enable it:
+To try one, copy its folder (with the built `.wasm` and `messages.toml`) to
+`plugins/<name>/` next to `rift.lua` and enable it:
 
 ```lua
 rift.plugin("hello-rs", { deny = "Mallory" })
@@ -41,7 +44,8 @@ cargo build --release --target wasm32-wasip2
 cp target/wasm32-wasip2/release/hello_rs.wasm .
 ```
 
-The directory then holds `plugin.toml` and `hello_rs.wasm`, ready to load.
+The directory then holds `plugin.toml`, `messages.toml` and `hello_rs.wasm`,
+ready to load.
 
 ### Behaviour
 
@@ -52,7 +56,7 @@ examples behave identically. Every observable effect is deterministic:
 | --- | --- |
 | `init(config)` | Decodes the JSON configuration `{"deny": "<name>"}` (`deny` optional; invalid JSON fails `init`). Calls `timers.every(1000)` once, then `bus.subscribe("hello.ping", none)` (a failed subscription fails `init`). Returns command `hello` with permission `hello.use` and suggest `players`, and hooks `login`, `command`, `join`, `message`, `timer`, so the host skips every other hook. |
 | `login(ctx)` | `deny("You are not welcome here.")` when `ctx.name` equals the configured `deny` name exactly, otherwise `continue`. |
-| `command(ctx)` | `message("Hello, <ctx.name>!")`. |
+| `command(ctx)` | `message` with the message object `{"message": "greeting", "args": {"name": ctx.name}}`, built with the SDK's message builder. `messages.toml` renders it as `Hello, <ctx.name>!`, or `Hallo, <ctx.name>!` for a player whose language is German. |
 | `join(ctx)` | `players.message(ctx.uuid, "Welcome, <ctx.name>!")`, then `store.increment("hello", "joins", 1)`. Host errors are ignored. |
 | `message(msg)` | When `msg.reply` is set, `bus.publish(msg.reply, msg.payload, none)`; otherwise nothing. Errors are ignored. |
 | `timer(handle)` | Logs `tick` at `debug`. |
@@ -101,7 +105,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 cmake --build build && cp build/hello_c.wasm .
 ```
 
-The directory then holds `plugin.toml` and `hello_c.wasm`. The manifest is
+The directory then holds `plugin.toml`, `messages.toml` and `hello_c.wasm`.
+The manifest is
 `hello-rs`'s with `name = "hello-c"` and `entry = "hello_c.wasm"`.
 
 ## hello-go (Go)
@@ -117,15 +122,18 @@ make TINYGO=/path/to/tinygo
 tinygo build -target=wasip2 --wit-package ../../../wit --wit-world plugin -no-debug -o hello_go.wasm .
 ```
 
-The directory then holds `plugin.toml` and `hello_go.wasm`. The manifest is
+The directory then holds `plugin.toml`, `messages.toml` and `hello_go.wasm`.
+The manifest is
 `hello-rs`'s with `name = "hello-go"` and `entry = "hello_go.wasm"`.
 
 ## hello-lua (Lua)
 
-A persistent Lua plugin: `plugin.toml` with `engine = "lua"` and the entry
-script `init.lua`, which Rift runs in its own LuaJIT state. There is nothing to
-build; copy the folder. Each handler body in `init.lua` would also work
-unchanged in `rift.lua`.
+A persistent Lua plugin: `plugin.toml` with `engine = "lua"`, the entry
+script `init.lua`, which Rift runs in its own LuaJIT state, and
+`messages.toml`. There is nothing to build; copy the folder. Each handler body
+in `init.lua` would also work unchanged in `rift.lua`, except the `hello`
+command's: `rift.lua` has no messages of its own, so it would name the message
+as `hello-lua:greeting`.
 
 ## Writing a Rust plugin
 

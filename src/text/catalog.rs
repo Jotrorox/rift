@@ -856,22 +856,38 @@ greet = "Hallo <name>."
 denied = "Kein Zutritt."
 "#;
 
+/// The example plugins whose `messages.toml` [`test_catalog`] adds under
+/// their folder names (`examples/plugins/<name>`).
+#[cfg(test)]
+const EXAMPLE_PLUGINS: &[&str] = &["hello-rs", "hello-c", "hello-go", "hello-lua"];
+
 /// The built-in catalogue with [`TEST_MESSAGES`] as the plugins `party`
-/// and `t` (the folder the plugin tests install).
+/// and `t` (the folder the plugin tests install), and each example plugin's
+/// own `messages.toml` as shipped.
 #[cfg(test)]
 pub(crate) fn test_catalog() -> Catalog {
     let messages = |namespace: &str| Messages::parse(TEST_MESSAGES, namespace).unwrap();
-    Catalog::default()
+    let mut catalog = Catalog::default()
         .with_plugin("party", messages("party"))
         .unwrap()
         .with_plugin("t", messages("t"))
-        .unwrap()
+        .unwrap();
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins");
+    for name in EXAMPLE_PLUGINS {
+        let example = messages::read(&examples.join(name), name)
+            .unwrap_or_else(|| panic!("examples/plugins/{name} has no {}", messages::FILE))
+            .unwrap();
+        catalog = catalog.with_plugin(name, example).unwrap();
+    }
+    catalog
 }
 
 /// Install [`test_catalog`] for the whole test process, for tests whose
 /// text is converted on threads they do not own (plugin threads). It only
 /// adds plugin namespaces, so tests that use Rift's own messages see the
-/// built-in ones.
+/// built-in ones. Add a namespace a test needs to [`test_catalog`] rather
+/// than installing another catalogue: tests run in parallel and share this
+/// one.
 #[cfg(test)]
 pub(crate) fn install_test_catalog() {
     static ONCE: std::sync::Once = std::sync::Once::new();

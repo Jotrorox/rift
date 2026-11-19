@@ -263,6 +263,9 @@ fn captured(prefix: &str) -> Vec<String> {
 
 /// Every hello scenario against one guest.
 pub(crate) async fn hello_conformance(guest: &Guest) {
+    // The reply to /hello comes from the example's messages.toml, which the
+    // test catalogue holds under the guest's name.
+    crate::text::catalog::install_test_catalog();
     let root = directory();
     let config = configure(&root, guest, "", "{ deny = 'Mallory' }");
     let broker = Broker::default();
@@ -327,9 +330,20 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     );
     grant(&runtime, 2, "hello.use");
     assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
+    let words = |action: Action| match action {
+        Action::Message(text) => text.to_string(),
+        other => panic!("{}: {other:?}", guest.name),
+    };
     assert_eq!(
-        player.command("hello").await.unwrap(),
-        Action::Message("Hello, Alex!".into())
+        words(player.command("hello").await.unwrap()),
+        "Hello, Alex!"
+    );
+    // The same message in the language of the player who asked.
+    let mut german = session(&runtime, 2, "Alex");
+    german.context.language = Some("de".into());
+    assert_eq!(
+        words(german.command("hello").await.unwrap()),
+        "Hallo, Alex!"
     );
 
     // join: a welcome message through players.message and a store counter.
@@ -408,6 +422,8 @@ fn example_folder(guest: &Guest) -> PathBuf {
         .unwrap();
     std::fs::write(folder.join("plugin.toml"), manifest).unwrap();
     std::fs::copy(&guest.wasm, folder.join(entry)).unwrap();
+    let messages = crate::text::messages::FILE;
+    std::fs::copy(example.join(messages), folder.join(messages)).unwrap();
     folder
 }
 
@@ -831,6 +847,7 @@ async fn wasm_timings() {
     let Some(guest) = hello_guests().into_iter().next() else {
         return;
     };
+    crate::text::catalog::install_test_catalog();
     let root = directory();
     let config = configure(&root, &guest, "", "{ deny = 'Mallory' }");
     let spec = &config.plugins[0];
