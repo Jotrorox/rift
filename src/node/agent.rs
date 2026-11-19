@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -38,12 +38,12 @@ use crate::{
 
 pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node> --root <directory> --ca <certificate.pem> [options]\n\
     Runs game servers for a Rift controller on this host.\n\
-    --controller <host:port>  the controller's messaging.listen address (QUIC)\n\
+    --controller <host:port>  the controller's messaging.listen address (QUIC); repeat it for every peer of a cluster, tried in turn\n\
     --name <node>             this node's name in the controller's rift.config.nodes\n\
     --root <directory>        all server and cache directories live below it\n\
     --ca <file>               PEM certificate(s) that sign the controller's messaging certificate\n\
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
-    --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
+    --server-name <name>      TLS name of the controller certificate (default: each controller's host)\n\
     --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
     --forwarding-secret-env <variable>  fallback forwarding secret for controllers that do not send theirs (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
@@ -51,8 +51,13 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
 /// Parsed `rift node` arguments.
 #[derive(Debug, Clone)]
 pub struct Options {
+    /// The first `--controller`, and the TLS name its certificate is
+    /// verified for.
     pub controller: String,
     pub server_name: String,
+    /// Every further `--controller` (the other peers of a cluster), with its
+    /// TLS name. The agent tries them in turn when a controller fails.
+    pub fallback_controllers: Vec<(String, String)>,
     pub ca: PathBuf,
     pub name: String,
     pub token: String,
@@ -70,6 +75,7 @@ impl Options {
         let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidInput, message);
         let mut values: BTreeMap<&str, String> = BTreeMap::new();
         let mut allowed_programs = BTreeSet::new();
+        let mut controllers = Vec::new();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.as_str();
@@ -96,6 +102,10 @@ impl Options {
                     return Err(invalid("--allow-program must not be empty".into()));
                 }
                 allowed_programs.insert(value);
+            } else if flag == "--controller" {
+                if !controllers.contains(&value) {
+                    controllers.push(value);
+                }
             } else if values.insert(flag, value).is_some() {
                 return Err(invalid(format!("{flag} was given twice")));
             }
@@ -105,7 +115,9 @@ impl Options {
                 .remove(flag)
                 .ok_or_else(|| invalid(format!("{flag} is required\n{USAGE}")))
         };
-        let controller = required("--controller")?;
+        if controllers.is_empty() {
+            return Err(invalid(format!("--controller is required\n{USAGE}")));
+        }
         let name = required("--name")?;
         let root = PathBuf::from(required("--root")?);
         let ca = PathBuf::from(required("--ca")?);
@@ -132,11 +144,19 @@ impl Options {
                 "node token must contain 32..=1024 bytes without control characters".into(),
             ));
         }
-        let host = controller
-            .rsplit_once(':')
-            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
-            .ok_or_else(|| invalid("--controller must be host:port".into()))?;
-        let server_name = values.remove("--server-name").unwrap_or(host);
+        let explicit_server_name = values.remove("--server-name");
+        let mut controllers = controllers
+            .into_iter()
+            .map(|controller| -> io::Result<(String, String)> {
+                let host = controller
+                    .rsplit_once(':')
+                    .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
+                    .ok_or_else(|| invalid("--controller must be host:port".into()))?;
+                let server_name = explicit_server_name.clone().unwrap_or(host);
+                Ok((controller, server_name))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let (controller, server_name) = controllers.remove(0);
         let web = values
             .remove("--web")
             .map(|web| web.trim_end_matches('/').to_owned());
@@ -170,6 +190,7 @@ impl Options {
         Ok(Self {
             controller,
             server_name,
+            fallback_controllers: controllers,
             ca,
             name,
             token,
@@ -179,6 +200,17 @@ impl Options {
             forwarding_secret,
             forwarding_secret_env,
         })
+    }
+
+    /// Every controller address with its TLS name, the first one first.
+    pub fn controllers(&self) -> Vec<(&str, &str)> {
+        std::iter::once((self.controller.as_str(), self.server_name.as_str()))
+            .chain(
+                self.fallback_controllers
+                    .iter()
+                    .map(|(address, name)| (address.as_str(), name.as_str())),
+            )
+            .collect()
     }
 }
 
@@ -211,7 +243,13 @@ pub async fn run(options: Options) -> io::Result<()> {
         "node {} serving {} for controller {}",
         agent.options.name,
         agent.root.display(),
-        agent.options.controller
+        agent
+            .options
+            .controllers()
+            .iter()
+            .map(|(address, _)| *address)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let monitor = tokio::spawn(agent.clone().monitor());
     tokio::select! {
@@ -273,6 +311,8 @@ pub struct Agent {
     http: reqwest::Client,
     /// Unfinished [`Command::Upload`]s by id.
     uploads: StdMutex<HashMap<String, Upload>>,
+    /// The index in [`Options::controllers`] to try first.
+    next_controller: AtomicUsize,
 }
 
 struct Upload {
@@ -329,6 +369,7 @@ impl Agent {
             hashes: StdMutex::new(HashMap::new()),
             http,
             uploads: StdMutex::new(HashMap::new()),
+            next_controller: AtomicUsize::new(0),
         }))
     }
 
@@ -350,11 +391,18 @@ impl Agent {
                         "node {} lost the controller connection: {error}; servers keep running",
                         self.options.name
                     );
+                    // Start with the next peer: this one probably went away.
+                    self.next_controller.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) => log_warn!(
                     "node {} cannot reach controller {}: {error}",
                     self.options.name,
-                    self.options.controller
+                    self.options
+                        .controllers()
+                        .iter()
+                        .map(|(address, _)| *address)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             }
             tokio::time::sleep(backoff).await;
@@ -362,12 +410,41 @@ impl Agent {
         }
     }
 
+    /// Connect to the first controller that accepts, starting with
+    /// [`Agent::next_controller`].
     async fn connect(&self, tls: quinn::ClientConfig) -> io::Result<quic::Client> {
-        let address: SocketAddr = tokio::net::lookup_host(&self.options.controller)
-            .await?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "controller has no address"))?;
-        quic::Client::connect(address, &self.options.server_name, tls, &self.options.token).await
+        let controllers = self.options.controllers();
+        let start = self.next_controller.load(Ordering::Relaxed);
+        let mut last = None;
+        for offset in 0..controllers.len() {
+            let index = (start + offset) % controllers.len();
+            let (controller, server_name) = controllers[index];
+            let result = async {
+                let address: SocketAddr = tokio::net::lookup_host(controller)
+                    .await?
+                    .next()
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "controller has no address")
+                    })?;
+                quic::Client::connect(address, server_name, tls.clone(), &self.options.token).await
+            }
+            .await;
+            match result {
+                Ok(client) => {
+                    self.next_controller.store(index, Ordering::Relaxed);
+                    return Ok(client);
+                }
+                Err(error) if controllers.len() > 1 => {
+                    log_warn!(
+                        "node {} cannot reach controller {controller}: {error}",
+                        self.options.name
+                    );
+                    last = Some(error);
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("no controller configured")))
     }
 
     /// Answer commands and publish state until the connection fails.

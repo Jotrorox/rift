@@ -42,6 +42,7 @@ override them:
 | `RIFT_SERVER_NAME` | The instance (or managed server) name, such as `lobby-3`; set for every managed server |
 | `RIFT_SERVER_GROUP` | Its service group, such as `lobby` |
 | `RIFT_BUS_ADDRESS` | `messaging.advertise`, else `127.0.0.1` and the listener's bound port |
+| `RIFT_BUS_ADDRESSES` | Set only when the bus has several addresses (the peers of a [cluster](clustering.md)): all of them, `RIFT_BUS_ADDRESS` first, as `host:port` entries separated by commas. The Java client prefers it; clients that read only `RIFT_BUS_ADDRESS` keep working against the first peer |
 | `RIFT_BUS_SERVER_NAME` | `messaging.advertise_server_name`, else the host of `advertise`, else `localhost` |
 | `RIFT_BUS_CERT` | An absolute path to `rift-bus.pem` in the server directory: the messaging certificate, written at creation and refreshed on every start |
 | `RIFT_BUS_TOKEN` | The instance's token |

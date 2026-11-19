@@ -142,7 +142,7 @@ plugins ([commands](plugin-events.md#commands)).
 | --- | --- |
 | `rift.every(name, every_ms, fn)` | `{ api_version = 3, job = name }` |
 | `rift.timers.every(ms, [fn])`, `rift.timers.after(ms, [fn])` | The timer's handle, which `rift.timers.cancel(handle)` takes |
-| `rift.subscribe(subject, [queue,] [fn])` | `{ subject, payload, reply, subscription, handle }`. The call returns a handle for `rift.unsubscribe` |
+| `rift.subscribe(subject, [queue or { queue = ..., scope = ... },] [fn])` | `{ subject, payload, reply, subscription, handle }`. The call returns a handle for `rift.unsubscribe`. `scope` is `"cluster"` (the default: messages published on any peer of a [cluster](clustering.md#subject-scopes)) or `"local"` (only this peer's); a single Rift treats both alike |
 
 These also work in handlers. But hooks are fixed once the entry script
 finishes, so it must create at least one timer (or subscription) or register

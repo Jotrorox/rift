@@ -301,6 +301,48 @@ impl Request {
                 .map(|count| json!(count)),
         }
     }
+
+    /// [`Request::execute`] for callers that can wait: an action for a
+    /// player on another peer of a cluster answers with that peer's result
+    /// instead of only saying it went there, and a broadcast counts the
+    /// players of the whole network. On a single Rift both are the same.
+    pub async fn run(self, players: &Players) -> Result<Value, String> {
+        async fn deliver(
+            players: &Players,
+            target: &str,
+            action: PlayerAction,
+        ) -> Result<Value, String> {
+            players
+                .deliver(target, action)
+                .await
+                .map(Value::Bool)
+                .map_err(|error| error.to_string())
+        }
+        match self {
+            Self::Message { target, text } => {
+                deliver(players, &target, PlayerAction::Message(text)).await
+            }
+            Self::ActionBar { target, text } => {
+                deliver(players, &target, PlayerAction::ActionBar(text)).await
+            }
+            Self::Title { target, title } => {
+                let action = title_action(&title)?;
+                deliver(players, &target, action).await
+            }
+            Self::Kick { target, reason } => {
+                deliver(players, &target, PlayerAction::Kick(reason)).await
+            }
+            Self::Transfer { target, server } => {
+                players.known(&server)?;
+                deliver(players, &target, PlayerAction::Transfer(server)).await
+            }
+            Self::Broadcast { text, server } => players
+                .broadcast_routed(&text, server.as_deref())
+                .await
+                .map(|count| json!(count)),
+            read => read.execute(players),
+        }
+    }
 }
 
 /// A player name, UUID, connection id or server name of 1..=256 bytes.

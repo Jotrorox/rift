@@ -200,12 +200,12 @@ which [memory limits](server-limits.md#memory-limits) need.
 
 | Option | Meaning |
 | --- | --- |
-| `--controller` | The controller's `messaging.listen` address |
+| `--controller` | The controller's `messaging.listen` address. Repeat it for every peer of a [cluster](clustering.md): the agent connects to the first that accepts and moves on to the next when one fails |
 | `--name` | This node's name in `rift.config.nodes` |
 | `--root` | All server directories and caches live below it |
 | `--ca` | PEM certificate(s) that sign the controller's messaging certificate |
 | `--token-env` | Variable holding this node's token (default `RIFT_NODE_TOKEN`) |
-| `--server-name` | TLS name of the controller certificate (default: the controller host) |
+| `--server-name` | TLS name of the controller certificate (default: each controller's host) |
 | `--web` | The controller's web API, needed for templates; `https://` unless loopback |
 | `--forwarding-secret-env` | Variable with a fallback forwarding secret, used only when the controller sends none (a controller older than the agent); default `RIFT_FORWARDING_SECRET`. Naming it explicitly makes the variable required |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |

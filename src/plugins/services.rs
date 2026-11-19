@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     extensions::{PlayerAction, Players, storage::Store},
-    messaging::{Broker, Error as BusError, Stream},
+    messaging::{Broker, Error as BusError, Stream, SubscribeOptions, SubscriptionScope},
     permissions::Authority,
     text::Text,
 };
@@ -835,6 +835,16 @@ impl BusApi<'_> {
 
     /// Messages arrive as [`Event::Message`] with the returned handle.
     pub fn subscribe(&self, subject: &str, queue_group: Option<&str>) -> Result<u64, String> {
+        self.subscribe_scoped(subject, queue_group, SubscriptionScope::Cluster)
+    }
+
+    /// [`BusApi::subscribe`] hearing the peers `scope` names in a cluster.
+    pub fn subscribe_scoped(
+        &self,
+        subject: &str,
+        queue_group: Option<&str>,
+        scope: SubscriptionScope,
+    ) -> Result<u64, String> {
         if self.0.closed.load(Ordering::Acquire) {
             return Err("plugin is stopping".into());
         }
@@ -847,8 +857,12 @@ impl BusApi<'_> {
             ));
         }
         let broker = self.0.base.broker.clone();
+        let options = SubscribeOptions {
+            scope,
+            client: false,
+        };
         let mut subscription = broker
-            .subscribe(subject, queue_group)
+            .subscribe_with(subject, queue_group, options)
             .map_err(|error| error.to_string())?;
         let id = self.0.handle();
         let inner = Arc::downgrade(self.0);
@@ -858,7 +872,7 @@ impl BusApi<'_> {
                 let message = match subscription.recv().await {
                     Ok(message) => message,
                     Err(BusError::SlowConsumer) => {
-                        match broker.subscribe(&subject, queue_group.as_deref()) {
+                        match broker.subscribe_with(&subject, queue_group.as_deref(), options) {
                             Ok(next) => {
                                 subscription = next;
                                 continue;

@@ -122,6 +122,11 @@ notices! {
         "No server on this network supports your Minecraft version.",
     DecisionUnavailable => "decision.unavailable" []
         "Unable to check your access, please try again later.",
+    // Clusters of several proxies.
+    ClusterMaxPlayers => "cluster.max_players" []
+        "The network is full. Please try again later.",
+    ClusterPartition => "cluster.partition_message" []
+        "This proxy lost contact with the rest of the network. Please reconnect.",
     // Connections in play.
     ConnectionLostNoFallback => "connection.lost_no_fallback" []
         "The server connection was lost and no fallback was available.",

@@ -47,8 +47,13 @@ pub const CERTIFICATE_FILE: &str = "rift-bus.pem";
 /// Where an instance reaches the bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
-    /// `RIFT_BUS_ADDRESS`, `host:port`.
+    /// `RIFT_BUS_ADDRESS`, `host:port`: the preferred address.
     pub address: String,
+    /// The other addresses of the bus, such as the other peers of a
+    /// cluster, tried after `address`. When there are any,
+    /// `RIFT_BUS_ADDRESSES` lists all of them, `address` first, separated
+    /// by commas; clients that know only `RIFT_BUS_ADDRESS` keep working.
+    pub fallback_addresses: Vec<String>,
     /// `RIFT_BUS_SERVER_NAME`, the name the certificate is verified for.
     pub server_name: String,
     /// The messaging certificate (PEM), written to [`CERTIFICATE_FILE`].
@@ -190,6 +195,12 @@ impl Logins {
             variables.push(("RIFT_SERVER_GROUP".into(), group.clone()));
         }
         if let Some(bus) = self.bus() {
+            if !bus.fallback_addresses.is_empty() {
+                let all: Vec<&str> = std::iter::once(bus.address.as_str())
+                    .chain(bus.fallback_addresses.iter().map(String::as_str))
+                    .collect();
+                variables.push(("RIFT_BUS_ADDRESSES".to_owned(), all.join(",")));
+            }
             variables.extend([
                 ("RIFT_BUS_ADDRESS".to_owned(), bus.address),
                 ("RIFT_BUS_SERVER_NAME".to_owned(), bus.server_name),
@@ -445,6 +456,7 @@ mod tests {
         logins.register("lobby-3", 4, Some("lobby"), grants());
         logins.set_bus(Bus {
             address: "10.0.0.2:7443".into(),
+            fallback_addresses: Vec::new(),
             server_name: "rift.internal".into(),
             certificate: "PEM".into(),
         });
@@ -467,6 +479,23 @@ mod tests {
             std::path::absolute(directory.join(CERTIFICATE_FILE)).unwrap()
         );
         assert_eq!(environment["RIFT_BUS_TOKEN"], logins.token("lobby-3", 4));
+        // A single address sets no list; several set both variables.
+        assert!(!environment.contains_key("RIFT_BUS_ADDRESSES"));
+        logins.set_bus(Bus {
+            address: "10.0.0.2:7443".into(),
+            fallback_addresses: vec!["10.0.0.3:7443".into(), "10.0.0.4:7443".into()],
+            server_name: "rift.internal".into(),
+            certificate: "PEM".into(),
+        });
+        let environment: HashMap<_, _> = logins
+            .environment("lobby-3", Some(directory))
+            .into_iter()
+            .collect();
+        assert_eq!(environment["RIFT_BUS_ADDRESS"], "10.0.0.2:7443");
+        assert_eq!(
+            environment["RIFT_BUS_ADDRESSES"],
+            "10.0.0.2:7443,10.0.0.3:7443,10.0.0.4:7443"
+        );
     }
 
     #[cfg(unix)]

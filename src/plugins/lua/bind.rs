@@ -14,7 +14,7 @@ use crate::plugins::{
     },
     services::Services,
 };
-use crate::text::Text;
+use crate::{messaging::SubscriptionScope, text::Text};
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -321,6 +321,10 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
         properties.raw_push(entry)?;
     }
     player.raw_set("properties", properties)?;
+    // The cluster peer the player is on; absent without a cluster.
+    if let Some(peer) = &info.peer {
+        player.raw_set("peer", peer.as_str())?;
+    }
     Ok(player)
 }
 
@@ -608,21 +612,41 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(lua, state, move |_, args: MultiValue| {
             let mut args = args.into_iter();
             let subject = args.next().unwrap_or(Value::Nil);
-            let (queue, callback) = match (
+            // The second argument is a queue group or `{ queue = ..., scope = ... }`.
+            let options = |table: &Table| -> mlua::Result<(Option<String>, Option<String>)> {
+                Ok((table.get("queue")?, table.get("scope")?))
+            };
+            let (queue, scope, callback) = match (
                 args.next().unwrap_or(Value::Nil),
                 args.next().unwrap_or(Value::Nil),
             ) {
-                (Value::Function(callback), Value::Nil) => (None, Some(callback)),
+                (Value::Function(callback), Value::Nil) => (None, None, Some(callback)),
                 (Value::String(queue), Value::Function(callback)) => {
-                    (Some(queue.to_str()?.to_owned()), Some(callback))
+                    (Some(queue.to_str()?.to_owned()), None, Some(callback))
                 }
-                (Value::String(queue), Value::Nil) => (Some(queue.to_str()?.to_owned()), None),
-                (Value::Nil, Value::Nil) => (None, None),
+                (Value::String(queue), Value::Nil) => {
+                    (Some(queue.to_str()?.to_owned()), None, None)
+                }
+                (Value::Table(table), Value::Function(callback)) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, Some(callback))
+                }
+                (Value::Table(table), Value::Nil) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, None)
+                }
+                (Value::Nil, Value::Nil) => (None, None, None),
                 _ => {
                     return Err(runtime(
-                        "rift.subscribe expects a subject, an optional queue group and an optional function",
+                        "rift.subscribe expects a subject, an optional queue group or options table and an optional function",
                     ));
                 }
+            };
+            let scope = match scope {
+                None => SubscriptionScope::Cluster,
+                Some(scope) => scope
+                    .parse::<SubscriptionScope>()
+                    .map_err(|error| runtime(format!("rift.subscribe: {error}")))?,
             };
             let Value::String(subject) = subject else {
                 return Err(runtime("rift.subscribe expects a subject"));
@@ -632,7 +656,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
             let handle = subscribe
                 .services
                 .bus()
-                .subscribe(&subject, queue.as_deref())
+                .subscribe_scoped(&subject, queue.as_deref(), scope)
                 .map_err(runtime)?;
             subscribe
                 .subscriptions

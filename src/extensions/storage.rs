@@ -13,20 +13,31 @@
 //! after their transaction commits; readers use the mirror and never wait for a
 //! write to sync.
 //!
+//! A mutation of the store in the instance database is a [`KvOp`] (its own
+//! deterministic log entry in a cluster): it carries the values the mutation
+//! read, the changes and the quotas, and [`apply`] checks the reads and the
+//! quotas against the database before writing. Its memory follows only from
+//! the apply hook the store registers.
+//!
 //! Version 1 stores were checksummed binary snapshots. Startup converts one into
 //! a database built beside it, atomically replaces the snapshot, and keeps the
 //! original bytes in `<file>.v1-backup`.
-use crate::database::{Database, Dialect};
+use crate::database::{
+    self, Conn, Database, Dialect, HookId, OptionalExtension as _,
+    operation::{Operation, OrMessage, Outcome},
+};
 use mlua::{Lua, Table, Value};
 use rusqlite::{Connection, ErrorCode, OpenFlags, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, RwLock, TryLockError,
+        Arc, Mutex, MutexGuard, RwLock, TryLockError, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -74,8 +85,8 @@ pub(super) type Entries = BTreeMap<Key, Vec<u8>>;
 /// Limits for one owner's data. Host data, the configuration script and each
 /// persistent plugin have their own, so one plugin filling its space cannot
 /// block another plugin, `rift.store` or permission group changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Quota {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quota {
     pub entries: usize,
     pub bytes: usize,
 }
@@ -90,8 +101,8 @@ const HOST_QUOTA: Quota = Quota {
 
 /// Quotas for data other than the host's: `default` for the configuration
 /// script and every plugin, unless `plugins` names one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Quotas {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quotas {
     pub default: Quota,
     pub plugins: BTreeMap<String, Quota>,
 }
@@ -332,6 +343,39 @@ impl Memory {
         memory.entries = entries;
         Ok(memory)
     }
+
+    /// Install committed changes and their usage.
+    fn apply<'a>(&mut self, changes: impl IntoIterator<Item = (&'a Key, &'a Option<Vec<u8>>)>) {
+        let Self {
+            entries,
+            owners,
+            host,
+        } = self;
+        for (key, value) in changes {
+            let who = owner(&key.0);
+            let usage = match &who {
+                None => &mut *host,
+                Some(who) => owners.entry(who.clone()).or_default(),
+            };
+            if let Some(old) = entries.get(key) {
+                usage.entries = usage.entries.saturating_sub(1);
+                usage.bytes = usage.bytes.saturating_sub(entry_size(key, old));
+            }
+            if let Some(value) = value {
+                usage.entries += 1;
+                usage.bytes += entry_size(key, value);
+            }
+            if let Some(who) = who
+                && owners.get(&who) == Some(&Usage::default())
+            {
+                owners.remove(&who);
+            }
+            match value {
+                Some(value) => entries.insert(key.clone(), value.clone()),
+                None => entries.remove(key),
+            };
+        }
+    }
 }
 
 fn check(usage: &Usage, quota: &Quota, owner: impl std::fmt::Display) -> io::Result<()> {
@@ -367,13 +411,23 @@ fn check_growth(old: &Usage, new: &Usage, quota: &Quota, owner: &Owner) -> io::R
 pub(crate) struct Transaction<'a> {
     base: &'a Entries,
     changes: BTreeMap<Key, Option<Vec<u8>>>,
+    /// The committed value of every key read before this mutation changed
+    /// it: what the mutation's result depends on.
+    reads: RefCell<BTreeMap<Key, Option<Vec<u8>>>>,
 }
 
 impl Transaction<'_> {
     pub(crate) fn get(&self, key: &Key) -> Option<&Vec<u8>> {
         match self.changes.get(key) {
             Some(change) => change.as_ref(),
-            None => self.base.get(key),
+            None => {
+                let value = self.base.get(key);
+                self.reads
+                    .borrow_mut()
+                    .entry(key.clone())
+                    .or_insert_with(|| value.cloned());
+                value
+            }
         }
     }
 
@@ -406,6 +460,37 @@ struct Inner {
     quotas: Quotas,
     /// Serializes writers.
     writer: Mutex<Writer>,
+    /// The apply hook of a store in the instance database.
+    hook: Option<HookId>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(hook) = self.hook
+            && let Writer::Shared(database) =
+                self.writer.get_mut().unwrap_or_else(|e| e.into_inner())
+        {
+            database.remove_hook(hook);
+        }
+    }
+}
+
+impl Inner {
+    /// The apply hook: install the changes of a mutation, or reload the
+    /// table when the change came without them (a full reload).
+    fn refresh(&self, connection: &Conn, change: &database::Change<'_>) {
+        let mut memory = self.memory.write().unwrap_or_else(|e| e.into_inner());
+        if !change.reload
+            && let Some(Outcome::Kv(KvOutcome::Applied { changes })) = change.outcome
+        {
+            memory.apply(changes.iter().map(|entry| (&entry.key, &entry.value)));
+            return;
+        }
+        match load_shared(connection).and_then(Memory::new) {
+            Ok(fresh) => *memory = fresh,
+            Err(error) => log_error!("extension store not reloaded: {error}"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -482,6 +567,26 @@ impl Store {
             memory: RwLock::new(memory),
             quotas,
             writer: Mutex::new(writer),
+            hook: None,
+        }))
+    }
+
+    /// A store in the instance database, whose memory follows the table
+    /// through an apply hook.
+    fn shared(memory: Memory, quotas: Quotas, database: Arc<Database>) -> Self {
+        Self(Arc::new_cyclic(|inner: &Weak<Inner>| {
+            let watched = inner.clone();
+            let hook = database.on_change(TABLES, move |connection, change| {
+                if let Some(inner) = watched.upgrade() {
+                    inner.refresh(connection, change);
+                }
+            });
+            Inner {
+                memory: RwLock::new(memory),
+                quotas,
+                writer: Mutex::new(Writer::Shared(database)),
+                hook: Some(hook),
+            }
         }))
     }
 
@@ -507,12 +612,18 @@ impl Store {
                         "extensions.storage.database needs the instance database, which Rift opens when it runs from a configuration file",
                     ));
                 };
-                let entries = open_shared(database)?;
-                return Ok(Self::new(
+                prepare_shared(database)?;
+                // Loaded and watched under the connection, so no write falls
+                // between them.
+                let connection = database.lock();
+                let entries = load_shared(&connection).map_err(|e| shared_error(database, e))?;
+                let store = Self::shared(
                     Memory::new(entries)?,
                     config.quotas.clone(),
-                    Writer::Shared(database.clone()),
-                ));
+                    database.clone(),
+                );
+                drop(connection);
+                return Ok(store);
             }
         };
         // Inspect before opening: opening a named pipe can block indefinitely.
@@ -636,13 +747,15 @@ impl Store {
         let mut writer = self.lock(deadline)?;
         // Only writers change memory and they hold `writer`, so these entries
         // stay current until this mutation applies its own changes.
-        let (result, changes, owners, host) = {
+        let (result, changes, reads) = {
             let memory = self.memory();
             let mut transaction = Transaction {
                 base: &memory.entries,
                 changes: BTreeMap::new(),
+                reads: RefCell::new(BTreeMap::new()),
             };
             let result = change(&mut transaction)?;
+            let reads = transaction.reads.into_inner();
             let mut changes = transaction.changes;
             changes.retain(|key, value| memory.entries.get(key) != value.as_ref());
             let mut host = memory.host;
@@ -670,7 +783,7 @@ impl Store {
             for (owner, (old, new)) in &owners {
                 check_growth(old, new, &self.0.quotas.get(owner), owner)?;
             }
-            (result, changes, owners, host)
+            (result, changes, reads)
         };
         if !changes.is_empty() {
             check_deadline(deadline)?;
@@ -678,29 +791,23 @@ impl Store {
                 Writer::Memory => {}
                 Writer::File(connection) => commit(connection, &changes, deadline)
                     .map_err(|error| error.into_io("cannot commit extension store change"))?,
-                Writer::Shared(database) => commit_shared(database, &changes, deadline)?,
+                // Memory follows from the apply hook before this returns.
+                Writer::Shared(database) => {
+                    return commit_shared(database, &self.0.quotas, reads, changes, deadline).map(
+                        |()| {
+                            committed(&result);
+                            result
+                        },
+                    );
+                }
             }
             // The commit is durable. Do not return a deadline error after it:
             // memory must agree with the database.
-            let mut memory = self
-                .0
+            self.0
                 .memory
                 .write()
-                .unwrap_or_else(|error| error.into_inner());
-            for (key, value) in changes {
-                match value {
-                    Some(value) => memory.entries.insert(key, value),
-                    None => memory.entries.remove(&key),
-                };
-            }
-            for (owner, (_, usage)) in owners {
-                if usage == Usage::default() {
-                    memory.owners.remove(&owner);
-                } else {
-                    memory.owners.insert(owner, usage);
-                }
-            }
-            memory.host = host;
+                .unwrap_or_else(|error| error.into_inner())
+                .apply(&changes);
         }
         committed(&result);
         Ok(result)
@@ -813,32 +920,247 @@ fn commit(
     Ok(())
 }
 
-/// [`commit`] for a store in the instance database. The connection is shared
-/// with the other components, so waiting for it also stops at `deadline`.
+/// [`commit`] for a store in the instance database: one [`KvOp`] through
+/// the database's executor. The connection is shared with the other
+/// components, so waiting for it also stops at `deadline`.
 fn commit_shared(
     database: &Database,
-    changes: &BTreeMap<Key, Option<Vec<u8>>>,
+    quotas: &Quotas,
+    reads: BTreeMap<Key, Option<Vec<u8>>>,
+    changes: BTreeMap<Key, Option<Vec<u8>>>,
     deadline: Instant,
 ) -> io::Result<()> {
-    let failed = |error: crate::database::Error| {
-        database.error(format!("cannot commit extension store change: {error}"))
+    let entries = |map: BTreeMap<Key, Option<Vec<u8>>>| {
+        map.into_iter()
+            .map(|(key, value)| KvEntry { key, value })
+            .collect()
     };
-    let mut connection = database
-        .lock_until(deadline)
-        .map_err(|_| deadline_exceeded())?;
-    let transaction = connection.transaction().map_err(failed)?;
-    for ((namespace, key), value) in changes {
-        let result = match value {
-            Some(value) => transaction.execute(
+    let op = KvOp::Mutate {
+        quotas: quotas.clone(),
+        expect: entries(reads),
+        changes: entries(changes),
+    };
+    let outcome = database
+        .run_until(Operation::Kv(op), deadline)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => deadline_exceeded(),
+            _ => error,
+        })?;
+    match outcome {
+        Outcome::Kv(KvOutcome::Applied { .. }) => Ok(()),
+        Outcome::Kv(KvOutcome::Rejected { message }) => Err(invalid(message)),
+        Outcome::Kv(KvOutcome::Conflict { key }) => Err(database.error(format!(
+            "extension store entry {:?} in {:?} changed during the mutation; retry",
+            key.1, key.0
+        ))),
+        Outcome::Kv(KvOutcome::Failed { message }) => {
+            Err(database.error(format!("cannot commit extension store change: {message}")))
+        }
+        other => Err(database.error(format!("unexpected outcome {other:?}"))),
+    }
+}
+
+/// The table of a store in the instance database.
+pub const TABLES: &[&str] = &["extension_entries"];
+
+/// One entry of a [`KvOp`]: a value, or `None` for none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvEntry {
+    /// Namespace and key.
+    pub key: (String, String),
+    pub value: Option<Vec<u8>>,
+}
+
+/// A mutation of the store in the instance database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum KvOp {
+    /// Write `changes` in one transaction if every entry in `expect` still
+    /// holds the value the mutation read, and if the quotas (`quotas` for
+    /// scripts and plugins, the fixed host quota for host data) allow the
+    /// growth.
+    Mutate {
+        quotas: Quotas,
+        expect: Vec<KvEntry>,
+        changes: Vec<KvEntry>,
+    },
+}
+
+/// The result of a [`KvOp`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum KvOutcome {
+    /// Written; the entries that differed from the table.
+    Applied {
+        changes: Vec<KvEntry>,
+    },
+    /// An entry the mutation read has changed since: run it again.
+    Conflict {
+        key: (String, String),
+    },
+    /// Invalid, or over a quota; nothing was written.
+    Rejected {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl KvOutcome {
+    pub fn failed(&self) -> bool {
+        !matches!(self, Self::Applied { .. })
+    }
+}
+
+fn current(connection: &Conn, (namespace, key): &Key) -> database::Result<Option<Vec<u8>>> {
+    connection
+        .query_row(
+            "SELECT value FROM extension_entries WHERE namespace = ?1 AND key = ?2",
+            crate::database::params![namespace, key],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+/// The usage of one owner (`None`: host data) in the table, through ranges
+/// of the primary key.
+fn usage(connection: &Conn, owner: Option<&Owner>) -> database::Result<Usage> {
+    let dialect = connection.dialect();
+    let measure = format!(
+        "SELECT count(*), CAST(COALESCE(SUM(8 + {} + {} + length(value)), 0) AS BIGINT)
+         FROM extension_entries WHERE ",
+        dialect.octets("namespace"),
+        dialect.octets("key"),
+    );
+    let (filter, bounds): (&str, Vec<String>) = match owner {
+        None => (
+            "namespace >= ?1 AND namespace < ?2",
+            vec![HOST_PREFIX.to_owned(), "rift/".to_owned()],
+        ),
+        Some(Owner::Plugin(name)) => (
+            "namespace = ?1 OR (namespace >= ?2 AND namespace < ?3)",
+            vec![
+                format!("{PLUGIN_PREFIX}{name}"),
+                format!("{PLUGIN_PREFIX}{name}."),
+                format!("{PLUGIN_PREFIX}{name}/"),
+            ],
+        ),
+        Some(Owner::Script) => (
+            "namespace < ?1 OR (namespace >= ?2 AND namespace < ?3) OR namespace >= ?4",
+            vec![
+                PLUGIN_PREFIX.to_owned(),
+                "plugin/".to_owned(),
+                HOST_PREFIX.to_owned(),
+                "rift/".to_owned(),
+            ],
+        ),
+    };
+    let values: Vec<crate::database::Value> = bounds
+        .iter()
+        .map(crate::database::ToValue::to_value)
+        .collect();
+    let (entries, bytes): (i64, i64) =
+        connection.query_row(&format!("{measure}{filter}"), &values, |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+    Ok(Usage {
+        entries: entries.max(0) as usize,
+        bytes: bytes.max(0) as usize,
+    })
+}
+
+/// Perform `op` in the caller's transaction.
+pub fn apply(connection: &Conn, op: &KvOp) -> KvOutcome {
+    let KvOp::Mutate {
+        quotas,
+        expect,
+        changes,
+    } = op;
+    mutate(connection, quotas, expect, changes).unwrap_or_else(|error| KvOutcome::Failed {
+        message: error.to_string(),
+    })
+}
+
+fn mutate(
+    connection: &Conn,
+    quotas: &Quotas,
+    expect: &[KvEntry],
+    changes: &[KvEntry],
+) -> database::Result<KvOutcome> {
+    for entry in expect {
+        if current(connection, &entry.key)? != entry.value {
+            return Ok(KvOutcome::Conflict {
+                key: entry.key.clone(),
+            });
+        }
+    }
+    // The entries that differ from the table, and how each owner's usage
+    // changes: (entries, bytes).
+    let mut effective = Vec::new();
+    let mut host: Option<(i64, i64)> = None;
+    let mut owners: BTreeMap<Owner, (i64, i64)> = BTreeMap::new();
+    for entry in changes {
+        let old = current(connection, &entry.key)?;
+        if old == entry.value {
+            continue;
+        }
+        if let Some(value) = &entry.value
+            && let Err(error) = validate_entry(&entry.key, value)
+        {
+            return Ok(KvOutcome::Rejected {
+                message: error.to_string(),
+            });
+        }
+        let delta = match owner(&entry.key.0) {
+            None => host.get_or_insert((0, 0)),
+            Some(owner) => owners.entry(owner).or_insert((0, 0)),
+        };
+        if let Some(old) = &old {
+            delta.0 -= 1;
+            delta.1 -= entry_size(&entry.key, old) as i64;
+        }
+        if let Some(value) = &entry.value {
+            delta.0 += 1;
+            delta.1 += entry_size(&entry.key, value) as i64;
+        }
+        effective.push(entry.clone());
+    }
+    let grown = |old: Usage, (entries, bytes): (i64, i64)| Usage {
+        entries: (old.entries as i64 + entries).max(0) as usize,
+        bytes: (old.bytes as i64 + bytes).max(0) as usize,
+    };
+    if let Some(delta) = host {
+        let new = grown(usage(connection, None)?, delta);
+        if let Err(error) = check(&new, &HOST_QUOTA, "host") {
+            return Ok(KvOutcome::Rejected {
+                message: error.to_string(),
+            });
+        }
+    }
+    for (owner, delta) in &owners {
+        // Shrinking always passes; only growth needs the current usage.
+        if delta.0 <= 0 && delta.1 <= 0 {
+            continue;
+        }
+        let old = usage(connection, Some(owner))?;
+        if let Err(error) = check_growth(&old, &grown(old, *delta), &quotas.get(owner), owner) {
+            return Ok(KvOutcome::Rejected {
+                message: error.to_string(),
+            });
+        }
+    }
+    for entry in &effective {
+        let (namespace, key) = &entry.key;
+        match &entry.value {
+            Some(value) => connection.execute(
                 SHARED_UPSERT,
                 crate::database::params![namespace, key, value],
-            ),
-            None => transaction.execute(SHARED_DELETE, crate::database::params![namespace, key]),
+            )?,
+            None => connection.execute(SHARED_DELETE, crate::database::params![namespace, key])?,
         };
-        result.map_err(failed)?;
     }
-    check_deadline(deadline)?;
-    transaction.commit().map_err(failed)
+    Ok(KvOutcome::Applied { changes: effective })
 }
 
 fn shared_schema(dialect: Dialect) -> &'static str {
@@ -862,10 +1184,42 @@ fn shared_schema(dialect: Dialect) -> &'static str {
     }
 }
 
+fn shared_sql(dialect: Dialect, _from: u32) -> String {
+    shared_schema(dialect).to_owned()
+}
+
 /// Create or migrate `extension_entries` in the instance database.
 pub(super) fn prepare_shared(database: &Database) -> io::Result<()> {
-    database.migrate(SHARED_COMPONENT, SHARED_VERSION, |dialect, _| {
-        shared_schema(dialect).to_owned()
+    database.migrate(SHARED_COMPONENT, SHARED_VERSION, shared_sql)
+}
+
+/// The store's schema component in the instance database and the version
+/// this Rift writes.
+pub fn schema_versions() -> Vec<(&'static str, u32)> {
+    vec![(SHARED_COMPONENT, SHARED_VERSION)]
+}
+
+/// The tables of `component`, if it is the store's.
+pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
+    (component == SHARED_COMPONENT).then_some(TABLES)
+}
+
+/// Migrate `extension_entries` to `to_version` in the caller's transaction;
+/// `None` for another component.
+pub fn migrate(
+    connection: &Conn,
+    component: &str,
+    to_version: u32,
+) -> Option<Result<bool, String>> {
+    (component == SHARED_COMPONENT).then(|| {
+        database::migrate_component(
+            connection,
+            SHARED_COMPONENT,
+            to_version,
+            SHARED_VERSION,
+            shared_sql,
+        )
+        .or_message()
     })
 }
 
@@ -873,12 +1227,9 @@ fn shared_error(database: &Database, error: impl std::fmt::Display) -> io::Error
     database.error(format!("extension store: {error}"))
 }
 
-/// Create `extension_entries` in the instance database if needed and load it.
-/// The connection is released before returning.
-fn open_shared(database: &Database) -> io::Result<Entries> {
-    prepare_shared(database)?;
-    let rows = database
-        .lock()
+/// Every entry of `extension_entries`, validated.
+fn load_shared(connection: &Conn) -> io::Result<Entries> {
+    let rows = connection
         .query_map(
             "SELECT namespace, key, value FROM extension_entries",
             crate::database::params![],
@@ -889,10 +1240,10 @@ fn open_shared(database: &Database) -> io::Result<Entries> {
                 ))
             },
         )
-        .map_err(|e| shared_error(database, e))?;
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut entries = Entries::new();
     for (key, value) in rows {
-        validate_entry(&key, &value).map_err(|e| shared_error(database, e))?;
+        validate_entry(&key, &value)?;
         entries.insert(key, value);
     }
     Ok(entries)

@@ -86,6 +86,9 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
     if config.messaging != previous.messaging {
         return Err("messaging changes require a restart".into());
     }
+    if config.cluster != previous.cluster {
+        return Err("cluster changes require a restart of every peer".into());
+    }
     nodes_compatible(config, previous)?;
     let names = config
         .managed_servers

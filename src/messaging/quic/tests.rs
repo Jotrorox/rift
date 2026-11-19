@@ -306,6 +306,10 @@ async fn malformed_frames_are_rejected_without_killing_other_streams() {
         ((MAX_FRAME_BYTES + 1) as u32).to_be_bytes().to_vec(),
         vec![0, 0, 0, 1, 255],
         vec![0, 0, 0, 3, SUBSCRIBE, 0, 30],
+        // An unknown subscription scope.
+        vec![
+            0, 0, 0, 12, SUBSCRIBE, 0, 6, b'g', b'a', b'm', b'e', b'.', b'x', 0, 0, 7,
+        ],
     ] {
         let (mut send, mut recv) = client.connection().open_bi().await.unwrap();
         send.write_all(&malformed).await.unwrap();
@@ -394,7 +398,7 @@ async fn dropped_clients_do_not_leave_a_publisher_reference_cycle() {
     let (_server, client, _) = fixture(HashMap::new()).await;
     client.publish("game.cycle", Bytes::new()).await.unwrap();
     // The connection closes only when the last reference to the client drops.
-    let connection = client.connection().clone();
+    let connection = client.connection();
     drop(client);
     timeout(Duration::from_secs(2), connection.closed())
         .await
@@ -955,5 +959,114 @@ async fn node_logins_change_while_the_server_runs() {
     assert!(connect("node-b-test-only-long-random-token").await.is_err());
     connect("node-b-second-test-only-long-token").await.unwrap();
     connect(&identity().token).await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn failover_clients_move_to_the_next_address_and_subscribe_again() {
+    let (server_tls, client_tls) = configs();
+    let broker = Broker::new(BrokerConfig::default()).unwrap();
+    let auth = || AuthConfig {
+        identities: vec![identity()],
+        ..Default::default()
+    };
+    let bind = |tls| Server::bind("127.0.0.1:0".parse().unwrap(), tls, broker.clone(), auth());
+    let first = bind(server_tls.clone()).unwrap();
+    let second = bind(server_tls).unwrap();
+    let addresses = [
+        ServerAddress::new(first.local_addr().unwrap(), "localhost"),
+        ServerAddress::new(second.local_addr().unwrap(), "localhost"),
+    ];
+    let client = Client::connect_any(&addresses, client_tls, &identity().token)
+        .await
+        .unwrap();
+    assert_eq!(client.remote_address(), addresses[0].address);
+    // The scope byte travels; on one broker both scopes hear everything.
+    let mut subscription = client
+        .subscribe_scoped("game.failover", None, SubscriptionScope::Local)
+        .await
+        .unwrap();
+    broker
+        .publish("game.failover", Bytes::from_static(b"one"))
+        .unwrap();
+    let message = timeout(Duration::from_secs(5), subscription.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.payload, "one");
+
+    first.shutdown().await;
+    let receiving =
+        tokio::spawn(async move { subscription.recv().await.map(|message| message.payload) });
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !receiving.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the subscription did not come back"
+        );
+        broker
+            .publish("game.failover", Bytes::from_static(b"two"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(receiving.await.unwrap().unwrap(), "two");
+    assert_eq!(client.remote_address(), addresses[1].address);
+    let mut local = broker.subscribe("game.after", None).unwrap();
+    client.publish("game.after", Bytes::new()).await.unwrap();
+    assert_eq!(
+        local.recv().await.unwrap().sender.as_deref(),
+        Some("plugin")
+    );
+    second.shutdown().await;
+}
+
+#[tokio::test]
+async fn failover_clients_fail_only_when_no_address_accepts() {
+    let (server_tls, client_tls) = configs();
+    let broker = Broker::new(BrokerConfig::default()).unwrap();
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        broker,
+        AuthConfig {
+            identities: vec![identity()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Nothing listens on the first address: a socket that is bound and dropped.
+    let unused = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dead = unused.local_addr().unwrap();
+    drop(unused);
+    let mut client_tls = client_tls;
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_millis(500).try_into().unwrap()));
+    transport.keep_alive_interval(Some(Duration::from_millis(100)));
+    client_tls.transport_config(Arc::new(transport));
+    let client = Client::connect_any(
+        &[
+            ServerAddress::new(dead, "localhost"),
+            ServerAddress::new(server.local_addr().unwrap(), "localhost"),
+        ],
+        client_tls.clone(),
+        &identity().token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.remote_address(), server.local_addr().unwrap());
+    assert!(
+        Client::connect_any(&[], client_tls.clone(), &identity().token)
+            .await
+            .is_err()
+    );
+    assert!(
+        Client::connect_any(
+            &[ServerAddress::new(dead, "localhost")],
+            client_tls,
+            &identity().token
+        )
+        .await
+        .is_err()
+    );
     server.shutdown().await;
 }

@@ -25,7 +25,7 @@ mod integrations;
 pub(crate) mod players;
 mod scheduler;
 pub(crate) mod storage;
-pub use players::{PlayerAction, PlayerHandle, Players, Profile};
+pub use players::{PlayerAction, PlayerHandle, Players, Profile, routing};
 pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[
@@ -870,9 +870,7 @@ const MEMBERSHIPS: &str = "rift.groups";
 ///
 /// A store in the instance database (`database = true`) is not read: Rift
 /// versions that wrote `rift.groups` predate both the permission store and
-/// that target, so such a store never holds memberships. Reading it here
-/// would also deadlock, because [`Authority::migrate_once`] calls this while
-/// it holds the instance database's connection.
+/// that target, so such a store never holds memberships.
 pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
     let Some(script) = &config.extensions else {
         return Ok(Vec::new());
@@ -1240,6 +1238,16 @@ impl Extensions {
                 self.call("dialog", &input, jobs).await?;
             }
             crate::dialog::Owner::Plugin(name) => self.plugins.dialog(&name, input),
+            // Shown from another peer of the cluster: the click goes back.
+            crate::dialog::Owner::Remote {
+                peer,
+                incarnation,
+                plugin,
+            } => {
+                self.players
+                    .route_dialog_click(peer, incarnation, plugin, input)
+                    .await?;
+            }
         }
         Ok(())
     }

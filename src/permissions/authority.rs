@@ -3,12 +3,15 @@
 //!
 //! # Consistency
 //!
-//! Writers hold the database connection for the whole of a write: the
-//! transaction, the in-memory group table, cache invalidation, the eager
-//! recompile of affected online players and the notification. Compiling on a
-//! cache miss also holds the connection, so a compiled subject is always
-//! built from one committed revision and notifications leave in revision
-//! order. Checks that hit the cache take only a read lock.
+//! Every write is a [`PermOp`] run through [`Database::run`]. Memory follows
+//! only from the apply hook the authority registers: after a write commits,
+//! still holding the database connection, the hook reads the new
+//! `perm_change` rows and installs each revision (the group table, cache
+//! invalidation, the eager recompile of affected online players and the
+//! notification). A write applied from another peer goes through the same
+//! hook. Compiling on a cache miss also holds the connection, so a compiled
+//! subject is always built from one committed revision and notifications
+//! leave in revision order. Checks that hit the cache take only a read lock.
 //!
 //! # Invalidation
 //!
@@ -21,11 +24,12 @@ use super::{
     PermError, audit,
     control::BackendView,
     http::{BackendDirectory, NoBackends},
-    store::{self, Effects, Work},
+    ops::{self, MIGRATED, PermBody, PermDetail, PermOp, PermOutcome, PermWrite, RegisteredRow},
+    store::{self, Work},
 };
 use crate::{
     config::PermissionsConfig,
-    database::{Conn, Database, Dialect, OptionalExtension, params},
+    database::{self, Conn, Database, HookId, Operation, OptionalExtension, Outcome, params},
 };
 use rift_permissions::{
     Actor, Applied, Change, ChangeEvent, CompiledSubject, ContextSet, DEFAULT_GROUP, Group, Limits,
@@ -39,8 +43,9 @@ use rift_permissions::{
 };
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    io,
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Instant,
 };
 use tokio::sync::broadcast;
@@ -57,8 +62,8 @@ const MAX_REGISTERED: usize = 4096;
 const MAX_DESCRIPTION: usize = 1024;
 /// Most rows one search or membership listing returns.
 pub(super) const MAX_RESULTS: usize = 1000;
-/// `perm_meta` key marking the one-time upgrade from the extension store.
-const MIGRATED: &str = "migrated_extension_store";
+/// Revisions whose online recompiles a writer can still look up.
+const PUBLISHED: usize = 1024;
 
 /// What the authority tells subscribers. The bus layer turns these into
 /// `rift.perms.update`, `rift.perms.update.<uuid>`, `rift.events.permissions`
@@ -237,14 +242,30 @@ fn unresolved(uuid: Uuid, revision: u64) -> CompiledSubject {
 /// for the whole process and survives configuration reloads.
 pub struct Authority {
     database: Arc<Database>,
-    state: RwLock<State>,
-    config: RwLock<PermissionsConfig>,
-    notifications: broadcast::Sender<Notification>,
+    /// What the apply hook updates; the hook holds it weakly.
+    core: Arc<Core>,
+    hook: HookId,
     /// What `GET /api/perms/backends` reports; the bus layer installs it.
     backends: RwLock<Arc<dyn BackendDirectory>>,
     /// The configuration's service group names, lowercase, for the LuckPerms
     /// import's `server=<group>` → `group=<group>` mapping.
     service_groups: RwLock<BTreeSet<String>>,
+}
+
+/// The memory that mirrors the permission tables.
+struct Core {
+    state: RwLock<State>,
+    config: RwLock<PermissionsConfig>,
+    notifications: broadcast::Sender<Notification>,
+    /// The online players each recently installed revision recompiled, so
+    /// the writer's [`Applied`] can name them.
+    published: Mutex<VecDeque<(u64, Vec<Uuid>)>>,
+}
+
+impl Drop for Authority {
+    fn drop(&mut self) {
+        self.database.remove_hook(self.hook);
+    }
 }
 
 /// The proxy's own contexts on arrival: `server`, and `group` for an
@@ -264,31 +285,26 @@ impl Authority {
     /// Open the permission tables in `database`, creating them and the
     /// `default` group on first start.
     pub fn open(database: Arc<Database>, config: &PermissionsConfig) -> Result<Self, PermError> {
+        Self::open_at(database, config, unix_now())
+    }
+
+    /// [`Authority::open`], recording `now` as the creation time of a
+    /// `default` group it creates.
+    pub fn open_at(
+        database: Arc<Database>,
+        config: &PermissionsConfig,
+        now: u64,
+    ) -> Result<Self, PermError> {
         database
-            .migrate(
-                store::COMPONENT,
-                store::SCHEMA_VERSION,
-                |dialect, _| match dialect {
-                    Dialect::Sqlite => store::SCHEMA.into(),
-                    Dialect::Postgres => store::POSTGRES_SCHEMA.into(),
-                },
-            )
+            .migrate(store::COMPONENT, store::SCHEMA_VERSION, ops::schema_sql)
             .map_err(|e| PermError::Storage(e.to_string()))?;
-        let (revision, groups, tracks) = {
-            let connection = database.lock();
-            store::ensure_default(&connection, unix_now())?;
-            (
-                store::revision(&connection)?,
-                store::load_groups(&connection)?,
-                store::load_tracks(&connection)?,
-            )
-        };
-        Ok(Self {
-            database,
+        let connection = database.lock();
+        store::ensure_default(&connection, now)?;
+        let core = Arc::new(Core {
             state: RwLock::new(State {
-                revision,
-                groups: Arc::new(groups),
-                tracks: Arc::new(tracks),
+                revision: store::revision(&connection)?,
+                groups: Arc::new(store::load_groups(&connection)?),
+                tracks: Arc::new(store::load_tracks(&connection)?),
                 cache: HashMap::new(),
                 index: None,
                 online: HashMap::new(),
@@ -296,6 +312,21 @@ impl Authority {
             }),
             config: RwLock::new(config.clone()),
             notifications: broadcast::channel(NOTIFICATIONS).0,
+            published: Mutex::new(VecDeque::new()),
+        });
+        // Registered while holding the connection, so no write falls
+        // between loading and watching.
+        let watched = Arc::downgrade(&core);
+        let hook = database.on_change(ops::TABLES, move |connection, change| {
+            if let Some(core) = watched.upgrade() {
+                core.applied(connection, change);
+            }
+        });
+        drop(connection);
+        Ok(Self {
+            database,
+            core,
+            hook,
             backends: RwLock::new(Arc::new(NoBackends)),
             service_groups: RwLock::new(BTreeSet::new()),
         })
@@ -326,23 +357,20 @@ impl Authority {
     }
 
     fn state(&self) -> RwLockReadGuard<'_, State> {
-        self.state.read().unwrap_or_else(|e| e.into_inner())
+        self.core.state()
     }
 
     fn state_mut(&self) -> RwLockWriteGuard<'_, State> {
-        self.state.write().unwrap_or_else(|e| e.into_inner())
+        self.core.state_mut()
     }
 
     fn config(&self) -> PermissionsConfig {
-        self.config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.core.config()
     }
 
     /// Apply a committed configuration's `permissions` section.
     pub fn configure(&self, config: &PermissionsConfig) {
-        *self.config.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
+        *self.core.config.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
     }
 
     pub fn limits(&self) -> Limits {
@@ -361,7 +389,7 @@ impl Authority {
 
     /// Receive every notification from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
-        self.notifications.subscribe()
+        self.core.notifications.subscribe()
     }
 
     // Reads.
@@ -379,44 +407,7 @@ impl Authority {
 
     /// Compile while the caller holds the connection.
     fn compile_locked(&self, connection: &Conn, uuid: Uuid) -> Arc<CompiledSubject> {
-        let (groups, revision) = {
-            let state = self.state();
-            if let Some(cached) = state.cache.get(&uuid) {
-                return cached.subject.clone();
-            }
-            (state.groups.clone(), state.revision)
-        };
-        let limit = self.limits().compiled_entries;
-        let compiled = store::load_user(connection, uuid).and_then(|user| {
-            let subject = compile_with_limit(&user, &*groups, unix_now(), revision, limit)?;
-            Ok((subject, dependencies(&user, &groups)))
-        });
-        let (subject, dependencies) = match compiled {
-            Ok((subject, dependencies)) => (Arc::new(subject), dependencies),
-            Err(error) => {
-                log_error!("permissions for {uuid}: {error}; checks resolve as undefined");
-                return Arc::new(unresolved(uuid, revision));
-            }
-        };
-        let mut state = self.state_mut();
-        if state.cache.len() >= MAX_CACHED {
-            let State { cache, online, .. } = &mut *state;
-            cache.retain(|uuid, _| online.contains_key(uuid));
-            state.index = None;
-        }
-        if let Some(index) = &mut state.index {
-            for group in dependencies.iter() {
-                index.entry(group.clone()).or_default().insert(uuid);
-            }
-        }
-        state.cache.insert(
-            uuid,
-            Cached {
-                subject: subject.clone(),
-                dependencies,
-            },
-        );
-        subject
+        self.core.compile_locked(connection, uuid)
     }
 
     /// Resolve `node` for a user in exactly the contexts `active`.
@@ -463,7 +454,7 @@ impl Authority {
 
     /// A user's stored nodes; a user nobody has written is empty.
     pub fn user(&self, uuid: Uuid) -> Result<User, PermError> {
-        store::load_user(&self.database.lock(), uuid)
+        store::load_user(&self.database.read(), uuid)
     }
 
     /// The instance database the store lives in, for the tables beside it.
@@ -482,7 +473,7 @@ impl Authority {
         {
             return Ok(Some(*uuid));
         }
-        let connection = self.database.lock();
+        let connection = self.database.read();
         let dialect = connection.dialect();
         let key: Option<String> = connection
             .query_row(
@@ -505,7 +496,7 @@ impl Authority {
     /// `limit` (capped at 1000); `true` when more exist.
     pub fn members(&self, limit: usize) -> Result<(Vec<Member>, bool), PermError> {
         let limit = limit.min(MAX_RESULTS);
-        let connection = self.database.lock();
+        let connection = self.database.read();
         let mut members: Vec<Member> = Vec::new();
         let mut more = false;
         connection.each(
@@ -565,7 +556,7 @@ impl Authority {
             .iter()
             .map(|(uuid, online)| (*uuid, online.name.clone()))
             .collect();
-        let connection = self.database.lock();
+        let connection = self.database.read();
         let dialect = connection.dialect();
         let rows = connection.query_map(
             &format!(
@@ -642,7 +633,7 @@ impl Authority {
     /// Who holds nodes matching `filter`, in insertion order, at most `limit`
     /// (capped at 1000).
     pub fn search(&self, filter: &Filter, limit: usize) -> Result<Vec<Holder>, PermError> {
-        let found = store::select(&self.database.lock(), filter, limit.min(MAX_RESULTS))?;
+        let found = store::select(&self.database.read(), filter, limit.min(MAX_RESULTS))?;
         Ok(found
             .into_iter()
             .map(|(_, subject, node)| Holder { subject, node })
@@ -651,12 +642,12 @@ impl Authority {
 
     /// Committed changes, see [`audit::LogQuery`].
     pub fn log(&self, query: &audit::LogQuery) -> Result<Vec<ChangeEvent>, PermError> {
-        audit::read(&self.database.lock(), query)
+        audit::read(&self.database.read(), query)
     }
 
     /// Every registered permission, sorted by node.
     pub fn registered(&self) -> Result<Vec<Registered>, PermError> {
-        let rows = self.database.lock().query_map(
+        let rows = self.database.read().query_map(
             "SELECT node, description, dflt, owner FROM perm_registered ORDER BY node",
             params![],
             |r| {
@@ -705,8 +696,8 @@ impl Authority {
         deadline: Option<Instant>,
     ) -> Result<Applied, PermError> {
         let change = change.normalized()?;
-        self.write(&actor, reason, deadline, |work| work.change(change))
-            .map(|((), applied)| applied)
+        self.write(&actor, reason, deadline, PermBody::Change { change })
+            .map(|(_, applied)| applied)
     }
 
     /// Grant `node` to a player UUID as a global user node (tests).
@@ -783,8 +774,8 @@ impl Authority {
     /// subscribers see the removals. Checks treat expired nodes as absent
     /// already; this keeps the store and the replicas tidy.
     pub fn sweep(&self) -> Result<Applied, PermError> {
-        self.write(&Actor::System, Some("expired"), None, |work| work.sweep())
-            .map(|((), applied)| applied)
+        self.write(&Actor::System, Some("expired"), None, PermBody::Sweep)
+            .map(|(_, applied)| applied)
     }
 
     /// Run [`Authority::sweep`] every `permissions.sweep_interval_ms` until
@@ -805,10 +796,11 @@ impl Authority {
     /// Make the `source = 'config'` group nodes equal `extensions.groups`, in
     /// one revision when anything differs.
     pub fn mirror_config(&self, groups: &BTreeMap<String, Group>) -> Result<Applied, PermError> {
-        self.write(&Actor::System, Some("configuration"), None, |work| {
-            work.mirror(groups)
-        })
-        .map(|((), applied)| applied)
+        let body = PermBody::Mirror {
+            groups: groups.clone(),
+        };
+        self.write(&Actor::System, Some("configuration"), None, body)
+            .map(|(_, applied)| applied)
     }
 
     /// Write the nodes `upgrade` returns once, the first time this store
@@ -819,24 +811,22 @@ impl Authority {
         &self,
         upgrade: impl FnOnce() -> std::io::Result<Vec<(SubjectRef, Node)>>,
     ) -> Result<Option<Applied>, PermError> {
+        if store::meta(&self.database.read(), MIGRATED)?.is_some() {
+            return Ok(None);
+        }
+        let nodes = upgrade().map_err(|e| PermError::Storage(e.to_string()))?;
         let reason = Some("upgrade from the extension store");
-        let (migrated, applied) = self.write(&Actor::System, reason, None, |work| {
-            if store::meta(work.connection(), MIGRATED)?.is_some() {
-                return Ok(false);
-            }
-            let nodes = upgrade().map_err(|e| PermError::Storage(e.to_string()))?;
-            for (subject, node) in nodes {
-                if let Err(error) = work.set_node(&subject, node) {
-                    if matches!(error, PermError::Storage(_)) {
-                        return Err(error);
-                    }
-                    log_warn!("permission upgrade skipped a node of {subject}: {error}");
+        let body = PermBody::MigrateOnce { nodes };
+        let (detail, applied) = self.write(&Actor::System, reason, None, body)?;
+        match detail {
+            PermDetail::Migrated { migrated, skipped } => {
+                for line in skipped {
+                    log_warn!("{line}");
                 }
+                Ok(migrated.then_some(applied))
             }
-            store::set_meta(work.connection(), MIGRATED, &work.now().to_string())?;
-            Ok(true)
-        })?;
-        Ok(migrated.then_some(applied))
+            _ => Ok(Some(applied)),
+        }
     }
 
     /// Replace the permissions `owner` (a bus identity) registered. The
@@ -872,145 +862,86 @@ impl Authority {
                 }
                 None => owner.to_owned(),
             };
-            rows.push((node, permission.description, permission.default, column));
+            rows.push(RegisteredRow {
+                node,
+                description: permission.description,
+                default: permission.default.to_string(),
+                owner: column,
+            });
         }
-        let mut connection = self.database.lock();
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM perm_registered WHERE owner = ?1 OR substr(owner, 1, length(?1) + 1) = ?1 || '/'",
-            params![owner],
-        )?;
-        for (node, description, default, column) in &rows {
-            transaction.execute(
-                "INSERT INTO perm_registered (node, description, dflt, owner) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(node) DO UPDATE SET description = excluded.description,
-                   dflt = excluded.dflt, owner = excluded.owner",
-                params![node, description, default.to_string(), column],
-            )?;
+        let op = PermOp::Register {
+            owner: owner.to_owned(),
+            permissions: rows,
+        };
+        match self.run(op, None)? {
+            PermOutcome::Registered { count } => Ok(count),
+            other => Err(PermError::Storage(format!("unexpected outcome {other:?}"))),
         }
-        transaction.commit()?;
-        Ok(rows.len())
     }
 
-    /// Run `body` in one transaction: commit, record one change row when it
-    /// did anything, update memory, recompile affected online players and
-    /// notify subscribers, all while holding the connection.
-    pub(super) fn write<T>(
+    /// Run one permission operation; a failed outcome becomes its error.
+    fn run(&self, op: PermOp, deadline: Option<Instant>) -> Result<PermOutcome, PermError> {
+        let operation = Operation::Permissions(op);
+        let outcome = match deadline {
+            Some(deadline) => self.database.run_until(operation, deadline),
+            None => self.database.run(operation),
+        }
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => PermError::Deadline,
+            _ => PermError::Storage(error.to_string()),
+        })?;
+        match outcome {
+            Outcome::Permissions(PermOutcome::Failed { failure }) => Err(failure.into()),
+            Outcome::Permissions(outcome) => Ok(outcome),
+            other => Err(PermError::Storage(format!("unexpected outcome {other:?}"))),
+        }
+    }
+
+    /// Run `body` as one revisioned write by `actor`. Memory, the eager
+    /// recompile of affected online players and the notification follow
+    /// from the apply hook before this returns. Gives up before commit once
+    /// `deadline` has passed.
+    pub(super) fn write(
         &self,
         actor: &Actor,
         reason: Option<&str>,
         deadline: Option<Instant>,
-        body: impl FnOnce(&mut Work) -> Result<T, PermError>,
-    ) -> Result<(T, Applied), PermError> {
-        let mut connection = match deadline {
-            Some(deadline) => self
-                .database
-                .lock_until(deadline)
-                .map_err(|_| PermError::Deadline)?,
-            None => self.database.lock(),
-        };
-        let now = unix_now();
-        let transaction = connection.transaction_immediate()?;
-        let mut work = Work::new(&transaction, now, self.limits());
-        let value = body(&mut work)?;
-        let effects = work.finish()?;
-        if effects.ops.is_empty() {
-            transaction.commit()?;
-            let applied = Applied {
-                revision: self.revision(),
-                ..Applied::default()
-            };
-            return Ok((value, applied));
-        }
-        let groups = effects
-            .groups
-            .iter()
-            .map(|name| Ok((name.clone(), store::load_group(&transaction, name)?)))
-            .collect::<Result<Vec<_>, PermError>>()?;
-        let tracks = effects
-            .tracks
-            .then(|| store::load_tracks(&transaction))
-            .transpose()?;
-        let revision = store::record(&transaction, now, &actor.to_string(), &effects.ops, reason)?;
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(PermError::Deadline);
-        }
-        transaction.commit()?;
-        // Durable from here on: memory must follow without failing.
-        let online = self.publish(revision, groups, tracks, &effects);
-        let subjects: Vec<_> = online
-            .iter()
-            .map(|uuid| self.compile_locked(&connection, *uuid))
-            .collect();
-        let mut changed: BTreeSet<Uuid> = effects.users.clone();
-        changed.extend(online);
-        let Effects {
-            mut ops, groups, ..
-        } = effects;
-        let applied = Applied {
-            revision,
-            ops: ops.len(),
-            changed_users: changed.into_iter().collect(),
-            changed_groups: groups.into_iter().collect(),
-        };
-        let ops_truncated = ops.len() > MAX_EVENT_OPS;
-        ops.truncate(MAX_EVENT_OPS);
-        let event = ChangeEvent {
-            revision,
-            at: now,
-            actor: actor.clone(),
+        body: PermBody,
+    ) -> Result<(PermDetail, Applied), PermError> {
+        let op = PermOp::Write(Box::new(PermWrite {
+            actor: actor.to_string(),
             reason: reason.map(str::to_owned),
-            ops,
-            ops_truncated,
-            changed: applied.changed_users.clone(),
-            groups: applied.changed_groups.clone(),
-        };
-        // Nobody listening is fine.
-        let _ = self.notifications.send(Notification::Committed {
-            event: Arc::new(event),
-            subjects,
-        });
-        drop(connection);
-        Ok((value, applied))
-    }
-
-    /// Install a committed revision in memory and drop affected compiled
-    /// subjects. Returns the affected online players, sorted.
-    fn publish(
-        &self,
-        revision: u64,
-        groups: Vec<(String, Option<Group>)>,
-        tracks: Option<BTreeMap<String, Track>>,
-        effects: &Effects,
-    ) -> Vec<Uuid> {
-        let mut state = self.state_mut();
-        state.revision = revision;
-        if !groups.is_empty() {
-            let mut table = (*state.groups).clone();
-            for (name, group) in groups {
-                match group {
-                    Some(group) => table.insert(name, group),
-                    None => table.remove(&name),
+            now: unix_now(),
+            limits: self.limits(),
+            body,
+        }));
+        match self.run(op, deadline)? {
+            PermOutcome::Written {
+                revision,
+                ops,
+                users,
+                groups,
+                detail,
+            } => {
+                let mut changed: BTreeSet<Uuid> = users.into_iter().collect();
+                changed.extend(self.core.recompiled(revision));
+                let applied = Applied {
+                    revision,
+                    ops,
+                    changed_users: changed.into_iter().collect(),
+                    changed_groups: groups,
                 };
+                Ok((detail, applied))
             }
-            state.groups = Arc::new(table);
+            PermOutcome::Unchanged { revision, detail } => {
+                let applied = Applied {
+                    revision,
+                    ..Applied::default()
+                };
+                Ok((detail, applied))
+            }
+            other => Err(PermError::Storage(format!("unexpected outcome {other:?}"))),
         }
-        if let Some(tracks) = tracks {
-            state.tracks = Arc::new(tracks);
-        }
-        let mut affected: HashSet<Uuid> = effects.users.iter().copied().collect();
-        if !effects.groups.is_empty() {
-            affected.extend(state.dependents(&effects.groups));
-        }
-        for uuid in &affected {
-            state.forget(*uuid);
-        }
-        let mut online: Vec<Uuid> = affected
-            .into_iter()
-            .filter(|uuid| state.online.contains_key(uuid))
-            .collect();
-        online.sort();
-        online
     }
 
     // Presence and contexts.
@@ -1038,12 +969,22 @@ impl Authority {
         let authority = self.clone();
         let name = name.to_owned();
         let work = move || {
-            let connection = authority.database.lock();
-            if let Err(error) = store::set_last_name(&connection, uuid, &name, unix_now()) {
+            let op = PermOp::Join {
+                uuid,
+                name,
+                now: unix_now(),
+            };
+            if let Err(error) = authority.run(op, None) {
                 log_error!("cannot record the name of {uuid}: {error}");
             }
+            // Compiled and sent holding the connection, so the subject is
+            // from one revision and leaves in order with commits.
+            let connection = authority.database.lock();
             let subject = authority.compile_locked(&connection, uuid);
-            let _ = authority.notifications.send(Notification::Joined(subject));
+            let _ = authority
+                .core
+                .notifications
+                .send(Notification::Joined(subject));
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => drop(runtime.spawn_blocking(work)),
@@ -1133,7 +1074,7 @@ impl Authority {
             return Some(name);
         }
         self.database
-            .lock()
+            .read()
             .query_row(
                 "SELECT last_name FROM perm_subject WHERE kind = 0 AND key = ?1",
                 params![uuid.to_string()],
@@ -1145,7 +1086,7 @@ impl Authority {
 
     /// Nodes that have expired but that the sweeper has not deleted yet.
     pub fn expired_unswept(&self) -> Result<u64, PermError> {
-        let count: i64 = self.database.lock().query_row(
+        let count: i64 = self.database.read().query_row(
             "SELECT count(*) FROM perm_node WHERE expires_at IS NOT NULL AND expires_at <= ?1",
             params![store::sql_time(unix_now())],
             |r| r.get(0),
@@ -1162,7 +1103,7 @@ impl Authority {
         limit: usize,
     ) -> Result<(Vec<Member>, bool), PermError> {
         let limit = limit.min(MAX_RESULTS);
-        let rows = self.database.lock().query_map(
+        let rows = self.database.read().query_map(
             "SELECT DISTINCT s.key, s.last_name FROM perm_node n
              JOIN perm_subject s ON s.id = n.subject_id
              WHERE s.kind = 0 AND n.kind = 1 AND n.key = ?1 AND n.value = 'true'
@@ -1321,5 +1262,246 @@ impl Authority {
 
     pub(super) fn database(&self) -> &Database {
         &self.database
+    }
+}
+
+impl Core {
+    fn state(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn state_mut(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn config(&self) -> PermissionsConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Compile while the caller holds the connection.
+    fn compile_locked(&self, connection: &Conn, uuid: Uuid) -> Arc<CompiledSubject> {
+        let (groups, revision) = {
+            let state = self.state();
+            if let Some(cached) = state.cache.get(&uuid) {
+                return cached.subject.clone();
+            }
+            (state.groups.clone(), state.revision)
+        };
+        let limit = self.config().limits.compiled_entries;
+        let compiled = store::load_user(connection, uuid).and_then(|user| {
+            let subject = compile_with_limit(&user, &*groups, unix_now(), revision, limit)?;
+            Ok((subject, dependencies(&user, &groups)))
+        });
+        let (subject, dependencies) = match compiled {
+            Ok((subject, dependencies)) => (Arc::new(subject), dependencies),
+            Err(error) => {
+                log_error!("permissions for {uuid}: {error}; checks resolve as undefined");
+                return Arc::new(unresolved(uuid, revision));
+            }
+        };
+        let mut state = self.state_mut();
+        if state.cache.len() >= MAX_CACHED {
+            let State { cache, online, .. } = &mut *state;
+            cache.retain(|uuid, _| online.contains_key(uuid));
+            state.index = None;
+        }
+        if let Some(index) = &mut state.index {
+            for group in dependencies.iter() {
+                index.entry(group.clone()).or_default().insert(uuid);
+            }
+        }
+        state.cache.insert(
+            uuid,
+            Cached {
+                subject: subject.clone(),
+                dependencies,
+            },
+        );
+        subject
+    }
+
+    /// The apply hook: install every revision committed since the last one
+    /// in memory, or reload everything.
+    fn applied(&self, connection: &Conn, change: &database::Change<'_>) {
+        if change.reload {
+            self.reload(connection);
+            return;
+        }
+        // Names and the catalogue create no revision.
+        if let Some(Operation::Permissions(PermOp::Join { .. } | PermOp::Register { .. })) =
+            change.operation
+        {
+            return;
+        }
+        if let Err(error) = self.catch_up(connection) {
+            log_error!("permission store changed but memory could not follow: {error}");
+        }
+    }
+
+    /// Install the `perm_change` rows after the revision in memory, in order.
+    fn catch_up(&self, connection: &Conn) -> Result<(), PermError> {
+        loop {
+            let query = audit::LogQuery {
+                since: Some(self.state().revision),
+                limit: audit::MAX_LIMIT,
+                ..audit::LogQuery::default()
+            };
+            let events = audit::read(connection, &query)?;
+            if events.is_empty() {
+                return Ok(());
+            }
+            for event in events {
+                self.install(connection, event)?;
+            }
+        }
+    }
+
+    /// Install one committed revision: the groups and tracks it changed, cache
+    /// invalidation, the eager recompile of affected online players and the
+    /// notification.
+    fn install(&self, connection: &Conn, event: ChangeEvent) -> Result<(), PermError> {
+        let ChangeEvent {
+            revision,
+            at,
+            actor,
+            reason,
+            mut ops,
+            changed,
+            groups,
+            ..
+        } = event;
+        let users: BTreeSet<Uuid> = changed.into_iter().collect();
+        let groups: BTreeSet<String> = groups.into_iter().collect();
+        let tracks = ops.iter().any(|op| matches!(op, Op::Track { .. }));
+        let loaded = groups
+            .iter()
+            .map(|name| Ok((name.clone(), store::load_group(connection, name)?)))
+            .collect::<Result<Vec<_>, PermError>>()?;
+        let tracks = tracks.then(|| store::load_tracks(connection)).transpose()?;
+        let online = self.publish(revision, loaded, tracks, &users, &groups);
+        let subjects: Vec<_> = online
+            .iter()
+            .map(|uuid| self.compile_locked(connection, *uuid))
+            .collect();
+        let mut changed = users;
+        changed.extend(online.iter().copied());
+        self.remember(revision, online);
+        let ops_truncated = ops.len() > MAX_EVENT_OPS;
+        ops.truncate(MAX_EVENT_OPS);
+        let event = ChangeEvent {
+            revision,
+            at,
+            actor,
+            reason,
+            ops,
+            ops_truncated,
+            changed: changed.into_iter().collect(),
+            groups: groups.into_iter().collect(),
+        };
+        // Nobody listening is fine.
+        let _ = self.notifications.send(Notification::Committed {
+            event: Arc::new(event),
+            subjects,
+        });
+        Ok(())
+    }
+
+    /// Install a committed revision in memory and drop affected compiled
+    /// subjects. Returns the affected online players, sorted.
+    fn publish(
+        &self,
+        revision: u64,
+        groups: Vec<(String, Option<Group>)>,
+        tracks: Option<BTreeMap<String, Track>>,
+        users: &BTreeSet<Uuid>,
+        changed_groups: &BTreeSet<String>,
+    ) -> Vec<Uuid> {
+        let mut state = self.state_mut();
+        state.revision = revision;
+        if !groups.is_empty() {
+            let mut table = (*state.groups).clone();
+            for (name, group) in groups {
+                match group {
+                    Some(group) => table.insert(name, group),
+                    None => table.remove(&name),
+                };
+            }
+            state.groups = Arc::new(table);
+        }
+        if let Some(tracks) = tracks {
+            state.tracks = Arc::new(tracks);
+        }
+        let mut affected: HashSet<Uuid> = users.iter().copied().collect();
+        if !changed_groups.is_empty() {
+            affected.extend(state.dependents(changed_groups));
+        }
+        for uuid in &affected {
+            state.forget(*uuid);
+        }
+        let mut online: Vec<Uuid> = affected
+            .into_iter()
+            .filter(|uuid| state.online.contains_key(uuid))
+            .collect();
+        online.sort();
+        online
+    }
+
+    /// Full reload, as after a snapshot install: install the revisions the
+    /// log holds past memory, then replace the group and track tables, drop
+    /// the whole cache and recompile every online player.
+    fn reload(&self, connection: &Conn) {
+        if let Err(error) = self.catch_up(connection) {
+            log_error!("permission store reload: {error}");
+        }
+        let loaded = store::revision(connection).and_then(|revision| {
+            Ok((
+                revision,
+                store::load_groups(connection)?,
+                store::load_tracks(connection)?,
+            ))
+        });
+        let (revision, groups, tracks) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                log_error!("permission store reload: {error}");
+                return;
+            }
+        };
+        let online: Vec<Uuid> = {
+            let mut state = self.state_mut();
+            state.revision = revision;
+            state.groups = Arc::new(groups);
+            state.tracks = Arc::new(tracks);
+            state.cache.clear();
+            state.index = None;
+            state.online.keys().copied().collect()
+        };
+        for uuid in online {
+            self.compile_locked(connection, uuid);
+        }
+    }
+
+    /// Remember which online players revision `revision` recompiled.
+    fn remember(&self, revision: u64, online: Vec<Uuid>) {
+        let mut published = self.published.lock().unwrap_or_else(|e| e.into_inner());
+        if published.len() >= PUBLISHED {
+            published.pop_front();
+        }
+        published.push_back((revision, online));
+    }
+
+    /// The online players revision `revision` recompiled, once.
+    fn recompiled(&self, revision: u64) -> Vec<Uuid> {
+        let mut published = self.published.lock().unwrap_or_else(|e| e.into_inner());
+        match published.iter().position(|(entry, _)| *entry == revision) {
+            Some(index) => published
+                .remove(index)
+                .map(|(_, online)| online)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
     }
 }

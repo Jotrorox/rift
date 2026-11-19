@@ -1,9 +1,10 @@
 # Clustering: several active proxies
 
 > [!NOTE]
-> **Status: design accepted, revision 2.** Nothing described here is
-> implemented yet. This document is the plan for the branch that adds
-> clustering. It grows with the branch and becomes the user guide when the
+> **Status: design accepted, revision 2.** Step 2 of the [plan](#plan), the
+> cluster core, is implemented (`src/cluster/`); where it had to differ from
+> this design, [step 2 notes](#step-2-notes) say so. The rest is the plan
+> for the branch that adds clustering. It grows with the branch and becomes the user guide when the
 > branch merges. Revision 2 follows a review of revision 1. The choices it
 > rests on were decided by the owner and are recorded under
 > [decisions](#decisions), with the options that were weighed.
@@ -877,6 +878,56 @@ throughout.
     recovery commands, `rift check --strict` for clusters, and a three-peer
     cluster in CI whose leader is killed with SIGKILL, asserting no duplicate
     logins, no lost acknowledged writes, no doubly executed leader work.
+
+### Step 2 notes
+
+What the cluster core does differently from the text above, and why:
+
+- **Encoding.** Log entries, Raft messages and handshakes are JSON: a newer
+  peer reads an older peer's entries, and an unknown kind fails loudly. Each
+  entry kind carries its own version `v`.
+- **The state machine's file.** Until step 3 replicates the instance
+  database, the state machine is its own file, `rift.cluster.sqlite3` beside
+  `rift.lua`: the instance database is locked by its single owner. The state
+  machine takes its connections from a `Database` trait, so step 3 hands in
+  the instance database without other changes.
+- **Log purging.** openraft purges only entries a snapshot covers. A peer
+  therefore builds a snapshot once its log passes 64 MiB (or when a member
+  needs one) and openraft purges behind it, keeping 10,000 entries for
+  followers that lag a little. "Purge once every member replicated" is not a
+  separate rule.
+- **Building a snapshot holds apply** for the length of the copy, so the copy
+  matches the log id it is labelled with. Step 3, which adds read
+  connections, can copy from one of them instead.
+- **Checksums take two entries.** `checksum mark` makes every peer hash its
+  replica at the same index and keep the hash locally; the leader then
+  proposes `checksum verify` with its own hash for that index. The result of
+  both is empty, since results are stored for retries and must not differ
+  between replicas.
+- **Repair after a divergence.** A diverged peer asks the leader for a copy
+  taken at or after its own applied index and swaps it in like a snapshot
+  install, below openraft: entries the copy already holds are skipped when
+  they are applied again.
+- **Features only grow.** A `features` entry adds the kinds every member
+  supports (a member's last `peer joined`, or its handshake before it ever
+  joined; a member never heard of does not hold activation back). A peer
+  that cannot apply an enabled kind is refused when it links.
+- **The lease** is three quarters of `election_timeout_max` after the last
+  quorum acknowledgement (openraft refuses votes for a full
+  `election_timeout_max` after a follower last heard from the leader), and
+  ends at once when the leader starts a transfer. openraft does not step a
+  leader down when its lease runs out, so leader tasks check
+  `LeaderContext::has_lease` themselves.
+- **The shared-configuration hash** in handshakes is the SHA-256 of the
+  `rift.lua` source text until step 8 hashes the shared sections.
+- **`replace`** removes the old Raft id and allocates a new one at once; if
+  the peer is not running yet, `rift admin cluster add <name> <address>`
+  finishes the job once it is (it reuses the allocated id).
+- **`leave`** moves leadership away; stopping logins and transferring
+  players come with steps 4 and 10.
+- **Peer certificates** are used both ways, so each must name the host of
+  its `advertise` address and allow server and client authentication.
+- `rift.control.cluster` and `rift.events.cluster` come with the bus (step 5).
 
 ## Decisions
 

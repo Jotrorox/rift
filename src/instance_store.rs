@@ -1,17 +1,26 @@
 //! Durable instance registrations and filesystem intents, kept in the
 //! instance database (SQLite or PostgreSQL).
+//!
+//! Every write is an [`InstanceOp`] run through [`Database::run`] and
+//! performed by [`execute`]. Group states and node schedules reach memory
+//! only through the apply hooks [`Store::watch_states`] registers.
 use crate::{
     config::{Config, GroupMode, GroupState, NodeSchedule, ServiceInstance},
-    database::{self, Database, Dialect, Location, OptionalExtension, params},
+    database::{
+        self, Conn, Database, Dialect, HookId, Location, OptionalExtension, Row,
+        operation::{Operation, OrMessage, Outcome},
+        params,
+    },
     provisioning::{self, Plan},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions as FileOptions},
     io,
     net::{SocketAddr, TcpListener},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 /// The `rift_schema` component and version of the instance tables.
@@ -92,6 +101,468 @@ fn ddl(dialect: Dialect, sqlite: &str, postgres: &str) -> String {
     .to_owned()
 }
 
+/// The SQL that brings the `instances` component from version `from` to
+/// [`SCHEMA_VERSION`]. Version 2 stores each instance's node ('' for this
+/// host); ports are unique per node, since every node has its own port
+/// range. `user_version` keeps the version too, for Rift releases that
+/// predate `rift_schema`, so a downgrade still opens the file. PostgreSQL
+/// databases always start at the latest version.
+fn instances_sql(dialect: Dialect, from: u32) -> String {
+    match (dialect, from) {
+        (Dialect::Postgres, _) => INSTANCES_POSTGRES.to_owned(),
+        (Dialect::Sqlite, 0) => format!(
+            "{INSTANCES_V2}
+            CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
+            PRAGMA user_version={SCHEMA_VERSION};"
+        ),
+        (Dialect::Sqlite, _) => format!(
+            "ALTER TABLE instances RENAME TO instances_v1;
+            {INSTANCES_V2}
+            INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
+                SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
+            DROP TABLE instances_v1;
+            PRAGMA user_version={SCHEMA_VERSION};"
+        ),
+    }
+}
+
+fn groups_sql(dialect: Dialect, _from: u32) -> String {
+    ddl(dialect, GROUPS_V1, GROUPS_POSTGRES)
+}
+
+fn logins_sql(dialect: Dialect, _from: u32) -> String {
+    ddl(dialect, LOGINS_V1, LOGINS_POSTGRES)
+}
+
+fn nodes_sql(dialect: Dialect, _from: u32) -> String {
+    ddl(dialect, NODES_V1, NODES_POSTGRES)
+}
+
+type Upgrade = fn(Dialect, u32) -> String;
+
+/// The schema components of this module, their latest versions and the SQL
+/// that creates or upgrades them, in the order startup migrates them.
+const COMPONENTS: [(&str, u32, Upgrade); 4] = [
+    (COMPONENT, SCHEMA_VERSION, instances_sql),
+    (GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, groups_sql),
+    (LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, logins_sql),
+    (NODES_COMPONENT, NODES_SCHEMA_VERSION, nodes_sql),
+];
+
+/// Every component of this module and the version this Rift writes.
+pub fn schema_versions() -> Vec<(&'static str, u32)> {
+    COMPONENTS
+        .iter()
+        .map(|(component, version, _)| (*component, *version))
+        .collect()
+}
+
+const INSTANCE_TABLES: &[&str] = &["instances", "sequences"];
+const SEQUENCES: &[&str] = &["sequences"];
+const INSTANCES: &[&str] = &["instances"];
+const CREATION: &[&str] = &["instances", "login_generations"];
+const GROUP_STATES: &[&str] = &["group_states"];
+const LOGIN_GENERATIONS: &[&str] = &["login_generations"];
+const NODE_SCHEDULES: &[&str] = &["node_schedules"];
+
+/// The tables of `component`, if it belongs to this module.
+pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
+    match component {
+        COMPONENT => Some(INSTANCE_TABLES),
+        GROUPS_COMPONENT => Some(GROUP_STATES),
+        LOGINS_COMPONENT => Some(LOGIN_GENERATIONS),
+        NODES_COMPONENT => Some(NODE_SCHEDULES),
+        _ => None,
+    }
+}
+
+/// Migrate `component` to `to_version` in the caller's transaction (see
+/// [`database::migrate_component`]); `None` when the component is not one of
+/// this module's.
+pub fn migrate(
+    connection: &Conn,
+    component: &str,
+    to_version: u32,
+) -> Option<Result<bool, String>> {
+    let (name, latest, sql) = COMPONENTS.iter().find(|(name, _, _)| *name == component)?;
+    Some(database::migrate_component(connection, name, to_version, *latest, sql).or_message())
+}
+
+/// A write to the instance registry, group states or node schedules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum InstanceOp {
+    /// Advance the group's durable name sequence past `floor` (the highest
+    /// number among registered instances) and every name in `taken` (or, ASCII
+    /// case ignored, in `taken_nocase`) that the configuration already uses.
+    /// The outcome is the new name.
+    AllocateName {
+        group: String,
+        floor: u64,
+        taken: Vec<String>,
+        taken_nocase: Vec<String>,
+    },
+    /// Register an instance in phase `creating` and give its name a new
+    /// login generation. `definition` is the stored JSON.
+    BeginCreation {
+        name: String,
+        node: String,
+        port: u16,
+        definition: String,
+    },
+    /// Move a registration from phase `from` to `to`.
+    Transition {
+        name: String,
+        from: String,
+        to: String,
+    },
+    /// Delete a registration (its login generation stays).
+    Forget {
+        name: String,
+    },
+    /// Re-register a ready instance on another node, if it is still on `from`.
+    Move {
+        name: String,
+        from: String,
+        node: String,
+        port: u16,
+        definition: String,
+    },
+    SetExplicitStop {
+        name: String,
+        stopped: bool,
+    },
+    /// Record a group's state; the default state removes its row.
+    SetGroupState {
+        group: String,
+        suspended: bool,
+        mode: String,
+    },
+    /// Record a node's schedule; `active` removes its row.
+    SetNodeSchedule {
+        node: String,
+        schedule: String,
+    },
+    /// Delete the states of groups not in `keep`; the outcome names them.
+    PruneGroupStates {
+        keep: Vec<String>,
+    },
+    /// Delete the schedules of nodes not in `keep`; the outcome names them.
+    PruneNodeSchedules {
+        keep: Vec<String>,
+    },
+}
+
+/// The result of an [`InstanceOp`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", content = "value", rename_all = "snake_case")]
+pub enum InstanceOutcome {
+    Done,
+    /// The name [`InstanceOp::AllocateName`] allocated.
+    Name(String),
+    /// The groups or nodes a prune removed.
+    Pruned(Vec<String>),
+    /// The message of a failure; nothing was written.
+    Failed(String),
+}
+
+impl InstanceOutcome {
+    pub fn failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+impl InstanceOp {
+    pub fn tables(&self) -> &'static [&'static str] {
+        match self {
+            Self::AllocateName { .. } => SEQUENCES,
+            Self::BeginCreation { .. } => CREATION,
+            Self::Transition { .. }
+            | Self::Forget { .. }
+            | Self::Move { .. }
+            | Self::SetExplicitStop { .. } => INSTANCES,
+            Self::SetGroupState { .. } | Self::PruneGroupStates { .. } => GROUP_STATES,
+            Self::SetNodeSchedule { .. } | Self::PruneNodeSchedules { .. } => NODE_SCHEDULES,
+        }
+    }
+}
+
+/// Perform `op` in the caller's transaction.
+pub fn execute(connection: &Conn, op: &InstanceOp) -> InstanceOutcome {
+    perform(connection, op).unwrap_or_else(InstanceOutcome::Failed)
+}
+
+fn perform(connection: &Conn, op: &InstanceOp) -> Result<InstanceOutcome, String> {
+    match op {
+        InstanceOp::AllocateName {
+            group,
+            floor,
+            taken,
+            taken_nocase,
+        } => {
+            let current: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM sequences WHERE group_name=?1",
+                    params![group],
+                    |r| r.get(0),
+                )
+                .optional()
+                .or_message()?;
+            let mut sequence = current
+                .map(|s| s.parse::<u64>())
+                .transpose()
+                .or_message()?
+                .unwrap_or(0)
+                .max(*floor);
+            let name = loop {
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or_else(|| "instance name sequence exhausted".to_owned())?;
+                let name = format!("{group}-{sequence}");
+                if !taken.contains(&name)
+                    && !taken_nocase.iter().any(|n| n.eq_ignore_ascii_case(&name))
+                {
+                    break name;
+                }
+            };
+            connection.execute("INSERT INTO sequences VALUES (?1,?2) ON CONFLICT(group_name) DO UPDATE SET value=excluded.value",
+                params![group, sequence.to_string()]).or_message()?;
+            Ok(InstanceOutcome::Name(name))
+        }
+        InstanceOp::BeginCreation {
+            name,
+            node,
+            port,
+            definition,
+        } => {
+            connection
+                .execute(
+                    "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
+                    params![name, node, port, definition],
+                )
+                .or_message()?;
+            // Every creation of a name gets a new login generation, so a
+            // recreated instance never inherits its predecessor's bus token.
+            connection
+                .execute(
+                    "INSERT INTO login_generations (name,generation) VALUES (?1,1)
+                     ON CONFLICT(name) DO UPDATE SET generation=login_generations.generation+1",
+                    params![name],
+                )
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::Transition { name, from, to } => {
+            let changed = connection
+                .execute(
+                    "UPDATE instances SET phase=?1 WHERE name=?2 AND phase=?3",
+                    params![to, name, from],
+                )
+                .or_message()?;
+            if changed != 1 {
+                return Err(format!("instances.{name}: expected phase {from}"));
+            }
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::Forget { name } => {
+            connection
+                .execute("DELETE FROM instances WHERE name=?1", params![name])
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::Move {
+            name,
+            from,
+            node,
+            port,
+            definition,
+        } => {
+            let changed = connection
+                .execute(
+                    "UPDATE instances SET node=?1, port=?2, definition=?3
+                     WHERE name=?4 AND phase='ready' AND node=?5",
+                    params![node, port, definition, name, from],
+                )
+                .or_message()?;
+            if changed != 1 {
+                return Err(format!(
+                    "instances.{name}: registration changed during the move"
+                ));
+            }
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::SetExplicitStop { name, stopped } => {
+            // Static managed servers are outside the instance registry.
+            connection
+                .execute(
+                    "UPDATE instances SET explicitly_stopped=?1 WHERE name=?2 AND phase='ready'",
+                    params![stopped, name],
+                )
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::SetGroupState {
+            group,
+            suspended,
+            mode,
+        } => {
+            let mode =
+                GroupMode::parse(mode).ok_or_else(|| format!("invalid mode for group {group}"))?;
+            let state = GroupState {
+                suspended: *suspended,
+                mode,
+            };
+            if state.is_default() {
+                connection
+                    .execute("DELETE FROM group_states WHERE name=?1", params![group])
+                    .or_message()?;
+            } else {
+                connection
+                    .execute(
+                        "INSERT INTO group_states (name,suspended,mode) VALUES (?1,?2,?3)
+                         ON CONFLICT(name) DO UPDATE SET suspended=excluded.suspended, mode=excluded.mode",
+                        params![group, state.suspended, state.mode.as_str()],
+                    )
+                    .or_message()?;
+            }
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::SetNodeSchedule { node, schedule } => {
+            let schedule = NodeSchedule::parse(schedule)
+                .ok_or_else(|| format!("invalid schedule for node {node}"))?;
+            if schedule == NodeSchedule::Active {
+                connection
+                    .execute("DELETE FROM node_schedules WHERE name=?1", params![node])
+                    .or_message()?;
+            } else {
+                connection
+                    .execute(
+                        "INSERT INTO node_schedules (name,schedule) VALUES (?1,?2)
+                         ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule",
+                        params![node, schedule.as_str()],
+                    )
+                    .or_message()?;
+            }
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::PruneGroupStates { keep } => {
+            prune(connection, "group_states", keep).map(InstanceOutcome::Pruned)
+        }
+        InstanceOp::PruneNodeSchedules { keep } => {
+            prune(connection, "node_schedules", keep).map(InstanceOutcome::Pruned)
+        }
+    }
+}
+
+/// Delete the rows of `table` whose name is not in `keep`; their names.
+fn prune(connection: &Conn, table: &str, keep: &[String]) -> Result<Vec<String>, String> {
+    let names: Vec<String> = connection
+        .query_map(
+            &format!("SELECT name FROM {table} ORDER BY name"),
+            params![],
+            |row| row.get(0),
+        )
+        .or_message()?;
+    let removed: Vec<String> = names
+        .into_iter()
+        .filter(|name| !keep.contains(name))
+        .collect();
+    for name in &removed {
+        connection
+            .execute(&format!("DELETE FROM {table} WHERE name=?1"), params![name])
+            .or_message()?;
+    }
+    Ok(removed)
+}
+
+/// Every group with a state other than the default.
+fn read_group_states(connection: &Conn) -> Result<BTreeMap<String, GroupState>, String> {
+    let rows = connection
+        .query_map(
+            "SELECT name,suspended,mode FROM group_states ORDER BY name",
+            params![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .or_message()?;
+    rows.into_iter()
+        .map(|(name, suspended, mode)| {
+            let mode =
+                GroupMode::parse(&mode).ok_or_else(|| format!("invalid mode for group {name}"))?;
+            Ok((name, GroupState { suspended, mode }))
+        })
+        .collect()
+}
+
+/// Every node that is cordoned or draining.
+fn read_node_schedules(connection: &Conn) -> Result<BTreeMap<String, NodeSchedule>, String> {
+    let rows = connection
+        .query_map(
+            "SELECT name,schedule FROM node_schedules ORDER BY name",
+            params![],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .or_message()?;
+    rows.into_iter()
+        .map(|(name, schedule)| {
+            let schedule = NodeSchedule::parse(&schedule)
+                .ok_or_else(|| format!("invalid schedule for node {name}"))?;
+            Ok((name, schedule))
+        })
+        .collect()
+}
+
+const RECORD_COLUMNS: &str =
+    "SELECT name,port,phase,explicitly_stopped,definition,node FROM instances ORDER BY name";
+
+/// Every registration, validated.
+fn read_records(connection: &Conn) -> Result<Vec<Record>, String> {
+    let rows = connection
+        .query_map(RECORD_COLUMNS, params![], |row: &Row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u16>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .or_message()?;
+    rows.into_iter()
+        .map(|(name, port, phase, stopped, json, node)| {
+            let definition: Definition = serde_json::from_str(&json).or_message()?;
+            if port != definition.instance.port
+                || node != definition.instance.node.clone().unwrap_or_default()
+                || !["creating", "ready", "removing", "deleting"].contains(&phase.as_str())
+            {
+                return Err(format!("invalid registration for {name}"));
+            }
+            if definition.instance.node.is_some() {
+                if !crate::config::valid_node_directory(&definition.plan.directory)
+                    || definition.plan.stage.is_some()
+                {
+                    return Err(format!("instances.{name}: invalid node directory"));
+                }
+            } else {
+                provisioning::validate_plan(&definition.instance, &name, &definition.plan)
+                    .map_err(|e| format!("instances.{name}: {e}"))?;
+            }
+            Ok(Record {
+                name,
+                phase,
+                stopped,
+                definition,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Definition {
     instance: ServiceInstance,
@@ -125,6 +596,19 @@ const REMOVAL_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 #[derive(Debug)]
 pub struct Store {
     database: Arc<Database>,
+    /// Serializes read-modify-write changes of group states.
+    group_writes: Mutex<()>,
+    /// Hooks registered through this store, removed with it.
+    hooks: Mutex<Vec<HookId>>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let hooks = std::mem::take(self.hooks.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for hook in hooks {
+            self.database.remove_hook(hook);
+        }
+    }
 }
 
 /// What [`Store::check`] found.
@@ -177,11 +661,9 @@ impl Store {
                 database
             }
         };
-        let store = Self {
-            database: Arc::new(opened),
-        };
+        let store = Self::with_database(Arc::new(opened));
         let (version, check) = {
-            let connection = store.database.lock();
+            let connection = store.database.read();
             let version = database::version(&connection, COMPONENT).map_err(|e| store.error(e))?;
             // PostgreSQL keeps its own consistency; only a file is checked.
             let check: Option<String> = match connection.dialect() {
@@ -234,37 +716,18 @@ impl Store {
 
     /// The instance tables in a shared database, created or upgraded as needed.
     pub fn new(database: Arc<Database>) -> io::Result<Self> {
-        // Version 2 stores each instance's node ('' for this host); ports
-        // are unique per node, since every node has its own port range.
-        // `user_version` keeps the version too, for Rift releases that
-        // predate `rift_schema`, so a downgrade still opens the file.
-        // PostgreSQL databases always start at the latest version.
-        database.migrate(COMPONENT, SCHEMA_VERSION, |dialect, from| match (dialect, from) {
-            (Dialect::Postgres, _) => INSTANCES_POSTGRES.to_owned(),
-            (Dialect::Sqlite, 0) => format!(
-                "{INSTANCES_V2}
-                CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
-                PRAGMA user_version={SCHEMA_VERSION};"
-            ),
-            (Dialect::Sqlite, _) => format!(
-                "ALTER TABLE instances RENAME TO instances_v1;
-                {INSTANCES_V2}
-                INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
-                    SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
-                DROP TABLE instances_v1;
-                PRAGMA user_version={SCHEMA_VERSION};"
-            ),
-        })?;
-        database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, GROUPS_V1, GROUPS_POSTGRES)
-        })?;
-        database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, LOGINS_V1, LOGINS_POSTGRES)
-        })?;
-        database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |dialect, _| {
-            ddl(dialect, NODES_V1, NODES_POSTGRES)
-        })?;
-        Ok(Self { database })
+        for (component, latest, sql) in COMPONENTS {
+            database.migrate(component, latest, sql)?;
+        }
+        Ok(Self::with_database(database))
+    }
+
+    fn with_database(database: Arc<Database>) -> Self {
+        Self {
+            database,
+            group_writes: Mutex::new(()),
+            hooks: Mutex::new(Vec::new()),
+        }
     }
 
     /// The database this store shares with the permission store.
@@ -276,53 +739,17 @@ impl Store {
         self.database.error(error)
     }
 
+    /// Run one write; a failed outcome becomes this store's error.
+    fn run(&self, op: InstanceOp) -> io::Result<InstanceOutcome> {
+        match self.database.run(Operation::Instances(op))? {
+            Outcome::Instances(InstanceOutcome::Failed(message)) => Err(self.error(message)),
+            Outcome::Instances(outcome) => Ok(outcome),
+            other => Err(self.error(format!("unexpected outcome {other:?}"))),
+        }
+    }
+
     fn records(&self) -> io::Result<Vec<Record>> {
-        let rows = self
-            .database
-            .lock()
-            .query_map(
-                "SELECT name,port,phase,explicitly_stopped,definition,node FROM instances ORDER BY name",
-                params![],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u16>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, bool>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .map_err(|e| self.error(e))?;
-        rows.into_iter()
-            .map(|(name, port, phase, stopped, json, node)| {
-                let definition: Definition =
-                    serde_json::from_str(&json).map_err(|e| self.error(e))?;
-                if port != definition.instance.port
-                    || node != definition.instance.node.clone().unwrap_or_default()
-                    || !["creating", "ready", "removing", "deleting"].contains(&phase.as_str())
-                {
-                    return Err(self.error(format!("invalid registration for {name}")));
-                }
-                if definition.instance.node.is_some() {
-                    if !crate::config::valid_node_directory(&definition.plan.directory)
-                        || definition.plan.stage.is_some()
-                    {
-                        return Err(self.error(format!("instances.{name}: invalid node directory")));
-                    }
-                } else {
-                    provisioning::validate_plan(&definition.instance, &name, &definition.plan)
-                        .map_err(|e| self.error(format!("instances.{name}: {e}")))?;
-                }
-                Ok(Record {
-                    name,
-                    phase,
-                    stopped,
-                    definition,
-                })
-            })
-            .collect()
+        read_records(&self.database.read()).map_err(|e| self.error(e))
     }
 
     /// Validate every registration before recovering intents or launching workers.
@@ -510,50 +937,47 @@ impl Store {
     }
 
     pub fn allocate_name(&self, config: &Config, group: &str) -> io::Result<String> {
-        let mut connection = self.database.lock();
-        let transaction = connection.transaction().map_err(|e| self.error(e))?;
-        let current: Option<String> = transaction
-            .query_row(
-                "SELECT value FROM sequences WHERE group_name=?1",
-                params![group],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| self.error(e))?;
-        let mut sequence = current
-            .map(|s| s.parse::<u64>())
-            .transpose()
-            .map_err(|e| self.error(e))?
-            .unwrap_or(0);
+        let prefix = format!("{group}-");
         // Also handle a registry imported by an embedding caller.
-        for name in config.instances.keys() {
-            if let Some(n) = name
-                .strip_prefix(&format!("{group}-"))
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                sequence = sequence.max(n);
-            }
-        }
-        let name = loop {
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| self.error("instance name sequence exhausted"))?;
-            let name = format!("{group}-{sequence}");
-            if !config.is_destination(&name)
-                && !config.managed_servers.contains_key(&name)
-                && !(config.network.bungeecord
-                    && config
-                        .backends
-                        .keys()
-                        .any(|n| n.eq_ignore_ascii_case(&name)))
-            {
-                break name;
-            }
+        let floor = config
+            .instances
+            .keys()
+            .filter_map(|name| name.strip_prefix(&prefix)?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        // A candidate `{group}-{n}` can only equal a name with this prefix:
+        // a destination, a managed server, or (for BungeeCord, ASCII case
+        // ignored) a backend.
+        let taken: BTreeSet<String> = config
+            .backends
+            .keys()
+            .chain(config.service_groups.keys())
+            .chain(config.managed_servers.keys())
+            .filter(|name| name.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let taken_nocase: Vec<String> = if config.network.bungeecord {
+            config
+                .backends
+                .keys()
+                .filter(|name| {
+                    name.get(..prefix.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(&prefix))
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
         };
-        transaction.execute("INSERT INTO sequences VALUES (?1,?2) ON CONFLICT(group_name) DO UPDATE SET value=excluded.value",
-            params![group, sequence.to_string()]).map_err(|e| self.error(e))?;
-        transaction.commit().map_err(|e| self.error(e))?;
-        Ok(name)
+        match self.run(InstanceOp::AllocateName {
+            group: group.to_owned(),
+            floor,
+            taken: taken.into_iter().collect(),
+            taken_nocase,
+        })? {
+            InstanceOutcome::Name(name) => Ok(name),
+            other => Err(self.error(format!("unexpected outcome {other:?}"))),
+        }
     }
 
     pub fn begin_creation(&self, config: &Config, name: &str, plan: &Plan) -> io::Result<()> {
@@ -573,29 +997,12 @@ impl Store {
             plan: plan.clone(),
         })
         .map_err(|e| self.error(e))?;
-        let mut connection = self.database.lock();
-        let transaction = connection.transaction().map_err(|e| self.error(e))?;
-        transaction
-            .execute(
-                "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
-                params![
-                    name,
-                    instance.node.clone().unwrap_or_default(),
-                    instance.port,
-                    definition
-                ],
-            )
-            .map_err(|e| self.error(e))?;
-        // Every creation of a name gets a new login generation, so a
-        // recreated instance never inherits its predecessor's bus token.
-        transaction
-            .execute(
-                "INSERT INTO login_generations (name,generation) VALUES (?1,1)
-                 ON CONFLICT(name) DO UPDATE SET generation=login_generations.generation+1",
-                params![name],
-            )
-            .map_err(|e| self.error(e))?;
-        transaction.commit().map_err(|e| self.error(e))?;
+        self.run(InstanceOp::BeginCreation {
+            name: name.to_owned(),
+            node: instance.node.clone().unwrap_or_default(),
+            port: instance.port,
+            definition,
+        })?;
         Ok(())
     }
 
@@ -630,27 +1037,20 @@ impl Store {
             plan: record.definition.plan,
         })
         .map_err(|e| self.error(e))?;
-        let changed = self
-            .database
-            .lock()
-            .execute(
-                "UPDATE instances SET node=?1, port=?2, definition=?3
-                 WHERE name=?4 AND phase='ready' AND node=?5",
-                params![node, instance.port, definition, name, from],
-            )
-            .map_err(|e| self.error(e))?;
-        if changed != 1 {
-            return Err(self.error(format!(
-                "instances.{name}: registration changed during the move"
-            )));
-        }
+        self.run(InstanceOp::Move {
+            name: name.to_owned(),
+            from: from.to_owned(),
+            node,
+            port: instance.port,
+            definition,
+        })?;
         Ok(())
     }
 
     /// The bus login generation of instance `name`; 0 if it was never
     /// created here (a static managed server).
     pub fn login_generation(&self, name: &str) -> io::Result<u64> {
-        let connection = self.database.lock();
+        let connection = self.database.read();
         let generation: Option<i64> = connection
             .query_row(
                 "SELECT generation FROM login_generations WHERE name=?1",
@@ -673,25 +1073,18 @@ impl Store {
         self.transition(name, "ready", "removing")
     }
     fn transition(&self, name: &str, from: &str, to: &str) -> io::Result<()> {
-        let changed = self
-            .database
-            .lock()
-            .execute(
-                "UPDATE instances SET phase=?1 WHERE name=?2 AND phase=?3",
-                params![to, name, from],
-            )
-            .map_err(|e| self.error(e))?;
-        if changed != 1 {
-            return Err(self.error(format!("instances.{name}: expected phase {from}")));
-        }
+        self.run(InstanceOp::Transition {
+            name: name.to_owned(),
+            from: from.to_owned(),
+            to: to.to_owned(),
+        })?;
         Ok(())
     }
 
     fn forget(&self, name: &str) -> io::Result<()> {
-        self.database
-            .lock()
-            .execute("DELETE FROM instances WHERE name=?1", params![name])
-            .map_err(|e| self.error(e))?;
+        self.run(InstanceOp::Forget {
+            name: name.to_owned(),
+        })?;
         Ok(())
     }
 
@@ -726,93 +1119,163 @@ impl Store {
     }
 
     pub fn set_explicit_stop(&self, name: &str, stopped: bool) -> io::Result<()> {
-        // Static managed servers are outside the instance registry.
-        self.database
-            .lock()
-            .execute(
-                "UPDATE instances SET explicitly_stopped=?1 WHERE name=?2 AND phase='ready'",
-                params![stopped, name],
-            )
-            .map_err(|e| self.error(e))?;
+        self.run(InstanceOp::SetExplicitStop {
+            name: name.to_owned(),
+            stopped,
+        })?;
         Ok(())
     }
 
     /// Every group with a state other than the default.
     pub fn group_states(&self) -> io::Result<BTreeMap<String, GroupState>> {
-        let rows = self
-            .database
-            .lock()
-            .query_map(
-                "SELECT name,suspended,mode FROM group_states ORDER BY name",
-                params![],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, bool>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .map_err(|e| self.error(e))?;
-        rows.into_iter()
-            .map(|(name, suspended, mode)| {
-                let mode = GroupMode::parse(&mode)
-                    .ok_or_else(|| self.error(format!("invalid mode for group {name}")))?;
-                Ok((name, GroupState { suspended, mode }))
-            })
-            .collect()
+        read_group_states(&self.database.read()).map_err(|e| self.error(e))
     }
 
     /// Record a group's state; the default state removes its row.
     pub fn set_group_state(&self, group: &str, state: GroupState) -> io::Result<()> {
-        let connection = self.database.lock();
-        let result = if state.is_default() {
-            connection.execute("DELETE FROM group_states WHERE name=?1", params![group])
-        } else {
-            connection.execute(
-                "INSERT INTO group_states (name,suspended,mode) VALUES (?1,?2,?3)
-                 ON CONFLICT(name) DO UPDATE SET suspended=excluded.suspended, mode=excluded.mode",
-                params![group, state.suspended, state.mode.as_str()],
-            )
-        };
-        result.map_err(|e| self.error(e))?;
+        self.run(InstanceOp::SetGroupState {
+            group: group.to_owned(),
+            suspended: state.suspended,
+            mode: state.mode.as_str().to_owned(),
+        })?;
         Ok(())
+    }
+
+    /// Change a group's stored state with `change` and return the new state.
+    /// Changes through this store are serialized, so concurrent changes to
+    /// different fields are both kept.
+    pub fn update_group_state(
+        &self,
+        group: &str,
+        change: impl FnOnce(&mut GroupState),
+    ) -> io::Result<GroupState> {
+        let _serialized = self.group_writes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.group_states()?.get(group).copied().unwrap_or_default();
+        change(&mut state);
+        self.set_group_state(group, state)?;
+        Ok(state)
+    }
+
+    /// Delete the states of groups `keep` does not name; their names.
+    pub fn prune_group_states<'a>(
+        &self,
+        keep: impl IntoIterator<Item = &'a String>,
+    ) -> io::Result<Vec<String>> {
+        match self.run(InstanceOp::PruneGroupStates {
+            keep: keep.into_iter().cloned().collect(),
+        })? {
+            InstanceOutcome::Pruned(names) => Ok(names),
+            other => Err(self.error(format!("unexpected outcome {other:?}"))),
+        }
     }
 
     /// Every node that is cordoned or draining.
     pub fn node_schedules(&self) -> io::Result<BTreeMap<String, NodeSchedule>> {
-        let rows = self
-            .database
-            .lock()
-            .query_map(
-                "SELECT name,schedule FROM node_schedules ORDER BY name",
-                params![],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .map_err(|e| self.error(e))?;
-        rows.into_iter()
-            .map(|(name, schedule)| {
-                let schedule = NodeSchedule::parse(&schedule)
-                    .ok_or_else(|| self.error(format!("invalid schedule for node {name}")))?;
-                Ok((name, schedule))
-            })
-            .collect()
+        read_node_schedules(&self.database.read()).map_err(|e| self.error(e))
     }
 
     /// Record a node's schedule; `active` removes its row.
     pub fn set_node_schedule(&self, node: &str, schedule: NodeSchedule) -> io::Result<()> {
-        let connection = self.database.lock();
-        let result = if schedule == NodeSchedule::Active {
-            connection.execute("DELETE FROM node_schedules WHERE name=?1", params![node])
-        } else {
-            connection.execute(
-                "INSERT INTO node_schedules (name,schedule) VALUES (?1,?2)
-                 ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule",
-                params![node, schedule.as_str()],
-            )
-        };
-        result.map_err(|e| self.error(e))?;
+        self.run(InstanceOp::SetNodeSchedule {
+            node: node.to_owned(),
+            schedule: schedule.as_str().to_owned(),
+        })?;
         Ok(())
+    }
+
+    /// Delete the schedules of nodes `keep` does not name; their names.
+    pub fn prune_node_schedules<'a>(
+        &self,
+        keep: impl IntoIterator<Item = &'a String>,
+    ) -> io::Result<Vec<String>> {
+        match self.run(InstanceOp::PruneNodeSchedules {
+            keep: keep.into_iter().cloned().collect(),
+        })? {
+            InstanceOutcome::Pruned(names) => Ok(names),
+            other => Err(self.error(format!("unexpected outcome {other:?}"))),
+        }
+    }
+
+    fn remember(&self, hook: HookId) {
+        self.hooks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(hook);
+    }
+
+    /// Mirror group states and node schedules into memory: `groups` and
+    /// `nodes` get the whole table now and again after every change to it,
+    /// whether the write was local or applied from elsewhere. They run on the
+    /// writing thread while it holds the database connection, so they must
+    /// not use the database.
+    pub fn watch_states(
+        &self,
+        groups: impl Fn(BTreeMap<String, GroupState>) + Send + Sync + 'static,
+        nodes: impl Fn(BTreeMap<String, NodeSchedule>) + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let label = self.database.label().to_owned();
+        let connection = self.database.lock();
+        groups(read_group_states(&connection).map_err(|e| self.error(e))?);
+        nodes(read_node_schedules(&connection).map_err(|e| self.error(e))?);
+        let group_label = label.clone();
+        self.remember(
+            self.database.on_change(
+                &["group_states"],
+                move |connection, _| match read_group_states(connection) {
+                    Ok(states) => groups(states),
+                    Err(error) => {
+                        log_error!(
+                            "instance database {group_label}: group states not reloaded: {error}"
+                        )
+                    }
+                },
+            ),
+        );
+        self.remember(
+            self.database
+                .on_change(
+                    &["node_schedules"],
+                    move |connection, _| match read_node_schedules(connection) {
+                        Ok(schedules) => nodes(schedules),
+                        Err(error) => {
+                            log_error!(
+                                "instance database {label}: node schedules not reloaded: {error}"
+                            )
+                        }
+                    },
+                ),
+        );
+        drop(connection);
+        Ok(())
+    }
+
+    /// Mirror the ready registrations (what `Config.instances` holds) into
+    /// memory: `instances` gets them after every change to the registry,
+    /// under the same rules as [`Store::watch_states`].
+    pub fn watch_instances(
+        &self,
+        instances: impl Fn(BTreeMap<String, ServiceInstance>) + Send + Sync + 'static,
+    ) {
+        let label = self.database.label().to_owned();
+        self.remember(
+            self.database
+                .on_change(&["instances"], move |connection, _| {
+                    match read_records(connection) {
+                        Ok(records) => instances(
+                            records
+                                .into_iter()
+                                .filter(|record| record.phase == "ready")
+                                .map(|record| (record.name, record.definition.instance))
+                                .collect(),
+                        ),
+                        Err(error) => {
+                            log_error!(
+                                "instance database {label}: registrations not reloaded: {error}"
+                            )
+                        }
+                    }
+                }),
+        );
     }
 
     /// Ports registered on this host, including unfinished creations.

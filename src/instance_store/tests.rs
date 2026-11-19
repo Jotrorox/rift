@@ -866,3 +866,28 @@ fn the_instance_registry_works_on_postgres() {
     store.finish_removal(&name).unwrap();
     assert!(store.records().unwrap().is_empty());
 }
+
+#[test]
+fn registrations_reach_a_watcher_through_the_apply_hook() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let watcher = seen.clone();
+    store.watch_instances(move |instances| {
+        watcher
+            .lock()
+            .unwrap()
+            .push(instances.keys().cloned().collect());
+    });
+    // Allocating a name changes no registration; creating one reports it
+    // only once it is ready, and removing it reports it gone.
+    let (_, name, _) = fixture.ready(&store);
+    store.begin_removal(&name).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Vec::new(), vec![name.clone()], Vec::new()]
+    );
+    // A failed write reports nothing.
+    assert!(store.begin_removal(&name).is_err());
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}

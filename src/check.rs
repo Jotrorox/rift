@@ -272,6 +272,41 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
     (lines, warnings)
 }
 
+/// A cluster peer's own settings (`cluster.toml` beside `path`): the token
+/// variable is set and long enough, and the certificate, key and CA load.
+/// Nothing to report on a Rift without `cluster.toml`.
+pub fn cluster(config: &Config, path: &Path, report: &mut Report) {
+    let settings = match rift::cluster::Settings::load_beside(path) {
+        Ok(Some(settings)) => settings,
+        Ok(None) => return,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return;
+        }
+    };
+    if config.database.is_some() {
+        report.errors.push(
+            "cluster.toml: a cluster replicates SQLite; database.backend = \"postgres\" cannot be combined with it".into(),
+        );
+    }
+    match settings.token() {
+        Ok(_) => report
+            .notes
+            .push(format!("cluster: {} is set", settings.token_env)),
+        Err(error) => report.errors.push(error.to_string()),
+    }
+    match rift::cluster::quic::check(&settings) {
+        Ok(()) => report.notes.push(format!(
+            "cluster: peer {} loads {}, {} and {}",
+            settings.peer,
+            settings.certificate.display(),
+            settings.private_key.display(),
+            settings.ca.display()
+        )),
+        Err(error) => report.errors.push(error.to_string()),
+    }
+}
+
 /// Run every strict check and collect the results. Nothing is created or
 /// changed except a probe file that is removed at once and the compiled
 /// WebAssembly plugins in `local/plugincache` (and that cache's key), which

@@ -349,7 +349,7 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
     Ok((lua, root))
 }
 
-/// `rift.try`, `rift.clock` and `rift.time`.
+/// `rift.try`, `rift.clock`, `rift.time` and `rift.peer`.
 fn install_helpers(
     lua: &Lua,
     pcall: Function,
@@ -357,6 +357,8 @@ fn install_helpers(
     deadline: Instant,
 ) -> mlua::Result<()> {
     let api: Table = lua.named_registry_value("rift.api")?;
+    // This process's cluster peer name (cluster.toml), nil outside a cluster.
+    api.raw_set("peer", crate::cluster::settings::local_peer())?;
     // A caught error is rethrown when it comes from an exhausted budget: the
     // deadline passed, the instruction limit was reached, or memory ran out.
     // Those conditions persist, so a script cannot keep running past them.

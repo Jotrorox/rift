@@ -23,8 +23,8 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rift_messaging::frame::*;
 pub use rift_messaging::{
     ALPN, Client, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, Publisher, RemoteSubscription, Result,
-    client_config_from_der, read_certificates, server_config_from_der, tls_client_config,
-    tls_server_config,
+    ServerAddress, SubscriptionScope, client_config_from_der, read_certificates,
+    server_config_from_der, tls_client_config, tls_server_config,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -34,7 +34,7 @@ use tokio::{
 };
 
 use super::{
-    Broker,
+    Broker, SubscribeOptions,
     stream::{ConsumerConfig, Stream},
 };
 
@@ -975,14 +975,28 @@ async fn serve_stream(
             SUBSCRIBE => {
                 let subject = take_string(&mut frame)?;
                 let queue = take_string(&mut frame)?;
+                // An optional last field; clients from before scopes omit it.
+                let scope = if frame.is_empty() {
+                    SubscriptionScope::Cluster
+                } else {
+                    match take_u8(&mut frame)? {
+                        SCOPE_CLUSTER => SubscriptionScope::Cluster,
+                        SCOPE_LOCAL => SubscriptionScope::Local,
+                        _ => return Err(invalid("unknown subscription scope")),
+                    }
+                };
                 exhausted(&frame)?;
                 identity.can_subscribe(&subject)?;
                 if !queue.is_empty() && !valid_name(&queue) {
                     return Err(invalid("invalid queue group"));
                 }
+                let options = SubscribeOptions {
+                    scope,
+                    client: true,
+                };
                 let mut subscription = context
                     .broker
-                    .subscribe(&subject, nonempty(&queue))
+                    .subscribe_with(&subject, nonempty(&queue), options)
                     .map_err(other)?;
                 timeout(context.auth.io_timeout, write_simple(send, OK))
                     .await

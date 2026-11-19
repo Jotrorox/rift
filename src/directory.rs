@@ -8,9 +8,15 @@
 //! a database file (a configuration that never persists anything) they last
 //! as long as the process.
 //!
-//! Joins and quits are written off the session's task; lookups read the
-//! table directly.
-use crate::database::{self, Conn, Database, Dialect, OptionalExtension, Row, params};
+//! Joins and quits are written off the session's task as [`DirectoryOp`]s
+//! (their own deterministic log entry in a cluster); lookups read the table
+//! directly.
+use crate::database::{
+    self, Conn, Database, Dialect, OptionalExtension, Row,
+    operation::{Operation, OrMessage, Outcome},
+    params,
+};
+use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc};
 
 const COMPONENT: &str = "players";
@@ -40,6 +46,141 @@ CREATE INDEX players_name ON players (name_key, last_seen);"#;
 
 /// Most records one `search` returns.
 pub const MAX_SEARCH: u32 = 100;
+
+/// The tables directory writes change.
+pub const TABLES: &[&str] = &["players"];
+
+fn schema_sql(dialect: Dialect, _from: u32) -> String {
+    match dialect {
+        Dialect::Sqlite => SCHEMA,
+        Dialect::Postgres => POSTGRES_SCHEMA,
+    }
+    .to_owned()
+}
+
+/// The directory's schema component and the version this Rift writes.
+pub fn schema_versions() -> Vec<(&'static str, u32)> {
+    vec![(COMPONENT, SCHEMA_VERSION)]
+}
+
+/// The tables of `component`, if it is the directory's.
+pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
+    (component == COMPONENT).then_some(TABLES)
+}
+
+/// Migrate the directory to `to_version` in the caller's transaction;
+/// `None` for another component.
+pub fn migrate(
+    connection: &Conn,
+    component: &str,
+    to_version: u32,
+) -> Option<Result<bool, String>> {
+    (component == COMPONENT).then(|| {
+        database::migrate_component(
+            connection,
+            COMPONENT,
+            to_version,
+            SCHEMA_VERSION,
+            schema_sql,
+        )
+        .or_message()
+    })
+}
+
+/// A write to the player directory. Times are seconds since the epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DirectoryOp {
+    /// A player joined: remember the name, address (`None` forgets one) and
+    /// server.
+    Joined {
+        uuid: String,
+        name: String,
+        ip: Option<String>,
+        server: String,
+        now: u64,
+    },
+    /// A player left from `server`.
+    Left {
+        uuid: String,
+        server: String,
+        now: u64,
+    },
+    /// Set or clear the language of a known player.
+    SetLanguage {
+        uuid: String,
+        language: Option<String>,
+    },
+}
+
+/// The result of a [`DirectoryOp`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum DirectoryOutcome {
+    /// The number of rows the write changed.
+    Changed {
+        rows: usize,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl DirectoryOutcome {
+    pub fn failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
+fn seconds(now: u64) -> i64 {
+    i64::try_from(now).unwrap_or(i64::MAX)
+}
+
+/// Perform `op` in the caller's transaction.
+pub fn apply(connection: &Conn, op: &DirectoryOp) -> DirectoryOutcome {
+    let greatest = connection.dialect().greatest();
+    let result = match op {
+        DirectoryOp::Joined {
+            uuid,
+            name,
+            ip,
+            server,
+            now,
+        } => connection.execute(
+            &format!(
+                "INSERT INTO players (uuid, name, name_key, first_seen, last_seen, last_ip, last_server)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
+                 ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, name_key = excluded.name_key,
+                     last_seen = {greatest}(players.last_seen, excluded.last_seen),
+                     last_ip = excluded.last_ip, last_server = excluded.last_server"
+            ),
+            params![
+                uuid,
+                name,
+                name.to_ascii_lowercase(),
+                seconds(*now),
+                ip.clone().unwrap_or_default(),
+                server
+            ],
+        ),
+        DirectoryOp::Left { uuid, server, now } => connection.execute(
+            &format!(
+                "UPDATE players SET last_seen = {greatest}(last_seen, ?2), last_server = ?3 WHERE uuid = ?1"
+            ),
+            params![uuid, seconds(*now), server],
+        ),
+        DirectoryOp::SetLanguage { uuid, language } => connection.execute(
+            "UPDATE players SET language = ?2 WHERE uuid = ?1",
+            params![uuid, language],
+        ),
+    };
+    match result {
+        Ok(rows) => DirectoryOutcome::Changed { rows },
+        Err(error) => DirectoryOutcome::Failed {
+            message: error.to_string(),
+        },
+    }
+}
 
 /// One remembered player. `online` is not stored: the caller knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,13 +245,7 @@ pub struct Directory {
 impl Directory {
     /// Create or migrate the table in `database`.
     pub fn open(database: Arc<Database>) -> io::Result<Self> {
-        database.migrate(COMPONENT, SCHEMA_VERSION, |dialect, _| {
-            match dialect {
-                Dialect::Sqlite => SCHEMA,
-                Dialect::Postgres => POSTGRES_SCHEMA,
-            }
-            .to_owned()
-        })?;
+        database.migrate(COMPONENT, SCHEMA_VERSION, schema_sql)?;
         Ok(Self { database })
     }
 
@@ -120,27 +255,35 @@ impl Directory {
     }
 
     fn read<T>(&self, work: impl FnOnce(&Conn) -> database::Result<T>) -> Result<T, String> {
-        let connection = self.database.lock();
+        let connection = self.database.read();
         work(&connection).map_err(|error| self.database.error(error).to_string())
+    }
+
+    /// Run one write; the number of rows it changed.
+    fn write(&self, op: DirectoryOp) -> Result<usize, String> {
+        match self.database.run(Operation::Directory(op)) {
+            Ok(Outcome::Directory(DirectoryOutcome::Changed { rows })) => Ok(rows),
+            Ok(Outcome::Directory(DirectoryOutcome::Failed { message })) => {
+                Err(self.database.error(message).to_string())
+            }
+            Ok(other) => Err(self
+                .database
+                .error(format!("unexpected outcome {other:?}"))
+                .to_string()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// A player joined: remember the name, address and server. `ip` is
     /// `None` when addresses are not recorded, which also forgets an
     /// address recorded earlier.
     pub fn joined(&self, uuid: &str, name: &str, ip: Option<&str>, server: &str) {
-        let now = unix_now() as i64;
-        let result = self.read(|connection| {
-            let greatest = connection.dialect().greatest();
-            connection.execute(
-                &format!(
-                    "INSERT INTO players (uuid, name, name_key, first_seen, last_seen, last_ip, last_server)
-                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
-                     ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, name_key = excluded.name_key,
-                         last_seen = {greatest}(players.last_seen, excluded.last_seen),
-                         last_ip = excluded.last_ip, last_server = excluded.last_server"
-                ),
-                params![uuid, name, name.to_ascii_lowercase(), now, ip.unwrap_or_default(), server],
-            )
+        let result = self.write(DirectoryOp::Joined {
+            uuid: uuid.to_owned(),
+            name: name.to_owned(),
+            ip: ip.map(str::to_owned),
+            server: server.to_owned(),
+            now: unix_now(),
         });
         if let Err(error) = result {
             eprintln!("rift: cannot record the join of {name}: {error}");
@@ -149,15 +292,10 @@ impl Directory {
 
     /// A player left from `server`.
     pub fn left(&self, uuid: &str, server: &str) {
-        let now = unix_now() as i64;
-        let result = self.read(|connection| {
-            let greatest = connection.dialect().greatest();
-            connection.execute(
-                &format!(
-                    "UPDATE players SET last_seen = {greatest}(last_seen, ?2), last_server = ?3 WHERE uuid = ?1"
-                ),
-                params![uuid, now, server],
-            )
+        let result = self.write(DirectoryOp::Left {
+            uuid: uuid.to_owned(),
+            server: server.to_owned(),
+            now: unix_now(),
         });
         if let Err(error) = result {
             eprintln!("rift: cannot record the quit of {uuid}: {error}");
@@ -241,11 +379,9 @@ impl Directory {
     /// Set or clear the language of a known player. False for a player
     /// Rift never saw.
     pub fn set_language(&self, uuid: &str, language: Option<&str>) -> Result<bool, String> {
-        self.read(|connection| {
-            connection.execute(
-                "UPDATE players SET language = ?2 WHERE uuid = ?1",
-                params![uuid, language],
-            )
+        self.write(DirectoryOp::SetLanguage {
+            uuid: uuid.to_owned(),
+            language: language.map(str::to_owned),
         })
         .map(|changed| changed > 0)
     }

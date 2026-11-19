@@ -5,7 +5,10 @@
 //! `{server_online}`. With `names = "all"`, the entries backends list
 //! themselves take the same display name and order as Rift's own; `format`
 //! shapes that name (see `players::format_name`). Sessions rebuild their view only when the registry,
-//! configuration, per-player override or client tab list has changed.
+//! configuration, per-player override or client tab list has changed, and
+//! check for a change on a tick, so a burst of joins anywhere in the network
+//! costs each session at most one rebuild per tick. In a cluster the
+//! registry counts and lists the players of every peer.
 //! Entries and counts are what the viewing player may see (see
 //! [`Viewer`]), so a hidden player is neither listed nor counted.
 
@@ -34,8 +37,9 @@ pub struct TabList {
 }
 
 /// A header and footer for one player, set through `rift.players.tab_list`.
-/// Unset fields use the configured text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Unset fields use the configured text. Serializable, so that a peer of a
+/// cluster can set it for another peer's player.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Override {
     pub header: Option<Json>,
     pub footer: Option<Json>,

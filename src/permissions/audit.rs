@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 /// Rows one query returns by default and at most.
 const DEFAULT_LIMIT: usize = 100;
-const MAX_LIMIT: usize = 1000;
+pub(super) const MAX_LIMIT: usize = 1000;
 
 /// Which changes [`crate::permissions::Authority::log`] returns. Rows come in
 /// revision order. With `since`, the first `limit` revisions after it;

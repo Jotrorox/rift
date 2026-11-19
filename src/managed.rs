@@ -181,6 +181,9 @@ struct State {
     startup: Option<Arc<Startup>>,
     /// Parked for a move to another node (see [`ManagedServers::park`]).
     moving: bool,
+    /// Holds of [`ManagedServers::quiesce`]: while any is held, no new
+    /// player is routed here.
+    quiesced: usize,
 }
 
 /// One worker-owned result, retained for every caller even if a later start
@@ -307,6 +310,28 @@ impl Parked {
 impl Drop for Parked {
     fn drop(&mut self) {
         lock(&self.server.state).moving = false;
+    }
+}
+
+/// A server that takes no new players while this is held: the hold of
+/// [`ManagedServers::quiesce`]. Dropping it lifts the hold.
+#[derive(Debug)]
+pub struct Quiesced {
+    server: Arc<Server>,
+}
+
+impl Quiesced {
+    /// Whether players are still on their way to the server: reservations
+    /// taken before the hold. A leader asking this peer to stop the server
+    /// takes that as a veto.
+    pub fn has_inbound(&self) -> bool {
+        lock(&self.server.state).reservations > 0
+    }
+}
+
+impl Drop for Quiesced {
+    fn drop(&mut self) {
+        lock(&self.server.state).quiesced -= 1;
     }
 }
 
@@ -730,6 +755,30 @@ impl ManagedServers {
         Ok(parked)
     }
 
+    /// Whether players are on their way to `name` from this process: a
+    /// pending connection or a transfer holds a reservation until the
+    /// player's presence is committed. A cluster leader that wants to stop
+    /// `name` (idle or scale-down) asks every peer this, and a `true` is a
+    /// veto. Players already on the server are counted from presence.
+    pub fn has_reservation_or_inbound(&self, name: &str) -> bool {
+        lock(&self.0.servers)
+            .get(name)
+            .is_some_and(|server| lock(&server.state).reservations > 0)
+    }
+
+    /// Stop routing new players to `name` until the returned hold is
+    /// dropped: new reservations fail and the server is not reachable for
+    /// routing, while players already there or on their way stay. A
+    /// cluster leader takes the hold on every peer before it stops a server,
+    /// and the peers drop it once the server stopped or the stop was
+    /// abandoned. `None` for a server that is not managed here. Nothing
+    /// else changes: a single Rift never takes a hold.
+    pub fn quiesce(&self, name: &str) -> Option<Quiesced> {
+        let server = lock(&self.0.servers).get(name)?.clone();
+        lock(&server.state).quiesced += 1;
+        Some(Quiesced { server })
+    }
+
     /// Whether `name` is held by [`park`](Self::park).
     pub fn is_moving(&self, name: &str) -> bool {
         lock(&self.0.servers)
@@ -1123,6 +1172,7 @@ fn new_server(
             last_activity: Instant::now(),
             startup: None,
             moving: false,
+            quiesced: 0,
         }),
     })
 }
@@ -1292,6 +1342,11 @@ fn send_request(server: &Server, request: Request) -> io::Result<()> {
 fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
     if state.moving {
         return Err(moving());
+    }
+    if state.quiesced > 0 {
+        return Err(unavailable(
+            "managed server is being stopped and takes no new players",
+        ));
     }
     if server.shutdown.load(Ordering::Acquire)
         || state.pending_stop

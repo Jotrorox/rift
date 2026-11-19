@@ -1,9 +1,14 @@
 //! LuckPerms `/lp export` files in and out. The crate decodes string nodes
-//! ([`rift_permissions::luckperms`]); this writes the result in one revision.
-use super::{Authority, PermError, store};
+//! ([`rift_permissions::luckperms`]); this writes the result in one revision
+//! ([`super::ops::PermBody::Import`]).
+use super::{
+    Authority, PermError,
+    ops::{PermBody, PermDetail},
+    store,
+};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use rift_permissions::{
-    Actor, SubjectRef,
+    Actor,
     luckperms::{Export, Skipped},
 };
 use serde::Serialize;
@@ -66,24 +71,6 @@ pub fn write_export(export: &Export, writer: impl Write, gzip: bool) -> io::Resu
     }
 }
 
-/// Validation and limit failures skip one item; storage failures abort.
-fn skip(
-    skipped: &mut Vec<Skipped>,
-    subject: String,
-    key: &str,
-    error: PermError,
-) -> Result<(), PermError> {
-    if matches!(error, PermError::Storage(_)) {
-        return Err(error);
-    }
-    skipped.push(Skipped {
-        subject,
-        key: key.to_owned(),
-        reason: error.to_string(),
-    });
-    Ok(())
-}
-
 impl Authority {
     /// Import a LuckPerms export in one revision. Additive: nodes land in
     /// their slots with source `import` and nothing else is deleted, except
@@ -98,54 +85,26 @@ impl Authority {
     ) -> Result<ImportReport, PermError> {
         let import = read_export(reader)?.import_in(&self.service_groups());
         let mut skipped = import.skipped.clone();
-        let (counts, applied) = self.write(&actor, Some("LuckPerms import"), None, |work| {
-            if replace {
-                work.delete_imported()?;
+        let body = PermBody::Import { import, replace };
+        let (detail, applied) = self.write(&actor, Some("LuckPerms import"), None, body)?;
+        let (groups, users, tracks) = match detail {
+            PermDetail::Import {
+                groups,
+                users,
+                tracks,
+                skipped: more,
+            } => {
+                skipped.extend(more);
+                (groups, users, tracks)
             }
-            let mut counts = (0, 0, 0);
-            for group in &import.groups {
-                let label = format!("group:{}", group.name);
-                if !work.group_exists(&group.name)?
-                    && let Err(error) = work.create_group(&group.name, 0, None)
-                {
-                    skip(&mut skipped, label, "", error)?;
-                    continue;
-                }
-                counts.0 += 1;
-                let subject = SubjectRef::Group(group.name.clone());
-                for node in &group.nodes {
-                    if let Err(error) = work.set_node(&subject, node.clone()) {
-                        skip(&mut skipped, label.clone(), &node.payload.key(), error)?;
-                    }
-                }
-            }
-            for user in &import.users {
-                let label = format!("user:{}", user.uuid.hyphenated());
-                if let Some(name) = &user.last_name {
-                    store::set_last_name(work.connection(), user.uuid, name, work.now())?;
-                }
-                counts.1 += 1;
-                let subject = SubjectRef::User(user.uuid);
-                for node in &user.nodes {
-                    if let Err(error) = work.set_node(&subject, node.clone()) {
-                        skip(&mut skipped, label.clone(), &node.payload.key(), error)?;
-                    }
-                }
-            }
-            for track in &import.tracks {
-                match work.set_track(&track.name, track.groups.clone()) {
-                    Ok(()) => counts.2 += 1,
-                    Err(error) => skip(&mut skipped, format!("track:{}", track.name), "", error)?,
-                }
-            }
-            Ok(counts)
-        })?;
+            _ => (0, 0, 0),
+        };
         Ok(ImportReport {
             revision: applied.revision,
             ops: applied.ops,
-            groups: counts.0,
-            users: counts.1,
-            tracks: counts.2,
+            groups,
+            users,
+            tracks,
             skipped,
         })
     }
@@ -153,7 +112,7 @@ impl Authority {
     /// Everything in the LuckPerms export format, which `/lp import` reads
     /// back. Contexts with several values of one key keep the first value.
     pub fn export_luckperms(&self) -> Result<Export, PermError> {
-        let users = store::load_users(&self.database().lock())?;
+        let users = store::load_users(&self.database().read())?;
         let groups: Vec<_> = self.groups().values().cloned().collect();
         let tracks: Vec<_> = self.tracks().values().cloned().collect();
         Ok(Export::from_model(&users, &groups, &tracks))

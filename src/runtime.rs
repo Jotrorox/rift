@@ -216,9 +216,17 @@ impl Snapshot {
             |old| old.control.clone(),
         );
         let health = Health::with_control(&config, control.clone());
+        let live =
+            previous.map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone());
+        if previous.is_none() {
+            // Transfers and dialog clicks that other cluster peers route to
+            // this process's sessions; the directory outlives reloads.
+            extensions
+                .players()
+                .set_session_hooks(Arc::new(admin::RemoteSessions::new(live.clone())));
+        }
         Ok(Self {
-            live: previous
-                .map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone()),
+            live,
             instance_sequence: previous
                 .map_or_else(Arc::default, |old| old.instance_sequence.clone()),
             instance_store: previous.and_then(|old| old.instance_store.clone()),
@@ -332,45 +340,45 @@ impl Snapshot {
         })
     }
 
-    /// Change a service group's operator state, recording it in the instance
-    /// database first when there is one.
+    /// Change a service group's operator state. With an instance database
+    /// the write goes there and `control` follows through the store's apply
+    /// hook (see `Store::watch_states` in `serve`).
     pub fn update_group(
         &self,
         name: &str,
         change: impl FnOnce(&mut rift::config::GroupState),
     ) -> io::Result<rift::config::GroupState> {
-        self.control.update_group(name, change, |state| {
-            self.instance_store
-                .as_ref()
-                .map_or(Ok(()), |store| store.set_group_state(name, state))
-        })
+        match &self.instance_store {
+            Some(store) => store.update_group_state(name, change),
+            None => self.control.update_group(name, change, |_| Ok(())),
+        }
     }
 
-    /// Change a node's schedule, recording it in the instance database
-    /// first when there is one.
+    /// Change a node's schedule, through the instance database when there
+    /// is one, as in [`Snapshot::update_group`].
     pub fn update_node(
         &self,
         name: &str,
         schedule: rift::config::NodeSchedule,
     ) -> io::Result<rift::config::NodeSchedule> {
-        self.control.update_node(name, schedule, |schedule| {
-            self.instance_store
-                .as_ref()
-                .map_or(Ok(()), |store| store.set_node_schedule(name, schedule))
-        })
+        match &self.instance_store {
+            Some(store) => store.set_node_schedule(name, schedule).map(|()| schedule),
+            None => self.control.update_node(name, schedule, |_| Ok(())),
+        }
     }
 
     /// Drop the schedule of nodes that are no longer configured, so a node
     /// configured again later starts active.
     pub fn prune_nodes(&self) {
-        for name in self
-            .control
-            .retain_nodes(|name| self.config.nodes.contains_key(name))
-        {
-            if let Some(store) = &self.instance_store
-                && let Err(error) = store.set_node_schedule(&name, Default::default())
-            {
-                log_error!("schedule of removed node {name} not cleared: {error}");
+        match &self.instance_store {
+            Some(store) => {
+                if let Err(error) = store.prune_node_schedules(self.config.nodes.keys()) {
+                    log_error!("schedules of removed nodes not cleared: {error}");
+                }
+            }
+            None => {
+                self.control
+                    .retain_nodes(|name| self.config.nodes.contains_key(name));
             }
         }
     }
@@ -378,14 +386,15 @@ impl Snapshot {
     /// Drop the state of groups this configuration no longer defines, so a
     /// group defined again later starts active.
     pub fn prune_groups(&self) {
-        for name in self
-            .control
-            .retain_groups(|name| self.config.service_groups.contains_key(name))
-        {
-            if let Some(store) = &self.instance_store
-                && let Err(error) = store.set_group_state(&name, Default::default())
-            {
-                log_error!("state of removed service group {name} not cleared: {error}");
+        match &self.instance_store {
+            Some(store) => {
+                if let Err(error) = store.prune_group_states(self.config.service_groups.keys()) {
+                    log_error!("states of removed service groups not cleared: {error}");
+                }
+            }
+            None => {
+                self.control
+                    .retain_groups(|name| self.config.service_groups.contains_key(name));
             }
         }
     }
@@ -897,8 +906,9 @@ pub async fn handle(
         // Reserve the name before contacting a backend, which might
         // otherwise evict the existing player as soon as a duplicate logs in.
         // The client's claimed UUID is never used as the confirmed identity.
+        // In a cluster the claim waits for its commit; a fenced peer refuses.
         let mut name_reservation = if tracked_login {
-            match snapshot.players.reserve_name(&login_name) {
+            match snapshot.players.claim_name(&login_name, event.id()).await {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
                     let _ = timeout(
@@ -1355,15 +1365,32 @@ pub async fn handle(
                             .extensions
                             .players()
                             .visibility(&uuid, &current_backend);
+                        // Only a capped cluster asks whether the player may
+                        // pass the cap.
+                        let bypass_cap = snapshot.players.max_players().is_some() && {
+                            use rift::config::AccessSubject;
+                            snapshot
+                                .subject(Some(Uuid::from_bytes(uuid)))
+                                .holds(rift::players::MAX_PLAYERS_BYPASS)
+                        };
+                        // Ready at once on a single Rift; a cluster waits
+                        // for the claim's commit.
                         let registered = if let Some(reservation) = name_reservation.take() {
-                            reservation.register_visible(uuid, &current_backend, visible_to)
+                            reservation
+                                .claim_player(uuid, &current_backend, visible_to, bypass_cap)
+                                .await
                         } else {
-                            snapshot.players.register_visible(
-                                uuid,
-                                identity.name,
-                                &current_backend,
-                                visible_to,
-                            )
+                            snapshot
+                                .players
+                                .claim_player(
+                                    uuid,
+                                    &identity.name,
+                                    &current_backend,
+                                    visible_to,
+                                    event.id(),
+                                    bypass_cap,
+                                )
+                                .await
                         };
                         match registered {
                             Ok(guard) => {
@@ -1371,16 +1398,22 @@ pub async fn handle(
                                 if let Some(profile) = session.authenticated_profile() {
                                     guard.set_properties(&profile.properties);
                                 }
+                                // For other peers' BungeeCord `IPOther`.
+                                guard.set_address(peer);
                                 registration = Some(guard);
                             }
                             Err(error) => {
-                                let _ = timeout(
-                                    HANDSHAKE_TIMEOUT,
-                                    session.disconnect_text(&catalog::notice(
-                                        Notice::LoginAlreadyConnected,
-                                    )),
-                                )
-                                .await;
+                                // A full or cut-off network says so; anything
+                                // else is told as it always was.
+                                let reason = match error.kind() {
+                                    io::ErrorKind::QuotaExceeded
+                                    | io::ErrorKind::NotConnected
+                                    | io::ErrorKind::TimedOut => rift::text::reason(&error),
+                                    _ => catalog::notice(Notice::LoginAlreadyConnected),
+                                };
+                                let _ =
+                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
+                                        .await;
                                 return Err(error);
                             }
                         }
@@ -1972,10 +2005,11 @@ fn instance_logins(
         })
 }
 
-/// Where instances reach the bus: `messaging.advertise`, else the bound
-/// address with `127.0.0.1` for an unspecified IP, which only local
-/// instances can use (`rift check` warns about nodes then).
-fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+/// Every address instances may reach the bus at, the preferred one first:
+/// `messaging.advertise`, else the bound address with `127.0.0.1` for an
+/// unspecified IP, which only local instances can use (`rift check` warns
+/// about nodes then). A cluster adds its other peers here.
+fn bus_addresses(config: &Config, bound: SocketAddr) -> Vec<String> {
     let messaging = config.messaging.as_ref().expect("listening");
     let address = messaging.advertise.clone().unwrap_or_else(|| {
         let ip = if bound.ip().is_unspecified() {
@@ -1985,6 +2019,14 @@ fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::ins
         };
         SocketAddr::new(ip, bound.port()).to_string()
     });
+    vec![address]
+}
+
+/// Where instances reach the bus; see [`bus_addresses`].
+fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+    let messaging = config.messaging.as_ref().expect("listening");
+    let mut addresses = bus_addresses(config, bound);
+    let address = addresses.remove(0);
     let server_name = messaging.advertise_server_name.clone().unwrap_or_else(|| {
         messaging
             .advertise
@@ -2005,6 +2047,7 @@ fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::ins
     })?;
     Ok(rift::instance_login::Bus {
         address,
+        fallback_addresses: addresses,
         server_name,
         certificate,
     })
@@ -3048,8 +3091,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut initial = Snapshot::first(config, permissions)?;
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
-        initial.control.restore_groups(store.group_states()?);
-        initial.control.restore_nodes(store.node_schedules()?);
+        // Group states and node schedules reach `control` only through the
+        // store's apply hooks: now, and after every write to them.
+        let (groups, nodes) = (initial.control.clone(), initial.control.clone());
+        store.watch_states(
+            move |states| groups.restore_groups(states),
+            move |schedules| nodes.restore_nodes(schedules),
+        )?;
         initial.instance_store = Some(store);
     }
     initial.prune_groups();

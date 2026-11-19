@@ -21,6 +21,19 @@ and the grants a login needs.
 > A timed-out command may already have executed. Check status before retrying
 > a mutation. Rift performs no automatic mutation retry.
 
+## Scopes in a cluster
+
+In a [cluster](clustering.md#subject-scopes) each subject has a scope that
+says whether it crosses peers. On a single Rift the scopes change nothing.
+
+| Scope | Subjects |
+| --- | --- |
+| `local`: answered by the peer the publisher is connected to | `rift.control`, `rift.players` and `rift.network` and everything below them; `rift.server.state`; the permission requests `rift.perms.hello`, `subject.get`, `subject.batch`, `groups.get`, `apply`, `command`, `register` and `context`; `rift.node.<n>.*` other than `cmd` and `state` |
+| `applied`: each peer publishes its own copy to its own subscribers | `rift.events.instances`, `rift.events.permissions`, `rift.events.reload`, `rift.events.servers`, `rift.events.cluster`, `rift.perms.update`, `rift.perms.changes` |
+| `origin`: published where it happens; reaches remote clients on every peer, but Lua and plugins only on their own peer | Every other `rift.events.*`: `players`, `control`, `lifecycle`, `plugins` |
+| `owner`: routed to the peer holding the node's session, or to the leader | `rift.node.<n>.cmd`, `rift.node.<n>.state` |
+| `cluster`: federated by interest | Everything else, including `rift.perms.update.<uuid>`, `rift.perms.update.resync` and `_INBOX.*` |
+
 ## Player API
 
 The `players` interface of the [plugin contract](plugins.md#host-api) is also

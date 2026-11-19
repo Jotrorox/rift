@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use cluster::ClusterConfig;
 pub use managed::{
     InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
 };
@@ -32,6 +33,7 @@ pub use status::{
 };
 pub use templates::ServerTemplate;
 
+mod cluster;
 mod database;
 mod managed;
 mod messaging;
@@ -122,6 +124,9 @@ pub struct Config {
     /// `players = { record_ip }`: whether the player directory remembers
     /// the address a player last joined from. Default `true`.
     pub record_ip: bool,
+    /// `rift.config.cluster`: settings all cluster peers share. Inert
+    /// without a `cluster.toml` beside the configuration.
+    pub cluster: Option<ClusterConfig>,
 }
 
 /// Protocol translation between players and backends on different Minecraft
@@ -368,6 +373,8 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "plugins",
     "logs",
     "perms",
+    // Membership changes, leadership transfers and backups of a cluster.
+    "cluster",
 ];
 
 /// Grants available to named `web.operators`.
@@ -725,6 +732,7 @@ impl Config {
             shutdown_timeout: Duration::from_secs(30),
             text: std::sync::Arc::default(),
             record_ip: true,
+            cluster: None,
         };
         config.validate()?;
         Ok(config)
@@ -899,6 +907,7 @@ impl Config {
                     "shutdown_timeout_ms",
                     "text",
                     "players",
+                    "cluster",
                 ],
                 "config",
             )?;
@@ -1236,6 +1245,7 @@ impl Config {
                 plugin.online_mode = authentication.online_mode;
             }
             let forwarding = forwarding(&root)?;
+            let cluster = cluster::parse(&root)?;
             Ok(Self {
                 listeners,
                 backends,
@@ -1281,6 +1291,7 @@ impl Config {
                 shutdown_timeout,
                 text,
                 record_ip,
+                cluster,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
@@ -1312,6 +1323,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if self.cluster.is_some() && self.database.is_some() {
+            return Err(invalid(
+                "cluster: a cluster replicates its own SQLite state; database.backend = \"postgres\" cannot be combined with it",
+            ));
+        }
         let path = self.instance_database.as_os_str().as_encoded_bytes();
         if path.is_empty()
             || path.len() > 4096

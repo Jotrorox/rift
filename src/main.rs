@@ -69,6 +69,8 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift node init <name> [--address <host>] (print a node's token, systemd unit and setup checks; see rift node init --help)\n\
     rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL; see rift database --help)\n\
+    rift cluster init|recover [options] (create or recover a cluster of several proxies; see rift cluster --help)\n\
+    rift witness [--config <path>] (run this host as a cluster witness; see docs/clustering.md)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\
@@ -145,6 +147,12 @@ async fn start(args: Vec<String>) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "database") {
         return database_cli::run(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "cluster") {
+        return rift::cluster::cli::run(&args[1..]).await;
+    }
+    if args.first().is_some_and(|arg| arg == "witness") {
+        return rift::cluster::cli::witness(&args[1..]).await;
+    }
     if args.first().is_some_and(|arg| arg == "node") {
         if args.get(1).is_some_and(|arg| arg == "init") {
             if args[2..].iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -201,6 +209,15 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             file.write_all(include_bytes!("../examples/rift.lua"))?;
             println!("rift: created {path}; edit your backends, then run: rift check {path}");
         } else {
+            // `rift.peer` must hold this peer's name while the script runs.
+            if let Some(peer) = rift::cluster::Settings::load_beside(Path::new(path))? {
+                rift::cluster::settings::set_local_peer(&peer.peer);
+                println!(
+                    "rift: cluster peer {}: {} valid",
+                    peer.peer,
+                    rift::cluster::Settings::path_beside(Path::new(path)).display()
+                );
+            }
             let (config, cost) = Config::check(Path::new(path))?;
             println!("rift: configuration valid: {path}");
             // Every Lua callback evaluates the configuration again before it
@@ -239,6 +256,7 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                 let path = fs::canonicalize(path)?;
                 let mut report = check::strict(&config, &path);
                 check::agents(&config, &mut report).await;
+                check::cluster(&config, &path, &mut report);
                 for note in &report.notes {
                     println!("rift: strict: {note}");
                 }
@@ -262,6 +280,18 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             }
         }
         return Ok(());
+    }
+    // A cluster.toml beside the configuration makes this Rift a cluster
+    // peer (docs/clustering.md); without one nothing below is touched.
+    let peer = match args.as_slice() {
+        [] => rift::cluster::Settings::load_beside(Path::new(DEFAULT_CONFIG_PATH))?,
+        [flag, path] if flag == "--config" => {
+            rift::cluster::Settings::load_beside(Path::new(path))?
+        }
+        _ => None,
+    };
+    if let Some(peer) = &peer {
+        rift::cluster::settings::set_local_peer(&peer.peer);
     }
     let (config, path) = match args.as_slice() {
         [] => match Config::load_unrestored(Path::new(DEFAULT_CONFIG_PATH)) {
@@ -337,6 +367,12 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         }
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
+    if let Some(peer) = peer {
+        let source = path.as_deref().map(fs::read).transpose()?;
+        let options = rift::cluster::Options::from_config(&config, source.as_deref())?;
+        let cluster = rift::cluster::Cluster::start(peer, options).await?;
+        rift::cluster::install_global(cluster);
+    }
     runtime::serve(config, path).await
 }
 

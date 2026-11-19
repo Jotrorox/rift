@@ -2325,3 +2325,34 @@ fn a_script_chat_hook_loads_with_signed_and_unsigned_chat() {
         "{error}"
     );
 }
+
+#[test]
+fn the_cluster_section_has_defaults_and_bounds() {
+    let config = Config::from_lua(
+        &with_security("cluster = { peer_timeout_ms = 5000, max_players = 2000 }"),
+        "cluster.lua",
+    )
+    .unwrap();
+    let cluster = config.cluster.unwrap();
+    assert_eq!(cluster.peer_timeout, Duration::from_secs(5));
+    assert_eq!(cluster.partition_grace, Duration::from_secs(60));
+    assert_eq!(cluster.max_players, Some(2000));
+    assert!(!cluster.partition_message.is_empty());
+    assert!(
+        Config::from_lua(VALID, "single.lua")
+            .unwrap()
+            .cluster
+            .is_none()
+    );
+    for (settings, expected) in [
+        ("cluster = { peer_timeout_ms = 500 }", "at least 2000"),
+        ("cluster = { peers = {} }", "unknown field"),
+        ("cluster = { partition_message = '' }", "partition_message"),
+        ("cluster = { max_players = 0 }", "max_players"),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "cluster.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
+}

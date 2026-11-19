@@ -278,13 +278,17 @@ impl Control {
             .map(|entry| entry.peer)
     }
 
-    pub fn plugin_transfer(&self, name: &str, backend: &str, snapshot: Arc<Snapshot>) {
+    /// Queue a BungeeCord transfer for this process's player `name`; false
+    /// when no such player is connected here.
+    pub fn plugin_transfer(&self, name: &str, backend: &str, snapshot: Arc<Snapshot>) -> bool {
         let players = self.players.lock().unwrap();
-        if let Some(entry) = players
+        let Some(entry) = players
             .values()
             .find(|entry| entry.name.eq_ignore_ascii_case(name))
-            && entry.backend != backend
-        {
+        else {
+            return false;
+        };
+        if entry.backend != backend {
             // No task or unbounded queue per request, including self-transfers.
             // The recipient rechecks access, health, draining and extensions.
             let _ = entry.transfer.try_send(Transfer {
@@ -293,15 +297,159 @@ impl Control {
                 reply: TransferReply::BungeeCord,
             });
         }
+        true
+    }
+
+    /// [`Control::plugin_transfer`] by connection id, for a BungeeCord
+    /// `ConnectOther` that another cluster peer routed here.
+    fn plugin_transfer_id(&self, id: u64, backend: &str, snapshot: Arc<Snapshot>) -> bool {
+        let players = self.players.lock().unwrap();
+        let Some(entry) = players.get(&id) else {
+            return false;
+        };
+        if entry.backend != backend {
+            let _ = entry.transfer.try_send(Transfer {
+                snapshot,
+                backend: backend.to_owned(),
+                reply: TransferReply::BungeeCord,
+            });
+        }
+        true
     }
 
     fn status(&self, snapshot: &Snapshot, metrics: &Metrics) -> Value {
-        let players: Vec<Value> = self.players.lock().unwrap().iter().map(|(id, entry)| json!({"connection_id":id,"name":entry.name,"backend":entry.backend,"protocol":entry.protocol})).collect();
+        // Every peer's players in a cluster, each with its peer; the output
+        // of a single Rift is unchanged.
+        let identity = snapshot.players.identity();
+        let own = identity
+            .is_clustered()
+            .then(|| rift::players::identity::peer_label(identity.peer));
+        let mut players: Vec<Value> = self.players.lock().unwrap().iter().map(|(id, entry)| {
+            let mut player = json!({"connection_id":id,"name":entry.name,"backend":entry.backend,"protocol":entry.protocol});
+            if let Some(peer) = &own {
+                player["peer"] = json!(peer);
+            }
+            player
+        }).collect();
+        players.extend(snapshot.players.remote_players().into_iter().map(|remote| {
+            let player = remote.player;
+            json!({"connection_id":player.connection,"name":player.name,"backend":player.server,"protocol":player.protocol,"peer":rift::players::identity::peer_label(player.peer)})
+        }));
         let backends: Vec<Value> = snapshot.health.metrics().into_iter().map(|(name, up)| {
             let report = self.states.get(&name);
             json!({"draining":self.draining(&snapshot.config, &name),"service_state":report.state,"properties":report.properties,"backend":name,"up":up})
         }).collect();
         json!({"maintenance":self.maintenance(&snapshot.config),"connections":metrics.active.get(),"players_online":metrics.players.get(),"players":players,"backends":backends,"managed_servers":managed_servers(snapshot)})
+    }
+}
+
+/// `rift admin transfer` of a session of this process.
+pub(crate) async fn transfer_local(
+    snapshot: Arc<Snapshot>,
+    id: u64,
+    backend: &str,
+) -> Result<Value, String> {
+    let control = &snapshot.control;
+    if !snapshot.config.backends.contains_key(backend) {
+        return Err(format!("unknown backend {backend:?}"));
+    }
+    if control.draining(&snapshot.config, backend) || !snapshot.reachable(backend) {
+        return Err("target backend is draining, stopped or unhealthy".into());
+    }
+    let sender = {
+        let players = control.players.lock().unwrap();
+        let entry = players
+            .get(&id)
+            .ok_or("player is no longer online; refresh status")?;
+        if !rift::protocol::ProtocolVersion::new(entry.protocol)
+            .is_ok_and(rift::protocol::ProtocolVersion::supports_switching)
+        {
+            return Err("player transfers require Minecraft 1.8.9–26.3".into());
+        }
+        if entry.backend == backend {
+            return Err("player is already on that backend".into());
+        }
+        entry.transfer.clone()
+    };
+    let (reply, receiver) = oneshot::channel();
+    sender
+        .try_send(Transfer {
+            snapshot: snapshot.clone(),
+            backend: backend.to_owned(),
+            reply: TransferReply::Admin(reply),
+        })
+        .map_err(|_| "player disconnected or already has a queued transfer")?;
+    receiver
+        .await
+        .map_err(|_| "player disconnected during transfer".to_owned())?
+}
+
+/// What other cluster peers need from this process's sessions: transfers
+/// through a session's control queue (`rift admin transfer`, BungeeCord
+/// `ConnectOther`) and clicks on dialogs this process showed. It reads the
+/// newest configuration generation for each request.
+pub struct RemoteSessions {
+    live: Arc<Mutex<std::sync::Weak<Snapshot>>>,
+}
+
+impl RemoteSessions {
+    pub fn new(live: Arc<Mutex<std::sync::Weak<Snapshot>>>) -> Self {
+        Self { live }
+    }
+
+    fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.live.lock().unwrap().upgrade()
+    }
+}
+
+impl rift::extensions::routing::SessionHooks for RemoteSessions {
+    fn transfer(
+        &self,
+        connection: u64,
+        backend: String,
+        admin: bool,
+    ) -> rift::extensions::routing::RouteFuture<Result<Value, String>> {
+        let snapshot = self.snapshot();
+        Box::pin(async move {
+            let Some(snapshot) = snapshot else {
+                return Err("this peer is not serving players".to_owned());
+            };
+            if admin {
+                transfer_local(snapshot, connection, &backend).await
+            } else {
+                let control = snapshot.control.clone();
+                Ok(Value::Bool(
+                    control.plugin_transfer_id(connection, &backend, snapshot),
+                ))
+            }
+        })
+    }
+
+    fn dialog(
+        &self,
+        mut context: rift::extensions::Context,
+        owner: rift::dialog::Owner,
+    ) -> rift::extensions::routing::RouteFuture<io::Result<()>> {
+        let snapshot = self.snapshot();
+        Box::pin(async move {
+            let Some(snapshot) = snapshot else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "this peer is not serving players",
+                ));
+            };
+            let Some(response) = context.dialog.take() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "dialog click without a response",
+                ));
+            };
+            let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+            snapshot
+                .extensions
+                .dialog(context, owner, response, &jobs)
+                .await
+        })
     }
 }
 
@@ -388,6 +536,8 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         ("plugins", Some("restart" | "run")) => "plugins",
         ("plugins", Some("logs")) => "logs",
         ("plugins", _) => "status",
+        // Reading the cluster's state is status; changing it is `cluster`.
+        ("cluster", None | Some("status")) => "status",
         (command, _) => command,
     };
     if !settings.permissions.contains(permission) {
@@ -865,18 +1015,12 @@ pub(crate) async fn execute(
         }
         [command, id, backend] if command == "transfer" => {
             let id: u64 = id.parse().map_err(|_| "connection ID must be a positive integer")?;
-            if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}")); }
-            if control.draining(&snapshot.config, backend) || !snapshot.reachable(backend) { return Err("target backend is draining, stopped or unhealthy".into()); }
-            let sender = {
-                let players = control.players.lock().unwrap();
-                let entry = players.get(&id).ok_or("player is no longer online; refresh status")?;
-                if !rift::protocol::ProtocolVersion::new(entry.protocol).is_ok_and(rift::protocol::ProtocolVersion::supports_switching) { return Err("player transfers require Minecraft 1.8.9–26.3".into()); }
-                if entry.backend == *backend { return Err("player is already on that backend".into()); }
-                entry.transfer.clone()
-            };
-            let (reply, receiver) = oneshot::channel();
-            sender.try_send(Transfer {snapshot: snapshot.clone(), backend: backend.clone(), reply: TransferReply::Admin(reply)}).map_err(|_| "player disconnected or already has a queued transfer")?;
-            receiver.await.map_err(|_| "player disconnected during transfer".to_owned())?
+            // The connection id names the peer that holds the session.
+            if snapshot.players.identity().owns(id) {
+                transfer_local(snapshot.clone(), id, backend).await
+            } else {
+                snapshot.extensions.players().route_transfer(id, backend, true).await
+            }
         }
         [command, args @ ..] if command == "perms" => {
             let sender = rift::permissions::command::Sender::Console(rift_permissions::Actor::Cli);
@@ -899,12 +1043,16 @@ pub(crate) async fn execute(
         [command, action, node] if command == "node" => {
             crate::cordon::apply(&snapshot, node, action).map_err(|error| error.message)
         }
+        [command, rest @ ..] if command == "cluster" => match rift::cluster::global() {
+            Some(cluster) => cluster.admin(rest).await,
+            None => Err("this Rift is not a cluster peer: it has no cluster.toml".into()),
+        },
         [command] if command == "reload" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <instance> <node> [--no-copy] [--keep-source] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <instance> <node> [--no-copy] [--keep-source] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | cluster [<command>] | reload | shutdown".into()),
     }
 }
 
@@ -1017,7 +1165,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <instance> <node> [--no-copy] [--keep-source]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <instance> <node> [--no-copy] [--keep-source]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|cluster [<command>]|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -1048,11 +1196,19 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     {
         *file = absolute.display().to_string();
     }
+    // So is the file of `cluster backup`, written on the proxy host.
+    if let [command, verb, file] = args.as_mut_slice()
+        && command == "cluster"
+        && verb == "backup"
+        && let Ok(absolute) = std::path::absolute(&*file)
+    {
+        *file = absolute.display().to_string();
+    }
     let perms = args.first().is_some_and(|command| command == "perms");
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "transfer" | "remove" | "create" | "move" | "download" | "sync" | "warm"
+            "transfer" | "remove" | "create" | "move" | "download" | "sync" | "warm" | "cluster"
         )
     }) {
         Duration::from_secs(24 * 60 * 60 + 45)

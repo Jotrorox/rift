@@ -319,6 +319,10 @@ impl Metrics {
         if let Some(bytes) = resident {
             text.push_str(&format!("# TYPE rift_process_resident_memory_bytes gauge\nrift_process_resident_memory_bytes {bytes}\n"));
         }
+        // Only cluster peers have these series (docs/clustering.md).
+        if let Some(cluster) = rift::cluster::global() {
+            text.push_str(&cluster.render_metrics());
+        }
         text
     }
 }

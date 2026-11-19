@@ -21,4 +21,17 @@ class FromEnvironmentTest {
                 () -> MessagingClient.builder().fromEnvironment(Map.of("RIFT_BUS_ADDRESS", "nohost")::get));
         assertTrue(address.getMessage().contains("host:port"), address.getMessage());
     }
+
+    @Test
+    void addressListsTakeThePlaceOfTheSingleAddress() {
+        MessagingClient.builder().fromEnvironment(Map.of(
+                "RIFT_BUS_ADDRESSES", "10.0.0.2:7443, [fd00::3]:7443",
+                "RIFT_BUS_CERT", "/srv/lobby-3/rift-bus.pem",
+                "RIFT_BUS_TOKEN", "token")::get);
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> MessagingClient.builder().fromEnvironment(Map.of(
+                        "RIFT_BUS_ADDRESS", "10.0.0.2:7443",
+                        "RIFT_BUS_ADDRESSES", "10.0.0.2:7443,nohost")::get));
+        assertTrue(error.getMessage().contains("RIFT_BUS_ADDRESSES"), error.getMessage());
+    }
 }

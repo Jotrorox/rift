@@ -52,6 +52,7 @@ macro_rules! log_debug {
 pub mod auth;
 pub mod backend_version;
 pub mod bungeecord;
+pub mod cluster;
 pub mod config;
 pub mod database;
 pub mod dialog;
