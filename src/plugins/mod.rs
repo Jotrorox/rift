@@ -1076,8 +1076,12 @@ impl Host {
                     Event::Status(input.clone()),
                     |reply| match reply {
                         Reply::Status(None) => Ok(None),
+                        // A ping carries no locale: the default language.
                         Reply::Status(Some(changes)) => {
-                            crate::server_list::status_override_json(changes).map(Some)
+                            crate::text::rendering(Some(instance.name()), None, || {
+                                crate::server_list::status_override_json(changes)
+                            })
+                            .map(Some)
                         }
                         other => Err(mismatch(Hook::Status, &other)),
                     },

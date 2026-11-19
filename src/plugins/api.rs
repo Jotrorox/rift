@@ -470,6 +470,31 @@ impl Event {
             Self::Job(..) => Hook::Job,
         }
     }
+
+    /// The language of the player the event is about, as `ctx.language`
+    /// reports it; `None` for events about no player.
+    pub fn language(&self) -> Option<&str> {
+        match self {
+            Self::Login(context)
+            | Self::InitialServer(context)
+            | Self::BeforeTransfer(context)
+            | Self::Command(context)
+            | Self::Suggest(context)
+            | Self::Join(context)
+            | Self::AfterTransfer(context)
+            | Self::Disconnect(context)
+            | Self::Dialog(context)
+            | Self::Chat(context)
+            | Self::Kick(context) => context.language.as_deref(),
+            Self::Route(_)
+            | Self::Status(_)
+            | Self::Http(_)
+            | Self::Message(_)
+            | Self::Timer(_)
+            | Self::Event(_)
+            | Self::Job(..) => None,
+        }
+    }
 }
 
 /// A handler's result. Each hook has exactly one valid shape; the host

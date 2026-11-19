@@ -16,7 +16,7 @@ use crate::{
     messaging::Broker,
     permissions::Authority,
     players::{PlayerRegistry, VISIBLE_TO, Viewer},
-    text::Text,
+    text::{Text, Unrendered},
 };
 use mlua::{Lua, Table, Value};
 use std::{
@@ -503,6 +503,30 @@ impl Players {
         self.directory.language(uuid)
     }
 
+    /// The language Rift uses for an online player by lowercase UUID or
+    /// name, as `player-info.language` reports it; `None` when the player
+    /// is offline, the target is not valid, or Rift uses the default.
+    pub fn language_of(&self, target: &str) -> Option<String> {
+        let sessions = self.lock();
+        find(&sessions, target)
+            .ok()
+            .flatten()
+            .and_then(|(_, entry)| Self::effective_language(entry))
+    }
+
+    /// Run `convert`, which turns text for `target` into [`Text`], with the
+    /// caller's `namespace` and the target's language, so a `message`
+    /// object in it renders for the player who sees it.
+    pub fn rendering_for<R>(
+        &self,
+        namespace: Option<&str>,
+        target: &str,
+        convert: impl FnOnce() -> R,
+    ) -> R {
+        let language = self.language_of(target);
+        crate::text::rendering(namespace, language.as_deref(), convert)
+    }
+
     fn effective_language(entry: &Entry) -> Option<String> {
         entry
             .language
@@ -986,20 +1010,51 @@ impl Players {
     }
 
     /// Queue a chat message for every player on `server` (everyone for
-    /// `None`) and count those that accepted it.
-    pub fn broadcast(&self, message: &Text, server: Option<&str>) -> Result<usize, String> {
+    /// `None`) and count those that accepted it. Text that names a message
+    /// is rendered once per language among them, and each player gets
+    /// theirs.
+    pub fn broadcast(&self, message: &Unrendered, server: Option<&str>) -> Result<usize, String> {
         let matches = self.matcher(server.map(str::to_owned))?;
-        Ok(self
+        if !message.varies() {
+            let message = message.render(None)?;
+            return Ok(self
+                .lock()
+                .values()
+                .filter(|entry| matches(entry))
+                .filter(|entry| {
+                    entry
+                        .actions
+                        .try_send(PlayerAction::Message(message.clone()))
+                        .is_ok()
+                })
+                .count());
+        }
+        // Rendered outside the lock: it reads the catalogue.
+        let recipients: Vec<_> = self
             .lock()
             .values()
             .filter(|entry| matches(entry))
-            .filter(|entry| {
-                entry
-                    .actions
-                    .try_send(PlayerAction::Message(message.clone()))
-                    .is_ok()
-            })
-            .count())
+            .map(|entry| (entry.actions.clone(), Self::effective_language(entry)))
+            .collect();
+        let mut rendered: BTreeMap<Option<String>, Text> = BTreeMap::new();
+        let mut reached = 0;
+        for (actions, language) in recipients {
+            let text = match rendered.get(&language) {
+                Some(text) => text.clone(),
+                None => {
+                    // The call was checked; only size can fail a language.
+                    let text = message
+                        .render(language.as_deref())
+                        .or_else(|_| message.render(None))?;
+                    rendered.insert(language, text.clone());
+                    text
+                }
+            };
+            if actions.try_send(PlayerAction::Message(text)).is_ok() {
+                reached += 1;
+            }
+        }
+        Ok(reached)
     }
 
     /// Show, change or remove one boss bar, tracking the per-player limit.
@@ -1226,13 +1281,17 @@ impl Players {
             ("action_bar", "action bar text", PlayerAction::ActionBar),
             ("kick", "kick reason", PlayerAction::Kick),
         ];
+        // `rift.lua` has no catalogue of its own: its messages are
+        // qualified, rendered in the target's language.
         for (name, label, action) in text_actions {
             let (players, charge) = (self.clone(), budget.clone());
             api.raw_set(
                 name,
                 lua.create_function(move |_, (target, value): (String, Value)| {
                     charge()?;
-                    let text = Text::lua(value, label).map_err(mlua::Error::runtime)?;
+                    let text = players
+                        .rendering_for(None, &target, || Text::lua(value, label))
+                        .map_err(mlua::Error::runtime)?;
                     players.send(&target, action(text)).map_err(lua_error)
                 })?,
             )?;
@@ -1242,7 +1301,8 @@ impl Players {
             "title",
             lua.create_function(move |_, (target, options): (String, Value)| {
                 charge()?;
-                players.send(&target, title(options)?).map_err(lua_error)
+                let action = players.rendering_for(None, &target, || title(options))?;
+                players.send(&target, action).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -1250,7 +1310,8 @@ impl Players {
             "tab_list",
             lua.create_function(move |_, (target, options): (String, Option<Table>)| {
                 charge()?;
-                players.send(&target, tab_list(options)?).map_err(lua_error)
+                let action = players.rendering_for(None, &target, || tab_list(options))?;
+                players.send(&target, action).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -1259,7 +1320,9 @@ impl Players {
             lua.create_function(
                 move |_, (target, name, options): (String, String, Option<Table>)| {
                     charge()?;
-                    let PlayerAction::BossBar { name, bar } = boss_bar(name, options)? else {
+                    let PlayerAction::BossBar { name, bar } =
+                        players.rendering_for(None, &target, || boss_bar(name, options))?
+                    else {
                         unreachable!("boss_bar builds a boss bar action");
                     };
                     players.boss_bar(&target, &name, bar).map_err(error)
@@ -1271,7 +1334,7 @@ impl Players {
             "dialog",
             lua.create_function(move |_, (target, spec): (String, Value)| {
                 charge()?;
-                let dialog = dialog(spec)?;
+                let dialog = players.rendering_for(None, &target, || dialog(spec))?;
                 players
                     .dialog(&target, Some(dialog), crate::dialog::Owner::Script)
                     .map_err(lua_error)
@@ -1303,19 +1366,12 @@ impl Players {
             "broadcast",
             lua.create_function(move |_, (message, server): (Value, Option<String>)| {
                 budget()?;
-                let message = Text::lua(message, "message").map_err(mlua::Error::runtime)?;
-                let matches = players.matcher(server).map_err(error)?;
-                Ok(players
-                    .lock()
-                    .values()
-                    .filter(|entry| matches(entry))
-                    .filter(|entry| {
-                        entry
-                            .actions
-                            .try_send(PlayerAction::Message(message.clone()))
-                            .is_ok()
-                    })
-                    .count())
+                let message = Text::lua_as_written(message, "message")
+                    .and_then(|message| Unrendered::new(message, None, "message"))
+                    .map_err(mlua::Error::runtime)?;
+                players
+                    .broadcast(&message, server.as_deref())
+                    .map_err(|message| error(&message))
             })?,
         )?;
         runtime.raw_set("players", api)

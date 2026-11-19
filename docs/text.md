@@ -18,19 +18,21 @@ WebAssembly SDKs, the message bus and the configuration cannot disagree.
 
 ## Write styled text
 
-There are three forms. Each becomes a JSON text component at the call; Rift
+There are four forms. Each becomes a JSON text component at the call; Rift
 never stores or sends markup.
 
 | Form | Example |
 | --- | --- |
 | Markup | `{ mini = "<gold>Welcome, <player>!", args = { player = name } }` |
 | Legacy codes | `{ legacy = "&6Welcome &lback", marker = "&" }` (marker defaults to `&`) |
+| Message | `{ message = "invited", args = { from = name } }` ([plugin messages](#send-a-message)) |
 | JSON component | `{ text = "Welcome", color = "gold" }` ([format](https://minecraft.wiki/w/Text_component_format)) |
 
-The `mini` and `legacy` objects work wherever a component works, and nest
-inside one: in `extra`, in `with`, in hover text and as a markup argument. A
-`mini` object takes only `mini` and `args`; a `legacy` object only `legacy`
-and `marker`.
+The `mini`, `legacy` and `message` objects work wherever a component works,
+and nest inside one: in `extra`, in `with`, in hover text, as a markup
+argument and in a dialog's texts. A `mini` object takes only `mini` and
+`args`; a `legacy` object only `legacy` and `marker`; a `message` object only
+`message` and `args`.
 
 ```lua
 -- Lua: all three are the same message.
@@ -354,8 +356,59 @@ file with the configuration, without running plugin code: at startup, in
 `rift check` and on a reload. A changed file takes effect on the next reload
 without restarting the plugin. A plugin without the file has an empty catalog.
 
-A plugin sends its messages by key; a key with a namespace, such as
-`party:invited` or `rift:queue.full`, names another catalog's message.
+### Send a message
+
+A `message` object sends a message from a catalog. It works wherever a
+component works, like `mini`:
+
+```lua
+-- A persistent Lua plugin: its own message, in the target's language.
+rift.players.message(player, { message = "invited", args = { from = ctx.name } })
+-- rift.lua, a script-mode plugin or a bus service: a qualified key.
+rift.players.message(player, { message = "party:invited", args = { from = ctx.name } })
+```
+
+```json
+{"message": "party:invited", "args": {"from": "Steve"}}
+```
+
+- A key without `:` belongs to the caller's own catalog. Only a persistent
+  plugin has one at the call.
+- A **qualified** key names any catalog: `party:invited`, or
+  `rift:queue.full` for one of [Rift's own messages](#rifts-own-messages) as
+  the operator styled it.
+- `rift.lua`, script-mode plugins and bus services always use qualified keys.
+  A script-mode plugin names its own messages with its folder name, such as
+  `party:invited`.
+- `args` takes what `mini` arguments take: strings and numbers (shown as
+  written, never parsed), components (which may hold `mini` or `message`
+  objects themselves) and [style arguments](#style-arguments).
+- Rift checks the call: an unknown key, a missing argument, an argument the
+  message does not declare, or content where the message declares a style is
+  an error at the call, whoever the recipient is. A `broadcast` with a bad
+  message fails even when nobody is online.
+
+### Whose language
+
+Rift renders a message at the call, for the player who sees it, in the same
+order as its own messages: the exact tag (`de_at`), its language part (`de`),
+then the default. The player's language is the one `player-info.language`
+reports: the one set with `players.set-language`, else the client's locale
+([the player directory and languages](plugin-events.md#the-player-directory-and-languages)).
+
+| Where the text goes | Language |
+| --- | --- |
+| `players.message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `kick`, `dialog` | The target's |
+| `players.broadcast` | Each recipient's own. Rift renders once per language in use |
+| A decision (`deny`, `message`), a suggestion's tooltip | The player the event is about (`ctx.language`) |
+| A deferred answer (`background.resolve`) | The player the deferred event is about |
+| `status` (MOTD, version, sample), a console command's reply | The default: a ping carries no locale |
+| Configuration text (`server_list`, `tab_list`, `deny_message`, ...) | The default, rendered once when the configuration loads |
+
+Text never carries an unresolved message further into Rift: a tab list or a
+boss bar keeps the text it was given in the target's language until it is
+changed. Configuration text renders once, so it uses qualified keys and the
+default language.
 
 ### Operator replacements
 

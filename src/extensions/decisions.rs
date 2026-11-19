@@ -159,7 +159,11 @@ impl Decision {
             .request(&self.subject, request(hook, input), self.timeout)
             .await
         {
-            Ok(reply) => parse_reply(hook, &reply.payload),
+            // A bus service has no catalogue: its messages are qualified,
+            // in the language of the player the decision is about.
+            Ok(reply) => crate::text::rendering(None, input.language.as_deref(), || {
+                parse_reply(hook, &reply.payload)
+            }),
             Err(messaging::Error::Timeout) => Ok(self.apply(self.on_timeout)),
             Err(messaging::Error::NoResponders) => Ok(self.apply(self.on_no_responders)),
             Err(other) => Err(invalid(format!("extensions.decisions.{hook}: {other}"))),

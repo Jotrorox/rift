@@ -215,6 +215,12 @@ or write it as markup or legacy codes in an explicit object such as
 `{ legacy = "&6Hi" }`. [Styled text](text.md) has the markup reference, the
 theme, Rift's own message catalog and how each client version is served.
 
+A `{ message = "invited", args = { from = ctx.name } }` object sends a message
+from a plugin's `messages.toml`, rendered in the language of the player who
+sees it; `broadcast` renders it once per language in use
+([send a message](text.md#send-a-message)). `rift.lua` names messages by
+qualified key, such as `party:invited` or `rift:queue.full`.
+
 - In Lua (`rift.lua` and [Lua plugins](plugins-lua.md)), pass a chat component
   table where the string would go:
   `{ deny = { text = "Banned", color = "red" } }`,

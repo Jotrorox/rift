@@ -14,13 +14,19 @@
 //! `{"legacy": "&cHi", "marker": "&"}` wherever a component is accepted.
 //! They are parsed into components at the call and never sent as markup.
 //!
+//! A `{"message": "invited", "args": {...}}` object is a message from a
+//! catalogue ([`catalog`]), resolved at the call too: with the caller's
+//! namespace and in the recipient's language, which the code that converts
+//! the text names with [`rendering`]. Text for several recipients stays
+//! [`Unrendered`] until it is rendered for each.
+//!
 //! One engine renders for every client ([`Profile`], [`Text::for_client`]):
 //! event spellings, hex colours and newer fields are rewritten for older
 //! clients, and [`Text::to_legacy`] writes `§` codes for string-only surfaces.
 use crate::protocol;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
-use std::{borrow::Cow, fmt, io};
+use std::{borrow::Cow, cell::RefCell, fmt, io};
 
 pub mod catalog;
 mod client;
@@ -90,8 +96,10 @@ impl Text {
     /// most 32 KiB that a client reads (see [`schema::check`]) and that also
     /// has a network NBT form.
     ///
-    /// Authoring objects (`{"mini": ...}`, `{"legacy": ...}`) anywhere a
-    /// component may appear are parsed first, with the theme in effect.
+    /// Authoring objects (`{"mini": ...}`, `{"legacy": ...}`,
+    /// `{"message": ...}`) anywhere a component may appear are parsed first,
+    /// with the theme in effect and messages resolved for the recipient in
+    /// scope (see [`rendering`]).
     pub fn component(mut component: Json, label: &str) -> Result<Self, String> {
         if mentions_authoring(&component, 0) {
             let styles = catalog::theme();
@@ -204,20 +212,38 @@ impl Text {
     /// tab list header. Text that does not start with `{`, `[` or `"` is
     /// shown as written.
     pub fn json(text: &str, label: &str) -> Result<Self, String> {
+        match Self::json_as_written(text, label)? {
+            Self::Component(component) => Self::component(component, label),
+            plain => Ok(plain),
+        }
+    }
+
+    /// [`Text::json`] parsed but not converted: authoring objects stay as
+    /// written, for [`Unrendered`].
+    pub fn json_as_written(text: &str, label: &str) -> Result<Self, String> {
         if text.len() > MAX_COMPONENT_BYTES {
             return Err(format!("{label} exceeds 32 KiB"));
         }
         if !text.starts_with(['{', '[', '"']) {
-            return Self::component(Json::String(text.to_owned()), label);
+            return Ok(Self::Component(Json::String(text.to_owned())));
         }
-        let component = serde_json::from_str(text)
-            .map_err(|error| format!("{label}: invalid JSON: {error}"))?;
-        Self::component(component, label)
+        serde_json::from_str(text)
+            .map(Self::Component)
+            .map_err(|error| format!("{label}: invalid JSON: {error}"))
     }
 
     /// A string (or a number) is plain text; a table is a chat component,
     /// as in `rift.server_list` and `players.tab_list`.
     pub fn lua(value: mlua::Value, label: &str) -> Result<Self, String> {
+        match Self::lua_as_written(value, label)? {
+            Self::Component(component) => Self::component(component, label),
+            plain => Ok(plain),
+        }
+    }
+
+    /// [`Text::lua`] with a table read but not converted: authoring objects
+    /// stay as written, for [`Unrendered`]. Plain text is checked.
+    pub fn lua_as_written(value: mlua::Value, label: &str) -> Result<Self, String> {
         match value {
             mlua::Value::String(text) => Self::plain(
                 text.to_str()
@@ -228,9 +254,9 @@ impl Text {
             // Lua's own string coercion, which string arguments always had.
             mlua::Value::Integer(number) => Self::plain(number.to_string(), label),
             mlua::Value::Number(number) => Self::plain(number.to_string(), label),
-            value @ mlua::Value::Table(_) => {
-                Self::component(crate::server_list::chat_component(value, label)?, label)
-            }
+            value @ mlua::Value::Table(_) => Ok(Self::Component(
+                crate::server_list::chat_component(value, label)?,
+            )),
             value => Err(format!(
                 "{label} must be a string or a chat component table, got {}",
                 value.type_name()
@@ -240,9 +266,15 @@ impl Text {
 
     /// Check a value that arrived already built, such as a bus reply.
     pub fn validate(&self, label: &str) -> Result<(), String> {
+        self.checked(label).map(drop)
+    }
+
+    /// A value that arrived already built, checked and with its authoring
+    /// objects converted (see [`Text::component`]).
+    pub fn checked(&self, label: &str) -> Result<Self, String> {
         match self {
-            Self::Plain(text) => Self::plain(text.as_str(), label).map(drop),
-            Self::Component(component) => Self::component(component.clone(), label).map(drop),
+            Self::Plain(text) => Self::plain(text.as_str(), label),
+            Self::Component(component) => Self::component(component.clone(), label),
         }
     }
 
@@ -257,17 +289,132 @@ impl Text {
     }
 }
 
-/// Whether an authoring object (`mini` or `legacy`) appears anywhere.
+/// Text a call addresses to several players, such as a broadcast, kept as
+/// written until it is rendered for each recipient: a `message` object in it
+/// is resolved in each one's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unrendered {
+    /// Rendered in the default language when it was made, which checks the
+    /// call; what every recipient sees when the text names no message.
+    default: Text,
+    /// The component as written and the caller's namespace, when it names a
+    /// message.
+    written: Option<(Json, Option<String>)>,
+    label: String,
+}
+
+impl Unrendered {
+    /// `text` as written ([`Text::json_as_written`], [`Text::lua_as_written`]
+    /// or plain text) from a caller in `namespace`. Fails when the text does
+    /// not render in the default language, so a bad call fails even when
+    /// nobody would see it.
+    pub fn new(text: Text, namespace: Option<&str>, label: &str) -> Result<Self, String> {
+        let default = rendering(namespace, None, || text.checked(label))?;
+        let written = match text {
+            Text::Component(component) if mentions(&component, &["message"], 0) => {
+                Some((component, namespace.map(str::to_owned)))
+            }
+            _ => None,
+        };
+        Ok(Self {
+            default,
+            written,
+            label: label.to_owned(),
+        })
+    }
+
+    /// Whether the text depends on the recipient's language.
+    pub fn varies(&self) -> bool {
+        self.written.is_some()
+    }
+
+    /// The text for a recipient in `language` (`None` for the default).
+    pub fn render(&self, language: Option<&str>) -> Result<Text, String> {
+        match (&self.written, language) {
+            (Some((component, namespace)), Some(_)) => {
+                rendering(namespace.as_deref(), language, || {
+                    Text::component(component.clone(), &self.label)
+                })
+            }
+            _ => Ok(self.default.clone()),
+        }
+    }
+}
+
+/// Whose messages and which language `message` objects resolve with.
+#[derive(Debug, Clone)]
+struct Recipient {
+    namespace: Option<String>,
+    language: Option<String>,
+}
+
+thread_local! {
+    /// The innermost [`render_scope`] on this thread.
+    static RENDERING: RefCell<Option<Recipient>> = const { RefCell::new(None) };
+}
+
+/// Restores the enclosing scope when dropped (see [`render_scope`]).
+pub struct RenderScope(Option<Recipient>);
+
+impl Drop for RenderScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        RENDERING.with(|rendering| *rendering.borrow_mut() = previous);
+    }
+}
+
+/// Until the guard drops, resolve `message` objects in text converted on
+/// this thread for a caller in `namespace` (a plugin's folder name, whose
+/// unqualified keys are its own; `None` for `rift.lua`, script-mode plugins
+/// and bus callers) and a recipient in `language` (a normalised tag such as
+/// `de_at`; `None` for the default). A thread-local: never hold the guard
+/// across an `.await`, and prefer [`rendering`].
+#[must_use = "the scope ends when the guard drops"]
+pub fn render_scope(namespace: Option<&str>, language: Option<&str>) -> RenderScope {
+    let recipient = Recipient {
+        namespace: namespace.map(str::to_owned),
+        language: language.map(str::to_owned),
+    };
+    RenderScope(RENDERING.with(|rendering| rendering.borrow_mut().replace(recipient)))
+}
+
+/// Run `convert` inside a [`render_scope`] for `namespace` and `language`.
+pub fn rendering<R>(
+    namespace: Option<&str>,
+    language: Option<&str>,
+    convert: impl FnOnce() -> R,
+) -> R {
+    let _scope = render_scope(namespace, language);
+    convert()
+}
+
+/// The caller's namespace and the recipient's language: the innermost
+/// scope's, else no namespace and the language of the player whose session
+/// runs on this task (see [`catalog::language`]).
+fn recipient() -> (Option<String>, Option<String>) {
+    match RENDERING.with(|rendering| rendering.borrow().clone()) {
+        Some(Recipient {
+            namespace,
+            language,
+        }) => (namespace, language),
+        None => (None, catalog::language()),
+    }
+}
+
+/// Whether an authoring object (`mini`, `legacy` or `message`) appears
+/// anywhere.
 fn mentions_authoring(value: &Json, depth: usize) -> bool {
+    mentions(value, &["mini", "legacy", "message"], depth)
+}
+
+/// Whether an object with one of `keys` appears anywhere in `value`.
+fn mentions(value: &Json, keys: &[&str], depth: usize) -> bool {
     depth <= 128
         && match value {
-            Json::Array(items) => items.iter().any(|item| mentions_authoring(item, depth + 1)),
+            Json::Array(items) => items.iter().any(|item| mentions(item, keys, depth + 1)),
             Json::Object(fields) => {
-                fields.contains_key("mini")
-                    || fields.contains_key("legacy")
-                    || fields
-                        .values()
-                        .any(|item| mentions_authoring(item, depth + 1))
+                keys.iter().any(|key| fields.contains_key(*key))
+                    || fields.values().any(|item| mentions(item, keys, depth + 1))
             }
             _ => false,
         }
@@ -313,8 +460,9 @@ fn expand(value: &mut Json, styles: &Styles, depth: usize) -> Result<(), String>
     }
 }
 
-/// The component of `{"mini": markup, "args": {...}}` or
-/// `{"legacy": text, "marker": "&"}`, or `None` for any other object.
+/// The component of `{"mini": markup, "args": {...}}`,
+/// `{"legacy": text, "marker": "&"}` or `{"message": key, "args": {...}}`,
+/// or `None` for any other object.
 fn authoring(
     fields: &Map<String, Json>,
     styles: &Styles,
@@ -336,43 +484,7 @@ fn authoring(
         if markup.is_empty() {
             return Err("mini must not be empty".into());
         }
-        let mut args = Args::new();
-        match fields.get("args") {
-            None => {}
-            Some(Json::Object(values)) => {
-                for (name, value) in values {
-                    let arg = match value {
-                        Json::String(text) => Arg::Text(text.clone()),
-                        Json::Number(number) => Arg::Text(number.to_string()),
-                        Json::Bool(value) => Arg::Text(value.to_string()),
-                        // `{"style": "<red>"}`: no component has a `style` key.
-                        Json::Object(object) if object.contains_key("style") => {
-                            if object.len() != 1 {
-                                return Err(format!(
-                                    "args.{name}: a style argument takes only style"
-                                ));
-                            }
-                            let source = object["style"].as_str().ok_or_else(|| {
-                                format!("args.{name}.style must be a string of markup")
-                            })?;
-                            let style = markup::style_arg(source)
-                                .map_err(|error| format!("args.{name}.style: {error}"))?;
-                            Arg::Style(style)
-                        }
-                        Json::Object(_) | Json::Array(_) => {
-                            let mut component = value.clone();
-                            expand(&mut component, styles, depth + 1)?;
-                            Arg::Component(component)
-                        }
-                        Json::Null => return Err(format!("args.{name} must not be null")),
-                    };
-                    args.insert(name, arg);
-                }
-            }
-            Some(_) => {
-                return Err("args must be an object of names to text, components or styles".into());
-            }
-        }
+        let args = arguments(fields.get("args"), styles, depth)?;
         args.validate("args")?;
         return markup::parse(markup, &args, styles).map(Some);
     }
@@ -395,7 +507,63 @@ fn authoring(
         };
         return Ok(Some(legacy::parse(text, marker)));
     }
+    if let Some(key) = fields.get("message") {
+        only(&["message", "args"], "message")?;
+        let key = key
+            .as_str()
+            .ok_or("message must be a string: the key of a message")?;
+        if key.is_empty() {
+            return Err("message must not be empty".into());
+        }
+        // The catalogue checks the names against the message's.
+        let args = arguments(fields.get("args"), styles, depth)?;
+        let (namespace, language) = recipient();
+        return catalog::active()
+            .message(namespace.as_deref(), key, &args, language.as_deref())
+            .map(Some);
+    }
     Ok(None)
+}
+
+/// The `args` of a `mini` or `message` object: strings, numbers and
+/// booleans shown as written, components (expanded here) and style
+/// arguments `{"style": "<markup>"}`.
+fn arguments(value: Option<&Json>, styles: &Styles, depth: usize) -> Result<Args, String> {
+    let mut args = Args::new();
+    let values = match value {
+        None => return Ok(args),
+        Some(Json::Object(values)) => values,
+        Some(_) => {
+            return Err("args must be an object of names to text, components or styles".into());
+        }
+    };
+    for (name, value) in values {
+        let arg = match value {
+            Json::String(text) => Arg::Text(text.clone()),
+            Json::Number(number) => Arg::Text(number.to_string()),
+            Json::Bool(value) => Arg::Text(value.to_string()),
+            // `{"style": "<red>"}`: no component has a `style` key.
+            Json::Object(object) if object.contains_key("style") => {
+                if object.len() != 1 {
+                    return Err(format!("args.{name}: a style argument takes only style"));
+                }
+                let source = object["style"]
+                    .as_str()
+                    .ok_or_else(|| format!("args.{name}.style must be a string of markup"))?;
+                let style = markup::style_arg(source)
+                    .map_err(|error| format!("args.{name}.style: {error}"))?;
+                Arg::Style(style)
+            }
+            Json::Object(_) | Json::Array(_) => {
+                let mut component = value.clone();
+                expand(&mut component, styles, depth + 1)?;
+                Arg::Component(component)
+            }
+            Json::Null => return Err(format!("args.{name} must not be null")),
+        };
+        args.insert(name, arg);
+    }
+    Ok(args)
 }
 
 fn has_null(value: &Json, depth: usize) -> bool {
@@ -714,6 +882,200 @@ mod tests {
             Text::plain("<red>x", "m").unwrap(),
             Text::Plain("<red>x".into())
         );
+    }
+
+    /// Run `convert` with the test catalogue loading on this thread.
+    fn with_messages<R>(convert: impl FnOnce() -> R) -> R {
+        let _catalog = catalog::loading(std::sync::Arc::new(catalog::test_catalog()));
+        convert()
+    }
+
+    #[test]
+    fn message_objects_render_at_the_call() {
+        with_messages(|| {
+            let words = |value: Json| Text::component(value, "m").unwrap().to_string();
+            assert_eq!(
+                Text::component(json!({"message": "party:created"}), "m").unwrap(),
+                Text::Component(json!({"text": "Created."}))
+            );
+            // A key without a namespace is the caller's own.
+            assert_eq!(
+                rendering(Some("party"), None, || words(json!({"message": "created"}))),
+                "Created."
+            );
+            // Arguments take the forms of `mini` arguments.
+            for (name, expected) in [
+                (json!("Steve"), "Hello Steve."),
+                (json!(3), "Hello 3."),
+                (json!({"mini": "<gold>Steve"}), "Hello Steve."),
+                (json!({"text": "Steve", "color": "red"}), "Hello Steve."),
+            ] {
+                assert_eq!(
+                    words(json!({"message": "party:greet", "args": {"name": name}})),
+                    expected
+                );
+            }
+            assert_eq!(
+                words(json!({"message": "party:tagged",
+                             "args": {"team": {"style": "<red>"}, "tag": "x"}})),
+                "[x]"
+            );
+            // It nests like `mini`: in `extra`, in hover text, as an argument.
+            assert_eq!(
+                Text::component(
+                    json!({"text": "a", "extra": [{"message": "party:created"}],
+                           "hover_event": {"action": "show_text",
+                                           "value": {"message": "party:created"}}}),
+                    "m"
+                )
+                .unwrap(),
+                Text::Component(json!({"text": "a", "extra": [{"text": "Created."}],
+                    "hover_event": {"action": "show_text", "value": {"text": "Created."}}}))
+            );
+            assert_eq!(
+                words(json!({"mini": "[<x>]", "args": {"x": {"message": "party:created"}}})),
+                "[Created.]"
+            );
+            assert_eq!(
+                words(json!({"message": "party:greet",
+                             "args": {"name": {"message": "party:created"}}})),
+                "Hello Created.."
+            );
+        });
+    }
+
+    #[test]
+    fn message_objects_fail_like_the_other_forms() {
+        with_messages(|| {
+            let error = |value: Json| Text::component(value, "m").unwrap_err();
+            assert_eq!(
+                error(json!({"message": "party:created", "color": "red"})),
+                "m: a message object takes only message and args, not \"color\""
+            );
+            assert_eq!(
+                error(json!({"message": 1})),
+                "m: message must be a string: the key of a message"
+            );
+            assert_eq!(
+                error(json!({"message": ""})),
+                "m: message must not be empty"
+            );
+            assert_eq!(
+                error(json!({"message": "party:greet", "args": []})),
+                "m: args must be an object of names to text, components or styles"
+            );
+            assert_eq!(
+                error(json!({"message": "party:greet"})),
+                "m: message \"party:greet\": argument <name> is missing"
+            );
+            assert_eq!(
+                error(json!({"message": "party:greet", "args": {"name": "x", "to": "y"}})),
+                "m: message \"party:greet\": the message has no argument <to>"
+            );
+            assert!(
+                error(json!({"message": "party:tagged", "args": {"team": "x", "tag": "y"}}))
+                    .contains("<team> is a style argument")
+            );
+            assert!(error(json!({"message": "party:nope"})).contains("no such message"));
+            // Without a caller's namespace a key must name one.
+            let unqualified = error(json!({"message": "created"}));
+            assert!(unqualified.contains("namespace:key"), "{unqualified}");
+            // The forms do not mix.
+            assert_eq!(
+                error(json!({"mini": "x", "message": "party:created"})),
+                "m: a mini object takes only mini and args, not \"message\""
+            );
+        });
+    }
+
+    #[test]
+    fn the_recipient_in_scope_decides_the_language() {
+        with_messages(|| {
+            let created = || {
+                Text::component(json!({"message": "party:created"}), "m")
+                    .unwrap()
+                    .to_string()
+            };
+            // No scope and no session: the default language.
+            assert_eq!(created(), "Created.");
+            rendering(Some("party"), Some("de_at"), || {
+                assert_eq!(created(), "Erstellt.");
+                // An inner scope wins, and the outer one is back after it.
+                assert_eq!(rendering(None, None, created), "Created.");
+                assert_eq!(created(), "Erstellt.");
+                let scope = render_scope(Some("party"), Some("fr"));
+                assert_eq!(created(), "Created.");
+                drop(scope);
+                assert_eq!(created(), "Erstellt.");
+            });
+            assert_eq!(created(), "Created.");
+            // A scope survives a failed conversion.
+            assert!(
+                rendering(Some("party"), Some("de"), || {
+                    Text::component(json!({"message": "nope"}), "m")
+                })
+                .is_err()
+            );
+            assert_eq!(created(), "Created.");
+        });
+    }
+
+    #[tokio::test]
+    async fn without_a_scope_the_sessions_language_applies() {
+        let _catalog = catalog::loading(std::sync::Arc::new(catalog::test_catalog()));
+        let created = || {
+            Text::component(json!({"message": "party:created"}), "m")
+                .unwrap()
+                .to_string()
+        };
+        let words = catalog::session(async {
+            catalog::set_language(Some("de_de"));
+            (created(), rendering(None, None, created))
+        })
+        .await;
+        assert_eq!(words, ("Erstellt.".to_owned(), "Created.".to_owned()));
+    }
+
+    #[test]
+    fn unrendered_text_renders_once_per_language() {
+        with_messages(|| {
+            let message = Unrendered::new(
+                Text::Component(json!({"message": "created"})),
+                Some("party"),
+                "message",
+            )
+            .unwrap();
+            assert!(message.varies());
+            let words = |language| message.render(language).unwrap().to_string();
+            assert_eq!(words(None), "Created.");
+            assert_eq!(words(Some("de")), "Erstellt.");
+            assert_eq!(words(Some("fr_fr")), "Created.");
+            // Text without a message is rendered once, when it is made.
+            let plain = Unrendered::new(
+                Text::Component(json!({"mini": "<red>Hi"})),
+                Some("party"),
+                "message",
+            )
+            .unwrap();
+            assert!(!plain.varies());
+            assert_eq!(
+                plain.render(Some("de")).unwrap(),
+                Text::Component(json!({"text": "Hi", "color": "red"}))
+            );
+            // A bad call fails when it is made, whoever would see it.
+            assert!(
+                Unrendered::new(
+                    Text::Component(json!({"message": "created"})),
+                    None,
+                    "message"
+                )
+                .is_err()
+            );
+            assert_eq!(
+                Unrendered::new(Text::Plain(String::new()), None, "message").unwrap_err(),
+                "message must contain 1..=1024 bytes"
+            );
+        });
     }
 
     #[test]

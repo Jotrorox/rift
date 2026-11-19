@@ -367,12 +367,12 @@ invited = "<accent><from></accent> hat dich in eine Party eingeladen."
                 "<bold> is a built-in tag",
             ),
             (
-                "[messages]\na = { text = \"x\", args = [\"b\", \"b\"] }",
-                "\"b\" appears twice",
+                "[messages]\na = { text = \"x\", args = [\"who\", \"who\"] }",
+                "\"who\" appears twice",
             ),
             (
-                "[messages]\na = { text = \"x\", args = [\"b\"], styles = [\"b\"] }",
-                "\"b\" is in both args and styles",
+                "[messages]\na = { text = \"x\", args = [\"who\"], styles = [\"who\"] }",
+                "\"who\" is in both args and styles",
             ),
             (
                 "[messages]\na = \"x\"\n[languages.d]\na = \"y\"",

@@ -545,7 +545,7 @@ impl Catalog {
             None => match caller {
                 Some(caller) => self.plugin_message(caller, key, args, language),
                 None => Err(format!(
-                    "message {key:?}: only a plugin has messages of its own; name a message as namespace:key, such as \"party:invited\" or \"rift:queue.full\""
+                    "message {key:?}: a key without a namespace names the caller's own message, and only a persistent plugin has messages of its own; elsewhere write namespace:key, such as \"party:invited\" or \"rift:queue.full\""
                 )),
             },
         }
@@ -763,32 +763,38 @@ pub fn install(catalog: Arc<Catalog>) {
 }
 
 thread_local! {
-    /// The theme of a configuration being loaded on this thread, so its own
-    /// markup uses its own theme before it is published.
-    static LOADING: std::cell::RefCell<Option<Styles>> = const { std::cell::RefCell::new(None) };
+    /// The catalogue of a configuration being loaded on this thread, so its
+    /// own text uses its own theme and messages before it is published.
+    static LOADING: std::cell::RefCell<Option<Arc<Catalog>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Restores the theme in effect when dropped (see [`loading`]).
-pub struct LoadingTheme(Option<Styles>);
+/// Restores the catalogue in effect when dropped (see [`loading`]).
+pub struct LoadingCatalog(Option<Arc<Catalog>>);
 
-impl Drop for LoadingTheme {
+impl Drop for LoadingCatalog {
     fn drop(&mut self) {
         let previous = self.0.take();
         LOADING.with(|loading| *loading.borrow_mut() = previous);
     }
 }
 
-/// Use `styles` for markup parsed on this thread until the guard drops,
-/// while the configuration that defines them loads.
-pub fn loading(styles: Styles) -> LoadingTheme {
-    LoadingTheme(LOADING.with(|loading| loading.borrow_mut().replace(styles)))
+/// Use `catalog` (its theme and messages) for text converted on this thread
+/// until the guard drops, while the configuration that defines it loads.
+pub fn loading(catalog: Arc<Catalog>) -> LoadingCatalog {
+    LoadingCatalog(LOADING.with(|loading| loading.borrow_mut().replace(catalog)))
+}
+
+/// The catalogue text uses on this thread: the one being loaded, else
+/// [`current`].
+pub fn active() -> Arc<Catalog> {
+    LOADING
+        .with(|loading| loading.borrow().clone())
+        .unwrap_or_else(current)
 }
 
 /// The theme in effect, for markup written by plugins and the configuration.
 pub fn theme() -> Styles {
-    LOADING
-        .with(|loading| loading.borrow().clone())
-        .unwrap_or_else(|| current().styles().clone())
+    active().styles().clone()
 }
 
 tokio::task_local! {
@@ -833,6 +839,43 @@ pub fn notice_with(notice: Notice, args: &Args) -> Text {
 /// such as error messages and logs.
 pub fn words(notice: Notice) -> String {
     self::notice(notice).to_string()
+}
+
+/// A plugin catalogue for tests that send plugin messages.
+#[cfg(test)]
+pub(crate) const TEST_MESSAGES: &str = r#"
+[messages]
+created = "Created."
+greet = { text = "Hello <name>.", args = ["name"] }
+denied = "No entry."
+tagged = { text = "<team>[<tag>]</team>", args = ["tag"], styles = ["team"] }
+
+[languages.de]
+created = "Erstellt."
+greet = "Hallo <name>."
+denied = "Kein Zutritt."
+"#;
+
+/// The built-in catalogue with [`TEST_MESSAGES`] as the plugins `party`
+/// and `t` (the folder the plugin tests install).
+#[cfg(test)]
+pub(crate) fn test_catalog() -> Catalog {
+    let messages = |namespace: &str| Messages::parse(TEST_MESSAGES, namespace).unwrap();
+    Catalog::default()
+        .with_plugin("party", messages("party"))
+        .unwrap()
+        .with_plugin("t", messages("t"))
+        .unwrap()
+}
+
+/// Install [`test_catalog`] for the whole test process, for tests whose
+/// text is converted on threads they do not own (plugin threads). It only
+/// adds plugin namespaces, so tests that use Rift's own messages see the
+/// built-in ones.
+#[cfg(test)]
+pub(crate) fn install_test_catalog() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| install(Arc::new(test_catalog())));
 }
 
 #[cfg(test)]
@@ -1227,7 +1270,7 @@ created = "Gegründet."
                 None,
                 "invited",
                 from.clone(),
-                "message \"invited\": only a plugin has messages of its own",
+                "message \"invited\": a key without a namespace names the caller's own message",
             ),
             (
                 Some("party"),

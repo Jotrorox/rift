@@ -1347,9 +1347,14 @@ async fn player_action(
     };
     let mut request = value;
     request["target"] = json!(player);
-    let decoded =
-        rift::players_service::Request::decode(&operation, request.to_string().as_bytes());
-    let result = decoded.and_then(|request| request.execute(app.snapshot().extensions.players()));
+    let snapshot = app.snapshot();
+    let players = snapshot.extensions.players();
+    let decoded = rift::players_service::Request::decode_for(
+        &operation,
+        request.to_string().as_bytes(),
+        players,
+    );
+    let result = decoded.and_then(|request| request.execute(players));
     match result {
         Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
         Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),

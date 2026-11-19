@@ -32,8 +32,15 @@ fn level(level: types::Level) -> api::Level {
 }
 
 /// Guest text, checked: plain text as written, or a JSON text component
-/// (markup objects included).
+/// (markup objects included, and messages resolved for the recipient in
+/// scope; see [`crate::text::rendering`]).
 pub(super) fn text(text: types::Text, label: &str) -> Result<Text, String> {
+    text_as_written(text, label)?.checked(label)
+}
+
+/// Guest text parsed but not converted, for text with several recipients
+/// (see [`crate::text::Unrendered`]).
+fn text_as_written(text: types::Text, label: &str) -> Result<Text, String> {
     match text {
         types::Text::Plain(text) => Text::plain(&text, label),
         types::Text::Json(json) => {
@@ -43,7 +50,7 @@ pub(super) fn text(text: types::Text, label: &str) -> Result<Text, String> {
                     "{label}: json text must be a JSON text component (an object, an array or a string)"
                 ));
             }
-            Text::json(&json, label)
+            Text::json_as_written(&json, label)
         }
     }
 }
@@ -379,19 +386,21 @@ impl players::Host for State {
     }
 
     fn message(&mut self, target: String, message: types::Text) -> Result<bool, String> {
-        self.services
-            .players()
-            .message_text(&target, text(message, "message")?)
+        let players = self.services.players();
+        let message = players.for_target(&target, || text(message, "message"))?;
+        players.message_text(&target, message)
     }
 
     fn action_bar(&mut self, target: String, message: types::Text) -> Result<bool, String> {
-        self.services
-            .players()
-            .action_bar_text(&target, text(message, "action bar text")?)
+        let players = self.services.players();
+        let message = players.for_target(&target, || text(message, "action bar text"))?;
+        players.action_bar_text(&target, message)
     }
 
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
-        self.services.players().title(&target, &title(spec)?)
+        let players = self.services.players();
+        let spec = players.for_target(&target, || title(spec))?;
+        players.title(&target, &spec)
     }
 
     fn tab_list(
@@ -427,9 +436,9 @@ impl players::Host for State {
     }
 
     fn kick(&mut self, target: String, reason: types::Text) -> Result<bool, String> {
-        self.services
-            .players()
-            .kick_text(&target, text(reason, "kick reason")?)
+        let players = self.services.players();
+        let reason = players.for_target(&target, || text(reason, "kick reason"))?;
+        players.kick_text(&target, reason)
     }
 
     fn transfer(&mut self, target: String, server: String) -> Result<bool, String> {
@@ -439,7 +448,7 @@ impl players::Host for State {
     fn broadcast(&mut self, message: types::Text) -> Result<u32, String> {
         self.services
             .players()
-            .broadcast_text(text(message, "message")?, None)
+            .broadcast_text(text_as_written(message, "message")?, None)
     }
 
     fn lookup(&mut self, target: String) -> Result<Option<types::PlayerRecord>, String> {
@@ -622,8 +631,11 @@ impl background::Host for State {
     }
 
     fn resolve(&mut self, ticket: u64, answer: types::Decision) -> Result<bool, String> {
-        let action = decision(answer).map_err(|error| format!("resolve: {error}"))?;
-        self.services.background().resolve(ticket, action)
+        let background = self.services.background();
+        let action = background
+            .for_ticket(ticket, || decision(answer))
+            .map_err(|error| format!("resolve: {error}"))?;
+        background.resolve(ticket, action)
     }
 
     fn run(&mut self, payload: Vec<u8>) -> Result<u64, String> {

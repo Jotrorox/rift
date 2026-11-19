@@ -19,7 +19,7 @@
 use crate::{
     extensions::{PlayerAction, Players},
     plugins::api::TitleSpec,
-    text::Text,
+    text::{Text, Unrendered},
 };
 use serde_json::{Map, Value, json};
 
@@ -81,17 +81,35 @@ pub enum Request {
         target: String,
         server: String,
     },
-    /// Everyone, or the players on one server or service group.
+    /// Everyone, or the players on one server or service group; rendered
+    /// for each recipient.
     Broadcast {
-        text: Text,
+        text: Unrendered,
         server: Option<String>,
     },
 }
 
 impl Request {
     /// Decode `operation` (the subject after `rift.players.`) and its JSON
-    /// object payload. Unknown operations and fields are errors.
+    /// object payload. Unknown operations and fields are errors. A message
+    /// for one player renders in the default language; see
+    /// [`Request::decode_for`].
     pub fn decode(operation: &str, payload: &[u8]) -> Result<Self, String> {
+        Self::decode_with(operation, payload, |_| None)
+    }
+
+    /// [`Request::decode`] with a `message` object for one player rendered
+    /// in the language Rift uses for them (`player-info.language`). A bus
+    /// caller has no catalogue: its messages are qualified.
+    pub fn decode_for(operation: &str, payload: &[u8], players: &Players) -> Result<Self, String> {
+        Self::decode_with(operation, payload, |target| players.language_of(target))
+    }
+
+    fn decode_with(
+        operation: &str,
+        payload: &[u8],
+        language: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
         if payload.len() > MAX_PAYLOAD {
             return Err("players payload exceeds 64 KiB".into());
         }
@@ -124,14 +142,23 @@ impl Request {
             Some(Value::String(text)) => Text::plain(text.as_str(), label),
             _ => Err(format!("{field} must be a string")),
         };
-        let rich = |field: &str, label: &str| match object.get(field) {
-            Some(Value::String(text)) => Text::json(text, label),
+        let written = |field: &str, label: &str| match object.get(field) {
+            Some(Value::String(text)) => Text::json_as_written(text, label),
             Some(value @ (Value::Object(_) | Value::Array(_))) => {
-                Text::component(value.clone(), label)
+                Ok(Text::Component(value.clone()))
             }
             _ => Err(format!(
                 "{field} must be a JSON text component, as a string or embedded"
             )),
+        };
+        // The target's language, for text only that player sees.
+        let language = object
+            .get("target")
+            .and_then(Value::as_str)
+            .and_then(language);
+        let rich = |field: &str, label: &str| {
+            let text = written(field, label)?;
+            crate::text::rendering(None, language.as_deref(), || text.checked(label))
         };
         Ok(match operation {
             "list" => Self::List {
@@ -208,11 +235,11 @@ impl Request {
                 server: server(true)?.unwrap_or_default(),
             },
             "broadcast" => Self::Broadcast {
-                text: plain("text", "message")?,
+                text: Unrendered::new(plain("text", "message")?, None, "message")?,
                 server: server(false)?,
             },
             "broadcast-json" => Self::Broadcast {
-                text: rich("text", "message")?,
+                text: Unrendered::new(written("text", "message")?, None, "message")?,
                 server: server(false)?,
             },
             _ => unreachable!("checked above"),
@@ -328,7 +355,7 @@ pub fn title_action(title: &TitleSpec) -> Result<PlayerAction, String> {
             Text::Plain(plain) if plain.len() > MAX_TEXT => {
                 Err(format!("{label} must contain at most 1024 bytes"))
             }
-            text => text.validate(label).map(|()| Some(text.clone())),
+            text => text.checked(label).map(Some),
         }
     };
     let main = checked(&title.title, "title")?;
@@ -466,6 +493,45 @@ mod tests {
         ));
         assert!(Request::decode("message", br#"{"target":"A","text":{"text":"x"}}"#).is_err());
         assert!(Request::decode("message-json", br#"{"target":"A","text":"{oops"}"#).is_err());
+    }
+
+    #[test]
+    fn message_objects_resolve_when_decoded_and_broadcasts_wait_for_recipients() {
+        let request = Request::decode(
+            "message-json",
+            br#"{"target":"A","text":{"message":"rift:queue.left"}}"#,
+        )
+        .unwrap();
+        let Request::Message { text, .. } = &request else {
+            panic!("{request:?}");
+        };
+        assert_eq!(text.to_string(), "Left the queue.");
+        // A bus caller has no catalogue of its own.
+        let error = Request::decode(
+            "message-json",
+            br#"{"target":"A","text":{"message":"left"}}"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("namespace:key"), "{error}");
+        // A broadcast is checked now and rendered for each recipient later.
+        let error =
+            Request::decode("broadcast-json", br#"{"text":{"message":"rift:nope"}}"#).unwrap_err();
+        assert!(error.contains("Rift has no such message"), "{error}");
+        let request = Request::decode(
+            "broadcast-json",
+            br#"{"text":{"message":"rift:queue.left"}}"#,
+        )
+        .unwrap();
+        let Request::Broadcast { text, .. } = &request else {
+            panic!("{request:?}");
+        };
+        assert!(text.varies());
+        assert_eq!(text.render(None).unwrap().to_string(), "Left the queue.");
+        let request = Request::decode("broadcast", br#"{"text":"hi"}"#).unwrap();
+        let Request::Broadcast { text, .. } = &request else {
+            panic!("{request:?}");
+        };
+        assert!(!text.varies());
     }
 
     #[test]

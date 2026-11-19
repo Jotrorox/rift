@@ -518,7 +518,10 @@ impl ExtensionScript {
             script::check_deadline(deadline)?;
             parse(hook, value)
         };
-        run().map_err(|error| invalid(format!("extensions.{hook}: {error:.2048}")))
+        // A decision or tooltip renders in the language of the player the
+        // hook is about; `rift.lua` names messages by qualified key.
+        crate::text::rendering(None, input.language.as_deref(), run)
+            .map_err(|error| invalid(format!("extensions.{hook}: {error:.2048}")))
     }
 
     /// Evaluate the configuration with this API version's host services and

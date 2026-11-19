@@ -930,10 +930,13 @@ impl Config {
                 ],
                 "config",
             )?;
-            // First, so markup elsewhere in this configuration uses its theme.
-            // The script has run, so every `rift.plugin` call is known.
+            // First, so text elsewhere in this configuration uses its theme
+            // and messages. The script has run, so every `rift.plugin` call
+            // is known.
             let text = text::parse(&root, plugin_messages(&lua, &source)?)?;
-            let _theme = crate::text::catalog::loading(text.styles().clone());
+            let _catalog = crate::text::catalog::loading(text.clone());
+            // Configuration text renders once, in the default language.
+            let _rendering = crate::text::render_scope(None, None);
             let listeners = addresses(
                 root.get("listeners").map_err(|e| e.to_string())?,
                 "listeners",
