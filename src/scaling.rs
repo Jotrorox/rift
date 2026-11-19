@@ -55,6 +55,8 @@ fn backoff(cooldown: Duration, failures: u32) -> Duration {
 }
 
 impl Scaler {
+    /// [`Scaler::next_with`] with no reports from other peers.
+    #[cfg(test)]
     pub fn next(&mut self, snapshot: &Snapshot, now: Instant) -> Option<Change> {
         self.next_with(snapshot, &BTreeMap::new(), now)
     }
