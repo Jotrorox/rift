@@ -321,14 +321,47 @@ char *sub = rift_legacy_marker("§7Have fun", "§");
 rift_text_t subtitle = rift_text_json(sub);
 rift_title(&ctx->uuid, NULL, &subtitle, 10, 70, 20);
 free(sub);
+
+// A message from the plugin's messages.toml, written as {"message": "...", "args": {...}}.
+rift_msg_t msg = rift_msg("invited");
+rift_msg_arg(&msg, "from", "Alex");
+rift_msg_arg_style(&msg, "team", "<#55ffff><bold>");  // a style argument
+char *invited = rift_msg_finish(&msg);
+rift_message(&ctx->uuid, rift_text_json(invited));
+free(invited);
+
+// Other contents: a translation with an argument and a fallback.
+rift_component_t t = rift_translate("multiplayer.player.joined");
+rift_component_with_text(&t, "Alex");
+rift_component_fallback(&t, "Alex joined");
+char *joined = rift_component_finish(&t);
+free(joined);
+
+// Text you splice into markup yourself: < becomes \< and \ becomes \\.
+char *safe = rift_text_escape(line);
+free(safe);
 ```
 
-- The component setters are `rift_component_color`, `_bold`, `_italic`,
-  `_underlined`, `_strikethrough`, `_obfuscated`, `_run_command`,
-  `_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_hover_text`
-  (plain), `_hover` (a component as JSON), `_insertion`, `_extra` (a child as
-  JSON), `_extra_text` and `_field` (any other key, raw JSON). Call each at
-  most once.
+- `rift_mini` takes `rift_mini_arg` (shown as written),
+  `rift_mini_arg_component` and `rift_mini_arg_style` (a
+  [style argument](text.md#style-arguments): markup made only of formatting tags).
+  `rift_msg(key)` takes `rift_msg_arg`, `rift_msg_arg_component` and
+  `rift_msg_arg_style`, and `rift_msg_finish` returns the JSON. A message
+  comes from the plugin's `messages.toml`; see [Styled text](text.md). It is
+  `rift_msg` because `rift_message` sends a player text.
+- `rift_text_escape(text)` returns a malloc'd copy escaped for splicing into
+  markup. An argument needs no escaping.
+- The component builders, each `rift_component_*` setter called at most once:
+
+  | Kind | Functions |
+  | --- | --- |
+  | Content | `rift_component(text)`, `rift_translate(key)` with `rift_component_with` (JSON), `_with_text` and `_fallback`, `rift_keybind(key)`, `rift_sprite(sprite)` with `rift_component_atlas`, `rift_head(name)` with `rift_component_hat(&c, false)` |
+  | Style | `rift_component_color`, `_bold`, `_italic`, `_underlined`, `_strikethrough`, `_obfuscated`, `_decoration(&c, name, on)` (`false` turns it off; use it instead of `_bold` and the others, not as well), `_font`, `_shadow(&c, "#rrggbb", opacity)`, `_insertion` |
+  | Click | `_run_command`, `_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_change_page(&c, page)` |
+  | Hover | `_hover_text` (plain), `_hover` (a component as JSON), `_hover_item(&c, id, count)`, `_hover_entity(&c, type, uuid, name_json)` (`name_json` may be NULL) |
+  | Other | `_extra` (a child as JSON), `_extra_text`, `_field` (any other key, raw JSON) |
+
+  Sprites and heads need 1.21.9 or newer; older clients drop them.
 - `rift_string_quote` turns a `rift_string_t` into an owned JSON string.
 
 Rift reads markup only from an explicit `mini` object. A bare JSON string, as

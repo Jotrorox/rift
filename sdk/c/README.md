@@ -144,9 +144,12 @@ real JSON library (cJSON or jsmn compile unchanged with wasi-sdk).
 
 ### Rich text
 
-`rift_mini` (markup, with `rift_mini_arg`/`rift_mini_arg_component`),
-`rift_legacy` (`&` codes) and `rift_component` (fields, click and hover
-events, children) return malloc'd JSON to wrap with `rift_text_json`:
+`rift_mini` (markup, with `rift_mini_arg`/`rift_mini_arg_component`/
+`rift_mini_arg_style`), `rift_legacy` (`&` codes), `rift_msg` (a message from
+the plugin's `messages.toml`) and `rift_component`, `rift_translate`,
+`rift_keybind`, `rift_sprite`, `rift_head` (fields, click and hover events,
+children) return malloc'd JSON to wrap with `rift_text_json`.
+`rift_text_escape` escapes text for splicing into markup:
 
 ```c
 rift_mini_t m = rift_mini("<gold>Hi <player>!");

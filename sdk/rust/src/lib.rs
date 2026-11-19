@@ -988,6 +988,9 @@ pub mod log {
 /// - [`text::mini`] writes Rift markup as `{"mini": "...", "args": {...}}`; Rift
 ///   turns it into a component. See `docs/text.md` for the tags.
 /// - [`text::legacy`] writes `&c` codes as `{"legacy": "...", "marker": "&"}`.
+/// - [`text::message`] names a message from the plugin's `messages.toml` as
+///   `{"message": "...", "args": {...}}`; Rift renders it in the player's
+///   language.
 /// - [`text::Component`] builds a JSON text component field by field, with the
 ///   1.21.5 spellings `click_event` and `hover_event` (Rift rewrites them
 ///   for older clients).
@@ -1008,6 +1011,35 @@ pub mod text {
             markup: markup.into(),
             args: Map::new(),
         }
+    }
+
+    /// `text` escaped so it can be spliced into markup: every `\` becomes
+    /// `\\` and every `<` becomes `\<`. Nothing else changes.
+    ///
+    /// ```
+    /// use rift_plugin::text;
+    ///
+    /// assert_eq!(text::escape("a < b"), "a \\< b");
+    /// assert_eq!(text::escape("<red>\\"), "\\<red>\\\\");
+    /// ```
+    ///
+    /// An argument ([`Mini::arg`]) is never parsed and needs no escaping.
+    pub fn escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            if c == '<' || c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// The value of a style argument: `{"style": markup}`.
+    fn style(markup: impl Into<String>) -> Value {
+        let mut object = Map::new();
+        object.insert("style".into(), Value::String(markup.into()));
+        Value::Object(object)
     }
 
     /// Markup with named arguments; see [`mini`].
@@ -1036,10 +1068,97 @@ pub mod text {
             self
         }
 
+        /// `<name>` is a style: markup made only of formatting tags, such as
+        /// `<#55ffff><bold>`. It wraps whatever the template puts inside
+        /// `<name>...</name>`.
+        ///
+        /// ```
+        /// use rift_plugin::text;
+        ///
+        /// let tag = text::mini("<team>[<tag>]</team>")
+        ///     .arg_style("team", "<#55ffff><bold>")
+        ///     .arg("tag", "RED");
+        /// assert_eq!(
+        ///     serde_json::Value::from(tag),
+        ///     serde_json::json!({
+        ///         "mini": "<team>[<tag>]</team>",
+        ///         "args": {"team": {"style": "<#55ffff><bold>"}, "tag": "RED"},
+        ///     })
+        /// );
+        /// ```
+        pub fn arg_style(mut self, name: impl Into<String>, markup: impl Into<String>) -> Self {
+            self.args.insert(name.into(), style(markup));
+            self
+        }
+
         /// The authoring object as JSON.
         pub fn to_value(&self) -> Value {
             let mut object = Map::new();
             object.insert("mini".into(), Value::String(self.markup.clone()));
+            if !self.args.is_empty() {
+                object.insert("args".into(), Value::Object(self.args.clone()));
+            }
+            Value::Object(object)
+        }
+    }
+
+    /// A message from the plugin's `messages.toml`, by key. A key with `:`
+    /// names another catalog, such as `party:invited` or `rift:queue.full`.
+    /// Rift renders it in the recipient's language and checks the key and
+    /// the arguments at the call.
+    ///
+    /// ```
+    /// use rift_plugin::text;
+    ///
+    /// let invited = text::message("invited").arg("from", "Alex");
+    /// assert_eq!(
+    ///     invited.to_string(),
+    ///     r#"{"args":{"from":"Alex"},"message":"invited"}"#
+    /// );
+    /// ```
+    pub fn message(key: impl Into<String>) -> Message {
+        Message {
+            key: key.into(),
+            args: Map::new(),
+        }
+    }
+
+    /// A message with named arguments; see [`message`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Message {
+        key: String,
+        args: Map<String, Value>,
+    }
+
+    impl Message {
+        /// `name` shows `text` exactly as written: it is never parsed.
+        pub fn arg(mut self, name: impl Into<String>, text: impl Into<String>) -> Self {
+            self.args.insert(name.into(), Value::String(text.into()));
+            self
+        }
+
+        /// `name` shows a component with its own formatting, such as a
+        /// [`Component`] or a [`mini`] object.
+        pub fn arg_component(
+            mut self,
+            name: impl Into<String>,
+            component: impl Into<Value>,
+        ) -> Self {
+            self.args.insert(name.into(), component.into());
+            self
+        }
+
+        /// `name` is a style argument (see [`Mini::arg_style`]); the
+        /// catalog declares it under `styles`.
+        pub fn arg_style(mut self, name: impl Into<String>, markup: impl Into<String>) -> Self {
+            self.args.insert(name.into(), style(markup));
+            self
+        }
+
+        /// The authoring object as JSON.
+        pub fn to_value(&self) -> Value {
+            let mut object = Map::new();
+            object.insert("message".into(), Value::String(self.key.clone()));
             if !self.args.is_empty() {
                 object.insert("args".into(), Value::Object(self.args.clone()));
             }
@@ -1105,9 +1224,85 @@ pub mod text {
     impl Component {
         /// A component showing `text`.
         pub fn text(text: impl Into<String>) -> Self {
-            let mut fields = Map::new();
-            fields.insert("text".into(), Value::String(text.into()));
-            Self(fields)
+            Self(Map::new()).field("text", text.into())
+        }
+
+        /// A translation the client looks up by `key`, such as
+        /// `multiplayer.player.joined`. Add arguments with
+        /// [`Component::with`] and a fallback with [`Component::fallback`].
+        ///
+        /// ```
+        /// use rift_plugin::text::Component;
+        ///
+        /// let joined = Component::translate("multiplayer.player.joined")
+        ///     .with(Component::text("Alex").color("yellow"))
+        ///     .fallback("Alex joined");
+        /// assert_eq!(
+        ///     serde_json::Value::from(joined),
+        ///     serde_json::json!({
+        ///         "translate": "multiplayer.player.joined",
+        ///         "with": [{"text": "Alex", "color": "yellow"}],
+        ///         "fallback": "Alex joined",
+        ///     })
+        /// );
+        /// ```
+        pub fn translate(key: impl Into<String>) -> Self {
+            Self(Map::new()).field("translate", key.into())
+        }
+
+        /// Appends an argument of a [`Component::translate`]: a
+        /// [`Component`], an authoring object or a string shown as written.
+        pub fn with(self, argument: impl Into<Value>) -> Self {
+            self.push("with", argument.into())
+        }
+
+        /// The text a client shows when it has no translation for the key.
+        pub fn fallback(self, text: impl Into<String>) -> Self {
+            self.field("fallback", text.into())
+        }
+
+        /// The key the player bound to `key`, such as `key.jump`.
+        pub fn keybind(key: impl Into<String>) -> Self {
+            Self(Map::new()).field("keybind", key.into())
+        }
+
+        /// A sprite from the blocks atlas, such as `item/diamond`. Choose
+        /// another atlas with [`Component::atlas`]. Clients before 1.21.9
+        /// do not show it.
+        pub fn sprite(sprite: impl Into<String>) -> Self {
+            Self(Map::new())
+                .field("object", "atlas")
+                .field("sprite", sprite.into())
+        }
+
+        /// The atlas of a [`Component::sprite`], such as `minecraft:gui`.
+        pub fn atlas(self, atlas: impl Into<String>) -> Self {
+            self.field("atlas", atlas.into())
+        }
+
+        /// The head of the player called `name`. Clients before 1.21.9 do
+        /// not show it.
+        ///
+        /// ```
+        /// use rift_plugin::text::Component;
+        ///
+        /// assert_eq!(
+        ///     serde_json::Value::from(Component::head("Alex").hat(false)),
+        ///     serde_json::json!({"object": "player", "player": {"name": "Alex"}, "hat": false})
+        /// );
+        /// ```
+        pub fn head(name: impl Into<String>) -> Self {
+            let mut player = Map::new();
+            player.insert("name".into(), Value::String(name.into()));
+            Self(Map::new())
+                .field("object", "player")
+                .field("player", Value::Object(player))
+        }
+
+        /// Whether a [`Component::head`] shows the hat layer (it does unless
+        /// set to `false`).
+        pub fn hat(self, shown: bool) -> Self {
+            self.field("hat", shown)
         }
 
         /// A colour name such as `red` or `#ff8800`.
@@ -1140,6 +1335,36 @@ pub mod text {
             self.field("obfuscated", true)
         }
 
+        /// Turns a decoration (`bold`, `italic`, `underlined`,
+        /// `strikethrough` or `obfuscated`) on or off. Off overrides what a
+        /// parent component sets: `decoration("italic", false)`.
+        pub fn decoration(self, name: &str, on: bool) -> Self {
+            self.field(name, on)
+        }
+
+        /// The font, such as `minecraft:uniform`.
+        pub fn font(self, font: impl Into<String>) -> Self {
+            self.field("font", font.into())
+        }
+
+        /// A text shadow in `color` (`#rrggbb`) with `opacity` from 0 to 1,
+        /// as `<shadow:#rrggbb:opacity>` writes it. An opacity of 0 hides
+        /// the shadow. A color that is not `#rrggbb` makes Rift reject the
+        /// component at the call.
+        ///
+        /// ```
+        /// use rift_plugin::text::Component;
+        ///
+        /// let value = serde_json::Value::from(Component::text("x").shadow("#ff0000", 0.25));
+        /// assert_eq!(value["shadow_color"], 0x40ff0000);
+        /// ```
+        pub fn shadow(self, color: &str, opacity: f64) -> Self {
+            match shadow_color(color, opacity) {
+                Some(argb) => self.field("shadow_color", argb),
+                None => self.field("shadow_color", color),
+            }
+        }
+
         fn click(self, action: &str, key: &str, value: impl Into<String>) -> Self {
             let mut click = Map::new();
             click.insert("action".into(), Value::String(action.into()));
@@ -1167,6 +1392,14 @@ pub mod text {
             self.click("copy_to_clipboard", "value", text)
         }
 
+        /// A click turns a book to `page`, counting from 1.
+        pub fn change_page(self, page: u32) -> Self {
+            let mut click = Map::new();
+            click.insert("action".into(), Value::String("change_page".into()));
+            click.insert("page".into(), Value::from(page));
+            self.field("click_event", Value::Object(click))
+        }
+
         /// Hover text shown as written.
         pub fn hover_text(self, text: impl Into<String>) -> Self {
             self.hover(Value::String(text.into()))
@@ -1181,6 +1414,40 @@ pub mod text {
             self.field("hover_event", Value::Object(hover))
         }
 
+        /// Hover shows `count` of the item `id`, such as `minecraft:diamond`.
+        pub fn hover_item(self, id: impl Into<String>, count: u32) -> Self {
+            let mut hover = Map::new();
+            hover.insert("action".into(), Value::String("show_item".into()));
+            hover.insert("id".into(), Value::String(id.into()));
+            hover.insert("count".into(), Value::from(count));
+            self.field("hover_event", Value::Object(hover))
+        }
+
+        /// Hover shows the entity of type `kind`, such as `minecraft:pig`,
+        /// with `uuid` in its hyphenated form.
+        pub fn hover_entity(self, kind: impl Into<String>, uuid: impl Into<String>) -> Self {
+            let mut hover = Map::new();
+            hover.insert("action".into(), Value::String("show_entity".into()));
+            hover.insert("id".into(), Value::String(kind.into()));
+            hover.insert("uuid".into(), Value::String(uuid.into()));
+            self.field("hover_event", Value::Object(hover))
+        }
+
+        /// [`Component::hover_entity`] with a name: a [`Component`], an
+        /// authoring object or a string shown as written.
+        pub fn hover_entity_named(
+            self,
+            kind: impl Into<String>,
+            uuid: impl Into<String>,
+            name: impl Into<Value>,
+        ) -> Self {
+            let mut this = self.hover_entity(kind, uuid);
+            if let Some(Value::Object(hover)) = this.0.get_mut("hover_event") {
+                hover.insert("name".into(), name.into());
+            }
+            this
+        }
+
         /// Text inserted into the chat box on shift-click.
         pub fn insertion(self, text: impl Into<String>) -> Self {
             self.field("insertion", text.into())
@@ -1188,19 +1455,22 @@ pub mod text {
 
         /// Appends a child: a [`Component`], an authoring object or a string
         /// shown as written. Children inherit this component's style.
-        pub fn extra(mut self, child: impl Into<Value>) -> Self {
-            let child = child.into();
-            match self.0.get_mut("extra") {
-                Some(Value::Array(children)) => children.push(child),
+        pub fn extra(self, child: impl Into<Value>) -> Self {
+            self.push("extra", child.into())
+        }
+
+        fn push(mut self, key: &str, item: Value) -> Self {
+            match self.0.get_mut(key) {
+                Some(Value::Array(items)) => items.push(item),
                 _ => {
-                    self.0.insert("extra".into(), Value::Array(vec![child]));
+                    self.0.insert(key.into(), Value::Array(vec![item]));
                 }
             }
             self
         }
 
-        /// Sets any other field, such as `font`, `shadow_color` or
-        /// `"italic": false`.
+        /// Sets any other field to any JSON value, such as
+        /// `field("insertion", "text")` or a field newer than this SDK.
         pub fn field(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
             self.0.insert(key.into(), value.into());
             self
@@ -1210,6 +1480,24 @@ pub mod text {
         pub fn to_value(&self) -> Value {
             Value::Object(self.0.clone())
         }
+    }
+
+    /// The ARGB integer vanilla stores for a shadow, or `None` when `color`
+    /// is not `#rrggbb`. The same arithmetic as the host's `<shadow>` tag.
+    fn shadow_color(color: &str, opacity: f64) -> Option<i64> {
+        let hex = color.strip_prefix('#')?;
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let rgb = u32::from_str_radix(hex, 16).ok()?;
+        let opacity = if opacity.is_nan() {
+            0.0
+        } else {
+            opacity.clamp(0.0, 1.0)
+        };
+        let alpha = (opacity * 255.0 + 0.5) as u32;
+        // Vanilla stores ARGB as a signed int.
+        Some(i64::from(((alpha << 24) | rgb) as i32))
     }
 
     macro_rules! json_text {
@@ -1243,7 +1531,7 @@ pub mod text {
         )*};
     }
 
-    json_text!(Mini, Legacy, Component);
+    json_text!(Mini, Message, Legacy, Component);
 }
 
 #[doc(hidden)]
@@ -1573,6 +1861,144 @@ mod tests {
         assert_eq!(
             value["hover_event"],
             json!({"action": "show_text", "value": "t"})
+        );
+    }
+
+    #[test]
+    fn escape_matches_the_shared_vectors() {
+        for (input, escaped) in [
+            ("plain", "plain"),
+            ("a < b", r"a \< b"),
+            ("<red>", r"\<red>"),
+            (r"\", r"\\"),
+            (r"\<", r"\\\<"),
+            ("", ""),
+        ] {
+            assert_eq!(text::escape(input), escaped, "escape({input:?})");
+        }
+    }
+
+    #[test]
+    fn messages_and_style_arguments() {
+        let invited = text::message("party:invited")
+            .arg("from", "Alex")
+            .arg_component("server", text::Component::text("lobby").color("aqua"))
+            .arg_style("team", "<#55ffff><bold>");
+        assert_eq!(
+            serde_json::Value::from(invited),
+            json!({
+                "message": "party:invited",
+                "args": {
+                    "from": "Alex",
+                    "server": {"text": "lobby", "color": "aqua"},
+                    "team": {"style": "<#55ffff><bold>"},
+                },
+            })
+        );
+        assert_eq!(
+            Text::from(text::message("created")),
+            Text::json(r#"{"message":"created"}"#)
+        );
+        assert_eq!(
+            text::mini("<team>x</team>")
+                .arg_style("team", "<red>")
+                .to_string(),
+            r#"{"args":{"team":{"style":"<red>"}},"mini":"<team>x</team>"}"#
+        );
+        // A message nests like any other authoring object.
+        let value: serde_json::Value = text::mini("<m>")
+            .arg_component("m", text::message("hi"))
+            .into();
+        assert_eq!(value["args"]["m"], json!({"message": "hi"}));
+    }
+
+    #[test]
+    fn component_contents_styles_and_events() {
+        fn value(component: text::Component) -> serde_json::Value {
+            component.into()
+        }
+        assert_eq!(
+            value(
+                text::Component::translate("chat.type.text")
+                    .with("Alex")
+                    .with(text::Component::text("hi").italic())
+                    .fallback("<Alex> hi")
+            ),
+            json!({
+                "translate": "chat.type.text",
+                "with": ["Alex", {"text": "hi", "italic": true}],
+                "fallback": "<Alex> hi",
+            })
+        );
+        assert_eq!(
+            value(text::Component::keybind("key.jump")),
+            json!({"keybind": "key.jump"})
+        );
+        assert_eq!(
+            value(text::Component::sprite("item/diamond")),
+            json!({"object": "atlas", "sprite": "item/diamond"})
+        );
+        assert_eq!(
+            value(text::Component::sprite("block/stone").atlas("minecraft:blocks")),
+            json!({"object": "atlas", "sprite": "block/stone", "atlas": "minecraft:blocks"})
+        );
+        assert_eq!(
+            value(text::Component::head("Alex")),
+            json!({"object": "player", "player": {"name": "Alex"}})
+        );
+        assert_eq!(
+            value(text::Component::head("Alex").hat(false)),
+            json!({"object": "player", "player": {"name": "Alex"}, "hat": false})
+        );
+        assert_eq!(
+            value(
+                text::Component::text("x")
+                    .font("minecraft:uniform")
+                    .decoration("italic", false)
+                    .bold()
+                    .decoration("bold", false)
+                    .field("insertion", "i")
+            ),
+            json!({"text": "x", "font": "minecraft:uniform", "italic": false, "bold": false, "insertion": "i"})
+        );
+        // The host's `<shadow>` arithmetic: opacity * 255, rounded, as signed ARGB.
+        for (color, opacity, argb) in [
+            ("#ff0000", 0.25, json!(0x40ff0000)),
+            ("#000000", 1.0, json!(-16777216)),
+            ("#FFAA00", 0.5, json!(-2130728448)),
+            ("#123456", 0.0, json!(0x123456)),
+            ("#ffffff", 2.0, json!(-1)),
+            ("#ffffff", f64::NAN, json!(0xffffff)),
+            ("red", 0.5, json!("red")),
+            ("#fffff", 0.5, json!("#fffff")),
+            ("#+fffff", 0.5, json!("#+fffff")),
+        ] {
+            assert_eq!(
+                value(text::Component::text("x").shadow(color, opacity))["shadow_color"],
+                argb,
+                "shadow({color:?}, {opacity})"
+            );
+        }
+        assert_eq!(
+            value(text::Component::text("x").change_page(3))["click_event"],
+            json!({"action": "change_page", "page": 3})
+        );
+        assert_eq!(
+            value(text::Component::text("x").hover_item("minecraft:diamond", 2))["hover_event"],
+            json!({"action": "show_item", "id": "minecraft:diamond", "count": 2})
+        );
+        let uuid = "00000000-0000-0000-0000-000000000001";
+        assert_eq!(
+            value(text::Component::text("x").hover_entity("minecraft:pig", uuid))["hover_event"],
+            json!({"action": "show_entity", "id": "minecraft:pig", "uuid": uuid})
+        );
+        assert_eq!(
+            value(text::Component::text("x").hover_entity_named(
+                "minecraft:pig",
+                uuid,
+                text::mini("<red>Bob")
+            ))["hover_event"],
+            json!({"action": "show_entity", "id": "minecraft:pig", "uuid": uuid, "name": {"mini": "<red>Bob"}})
         );
     }
 

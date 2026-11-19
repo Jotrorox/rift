@@ -429,6 +429,9 @@ static inline void rift_decision_free(rift_decision_t *decision) {
 // - `rift_mini` writes Rift markup as `{"mini": "...", "args": {...}}`; Rift
 //   turns it into a component (see docs/text.md for the tags).
 // - `rift_legacy` writes `&c` codes as `{"legacy": "...", "marker": "&"}`.
+// - `rift_msg` names a message from the plugin's `messages.toml` as
+//   `{"message": "...", "args": {...}}`; Rift renders it in the player's
+//   language. (`rift_message` sends a player text.)
 // - `rift_component` builds a JSON text component field by field, with the
 //   1.21.5 spellings `click_event` and `hover_event` (Rift rewrites them for
 //   older clients).
@@ -549,10 +552,19 @@ static inline rift_mini_t rift_mini(const char *markup) {
   return m;
 }
 
-static inline void rift__mini_key(rift_mini_t *m, const char *name) {
-  rift_text_buf_append(&m->args, m->args.len ? "," : "{");
-  rift_text_buf_quote(&m->args, name);
-  rift_text_buf_append_n(&m->args, ":", 1);
+static inline void rift__args_key(rift_text_buf_t *args, const char *name) {
+  rift_text_buf_append(args, args->len ? "," : "{");
+  rift_text_buf_quote(args, name);
+  rift_text_buf_append_n(args, ":", 1);
+}
+
+static inline void rift__mini_key(rift_mini_t *m, const char *name) { rift__args_key(&m->args, name); }
+
+// Appends the value of a style argument: `{"style": markup}`.
+static inline void rift__args_style(rift_text_buf_t *args, const char *markup) {
+  rift_text_buf_append(args, "{\"style\":");
+  rift_text_buf_quote(args, markup);
+  rift_text_buf_append_n(args, "}", 1);
 }
 
 // `<name>` shows `text` exactly as written: it is never parsed, so a player
@@ -569,19 +581,94 @@ static inline void rift_mini_arg_component(rift_mini_t *m, const char *name, con
   rift_text_buf_append(&m->args, component_json);
 }
 
-static inline char *rift_mini_finish(rift_mini_t *m) {
+// `<name>` is a style: markup made only of formatting tags, such as
+// "<#55ffff><bold>". It wraps whatever the template puts inside
+// `<name>...</name>`.
+static inline void rift_mini_arg_style(rift_mini_t *m, const char *name, const char *markup) {
+  rift__mini_key(m, name);
+  rift__args_style(&m->args, markup);
+}
+
+// `{"<kind>": <quoted>, "args": {...}}`; frees both buffers.
+static inline char *rift__args_finish(const char *head, rift_text_buf_t *quoted, rift_text_buf_t *args) {
   rift_text_buf_t out = {NULL, 0, 0};
-  rift_text_buf_append(&out, "{\"mini\":");
-  rift_text_buf_append_n(&out, m->markup.ptr, m->markup.len);
-  if (m->args.len) {
+  rift_text_buf_append(&out, head);
+  rift_text_buf_append_n(&out, quoted->ptr, quoted->len);
+  if (args->len) {
     rift_text_buf_append(&out, ",\"args\":");
-    rift_text_buf_append_n(&out, m->args.ptr, m->args.len);
+    rift_text_buf_append_n(&out, args->ptr, args->len);
     rift_text_buf_append_n(&out, "}", 1);
   }
   rift_text_buf_append_n(&out, "}", 1);
-  free(m->markup.ptr);
-  free(m->args.ptr);
-  memset(m, 0, sizeof *m);
+  free(quoted->ptr);
+  free(args->ptr);
+  memset(quoted, 0, sizeof *quoted);
+  memset(args, 0, sizeof *args);
+  return rift_text_buf_take(&out);
+}
+
+static inline char *rift_mini_finish(rift_mini_t *m) { return rift__args_finish("{\"mini\":", &m->markup, &m->args); }
+
+// A message from the plugin's `messages.toml`, by key. A key with `:` names
+// another catalog, such as "party:invited" or "rift:queue.full". Rift renders
+// it in the recipient's language and checks the key and the arguments at the
+// call. Start with `rift_msg`, add arguments, then `rift_msg_finish` returns
+// the JSON and releases the builder:
+//
+//   rift_msg_t m = rift_msg("invited");
+//   rift_msg_arg(&m, "from", name);
+//   char *json = rift_msg_finish(&m);
+//   rift_message(&target, rift_text_json(json));
+//   free(json);
+typedef struct rift_msg {
+  rift_text_buf_t key;
+  rift_text_buf_t args;
+} rift_msg_t;
+
+static inline rift_msg_t rift_msg(const char *key) {
+  rift_msg_t m;
+  memset(&m, 0, sizeof m);
+  rift_text_buf_quote(&m.key, key);
+  return m;
+}
+
+// `name` shows `text` exactly as written: it is never parsed. Give each name
+// once.
+static inline void rift_msg_arg(rift_msg_t *m, const char *name, const char *text) {
+  rift__args_key(&m->args, name);
+  rift_text_buf_quote(&m->args, text);
+}
+
+// `name` shows a component with its own formatting, inserted as JSON.
+static inline void rift_msg_arg_component(rift_msg_t *m, const char *name, const char *component_json) {
+  rift__args_key(&m->args, name);
+  rift_text_buf_append(&m->args, component_json);
+}
+
+// `name` is a style argument (see `rift_mini_arg_style`); the catalog
+// declares it under `styles`.
+static inline void rift_msg_arg_style(rift_msg_t *m, const char *name, const char *markup) {
+  rift__args_key(&m->args, name);
+  rift__args_style(&m->args, markup);
+}
+
+static inline char *rift_msg_finish(rift_msg_t *m) { return rift__args_finish("{\"message\":", &m->key, &m->args); }
+
+// `text` escaped so it can be spliced into markup: every `\` becomes `\\` and
+// every `<` becomes `\<`. Nothing else changes. Returns a malloc'd string;
+// free it with `free()`. NULL is treated as "". An argument
+// (`rift_mini_arg`) is never parsed and needs no escaping.
+static inline char *rift_text_escape(const char *text) {
+  rift_text_buf_t out = {NULL, 0, 0};
+  const char *run = text ? text : "";
+  for (const char *p = run; *p; p++) {
+    if (*p == '<' || *p == '\\') {
+      rift_text_buf_append_n(&out, run, (size_t)(p - run));
+      rift_text_buf_append_n(&out, "\\", 1);
+      run = p;
+    }
+  }
+  rift_text_buf_append(&out, run);
   return rift_text_buf_take(&out);
 }
 
@@ -600,9 +687,10 @@ static inline char *rift_legacy_marker(const char *text, const char *marker) {
 // Legacy codes with the `&` marker.
 static inline char *rift_legacy(const char *text) { return rift_legacy_marker(text, "&"); }
 
-// A JSON text component. Start with `rift_component`, call the setters (each
-// at most once), then `rift_component_finish` returns the JSON and releases
-// the builder:
+// A JSON text component. Start with `rift_component` (or `rift_translate`,
+// `rift_keybind`, `rift_sprite`, `rift_head`), call the setters (each at most
+// once), then `rift_component_finish` returns the JSON and releases the
+// builder:
 //
 //   rift_component_t c = rift_component("[Accept]");
 //   rift_component_color(&c, "green");
@@ -612,14 +700,47 @@ static inline char *rift_legacy(const char *text) { return rift_legacy_marker(te
 //   char *json = rift_component_finish(&c);
 typedef struct rift_component {
   rift_text_buf_t fields;
+  rift_text_buf_t with;
   rift_text_buf_t extra;
 } rift_component_t;
 
-static inline rift_component_t rift_component(const char *text) {
+// A component whose first field is `key` with `value` quoted.
+static inline rift_component_t rift__component_start(const char *key, const char *value) {
   rift_component_t c;
   memset(&c, 0, sizeof c);
-  rift_text_buf_append(&c.fields, "{\"text\":");
-  rift_text_buf_quote(&c.fields, text);
+  rift_text_buf_append_n(&c.fields, "{", 1);
+  rift_text_buf_quote(&c.fields, key);
+  rift_text_buf_append_n(&c.fields, ":", 1);
+  rift_text_buf_quote(&c.fields, value);
+  return c;
+}
+
+// A component showing `text`.
+static inline rift_component_t rift_component(const char *text) { return rift__component_start("text", text); }
+
+// A translation the client looks up by `key`, such as
+// "multiplayer.player.joined". Add arguments with `rift_component_with` and a
+// fallback with `rift_component_fallback`.
+static inline rift_component_t rift_translate(const char *key) { return rift__component_start("translate", key); }
+
+// The key the player bound to `key`, such as "key.jump".
+static inline rift_component_t rift_keybind(const char *key) { return rift__component_start("keybind", key); }
+
+// A sprite from the blocks atlas, such as "item/diamond". Choose another atlas
+// with `rift_component_atlas`. Clients before 1.21.9 do not show it.
+static inline rift_component_t rift_sprite(const char *sprite) {
+  rift_component_t c = rift__component_start("object", "atlas");
+  rift_text_buf_append(&c.fields, ",\"sprite\":");
+  rift_text_buf_quote(&c.fields, sprite);
+  return c;
+}
+
+// The head of the player called `name`. Clients before 1.21.9 do not show it.
+static inline rift_component_t rift_head(const char *name) {
+  rift_component_t c = rift__component_start("object", "player");
+  rift_text_buf_append(&c.fields, ",\"player\":{\"name\":");
+  rift_text_buf_quote(&c.fields, name);
+  rift_text_buf_append_n(&c.fields, "}", 1);
   return c;
 }
 
@@ -651,6 +772,85 @@ static inline void rift_component_strikethrough(rift_component_t *c) {
 }
 static inline void rift_component_obfuscated(rift_component_t *c) { rift_component_field(c, "obfuscated", "true"); }
 
+// Turns a decoration ("bold", "italic", "underlined", "strikethrough" or
+// "obfuscated") on or off. Off overrides what a parent component sets:
+// `rift_component_decoration(&c, "italic", false)`. Use it instead of
+// `rift_component_bold` and the others, not as well.
+static inline void rift_component_decoration(rift_component_t *c, const char *name, bool on) {
+  rift_component_field(c, name, on ? "true" : "false");
+}
+
+// The font, such as "minecraft:uniform".
+static inline void rift_component_font(rift_component_t *c, const char *font) {
+  rift__component_string(c, "font", font);
+}
+
+// The ARGB integer vanilla stores for a shadow, with the same arithmetic as
+// the host's `<shadow>` tag; false when `color` is not "#rrggbb".
+static inline bool rift__shadow_color(const char *color, double opacity, int32_t *argb) {
+  if (!color || color[0] != '#' || strlen(color) != 7) return false;
+  uint32_t rgb = 0;
+  for (int i = 1; i < 7; i++) {
+    char d = color[i];
+    uint32_t v;
+    if (d >= '0' && d <= '9') v = (uint32_t)(d - '0');
+    else if (d >= 'a' && d <= 'f') v = (uint32_t)(d - 'a' + 10);
+    else if (d >= 'A' && d <= 'F') v = (uint32_t)(d - 'A' + 10);
+    else return false;
+    rgb = (rgb << 4) | v;
+  }
+  if (!(opacity >= 0.0)) opacity = 0.0;  // also NaN
+  if (opacity > 1.0) opacity = 1.0;
+  uint32_t alpha = (uint32_t)(opacity * 255.0 + 0.5);
+  uint32_t bits = (alpha << 24) | rgb;
+  // Vanilla stores ARGB as a signed int.
+  memcpy(argb, &bits, sizeof bits);
+  return true;
+}
+
+// A text shadow in `color` ("#rrggbb") with `opacity` from 0 to 1, as
+// `<shadow:#rrggbb:opacity>` writes it. An opacity of 0 hides the shadow. A
+// color that is not "#rrggbb" makes Rift reject the component at the call.
+static inline void rift_component_shadow(rift_component_t *c, const char *color, double opacity) {
+  int32_t argb;
+  if (!rift__shadow_color(color, opacity, &argb)) {
+    rift__component_string(c, "shadow_color", color);
+    return;
+  }
+  char num[16];
+  snprintf(num, sizeof num, "%ld", (long)argb);
+  rift_component_field(c, "shadow_color", num);
+}
+
+// The atlas of a `rift_sprite`, such as "minecraft:gui".
+static inline void rift_component_atlas(rift_component_t *c, const char *atlas) {
+  rift__component_string(c, "atlas", atlas);
+}
+
+// Whether a `rift_head` shows the hat layer (it does unless set to false).
+static inline void rift_component_hat(rift_component_t *c, bool shown) {
+  rift_component_field(c, "hat", shown ? "true" : "false");
+}
+
+// The text a client shows when it has no translation for the key of a
+// `rift_translate` component.
+static inline void rift_component_fallback(rift_component_t *c, const char *text) {
+  rift__component_string(c, "fallback", text);
+}
+
+// Appends an argument of a `rift_translate` component, given as JSON (a
+// finished component or an authoring object).
+static inline void rift_component_with(rift_component_t *c, const char *arg_json) {
+  rift_text_buf_append_n(&c->with, c->with.len ? "," : "[", 1);
+  rift_text_buf_append(&c->with, arg_json);
+}
+
+// Appends an argument of a `rift_translate` component shown as written.
+static inline void rift_component_with_text(rift_component_t *c, const char *text) {
+  rift_text_buf_append_n(&c->with, c->with.len ? "," : "[", 1);
+  rift_text_buf_quote(&c->with, text);
+}
+
 static inline void rift__component_click(rift_component_t *c, const char *action, const char *key,
                                          const char *value) {
   rift_text_buf_append(&c->fields, ",\"click_event\":{\"action\":");
@@ -678,6 +878,14 @@ static inline void rift_component_open_url(rift_component_t *c, const char *url)
 static inline void rift_component_copy_to_clipboard(rift_component_t *c, const char *text) {
   rift__component_click(c, "copy_to_clipboard", "value", text);
 }
+// A click turns a book to `page`, counting from 1.
+static inline void rift_component_change_page(rift_component_t *c, int page) {
+  char num[16];
+  snprintf(num, sizeof num, "%d", page);
+  rift_text_buf_append(&c->fields, ",\"click_event\":{\"action\":\"change_page\",\"page\":");
+  rift_text_buf_append(&c->fields, num);
+  rift_text_buf_append_n(&c->fields, "}", 1);
+}
 
 // Hover text as a component given as JSON, such as another finished
 // component or a `rift_mini` result.
@@ -691,6 +899,33 @@ static inline void rift_component_hover(rift_component_t *c, const char *compone
 static inline void rift_component_hover_text(rift_component_t *c, const char *text) {
   rift_text_buf_append(&c->fields, ",\"hover_event\":{\"action\":\"show_text\",\"value\":");
   rift_text_buf_quote(&c->fields, text);
+  rift_text_buf_append_n(&c->fields, "}", 1);
+}
+
+// Hover shows `count` of the item `id`, such as "minecraft:diamond".
+static inline void rift_component_hover_item(rift_component_t *c, const char *id, int count) {
+  char num[16];
+  snprintf(num, sizeof num, "%d", count);
+  rift_text_buf_append(&c->fields, ",\"hover_event\":{\"action\":\"show_item\",\"id\":");
+  rift_text_buf_quote(&c->fields, id);
+  rift_text_buf_append(&c->fields, ",\"count\":");
+  rift_text_buf_append(&c->fields, num);
+  rift_text_buf_append_n(&c->fields, "}", 1);
+}
+
+// Hover shows the entity of type `kind`, such as "minecraft:pig", with `uuid`
+// in its hyphenated form. `name_json` (a finished component or an authoring
+// object) may be NULL for none.
+static inline void rift_component_hover_entity(rift_component_t *c, const char *kind, const char *uuid,
+                                               const char *name_json) {
+  rift_text_buf_append(&c->fields, ",\"hover_event\":{\"action\":\"show_entity\",\"id\":");
+  rift_text_buf_quote(&c->fields, kind);
+  rift_text_buf_append(&c->fields, ",\"uuid\":");
+  rift_text_buf_quote(&c->fields, uuid);
+  if (name_json) {
+    rift_text_buf_append(&c->fields, ",\"name\":");
+    rift_text_buf_append(&c->fields, name_json);
+  }
   rift_text_buf_append_n(&c->fields, "}", 1);
 }
 
@@ -713,12 +948,18 @@ static inline void rift_component_extra_text(rift_component_t *c, const char *te
 }
 
 static inline char *rift_component_finish(rift_component_t *c) {
+  if (c->with.len) {
+    rift_text_buf_append(&c->fields, ",\"with\":");
+    rift_text_buf_append_n(&c->fields, c->with.ptr, c->with.len);
+    rift_text_buf_append_n(&c->fields, "]", 1);
+  }
   if (c->extra.len) {
     rift_text_buf_append(&c->fields, ",\"extra\":");
     rift_text_buf_append_n(&c->fields, c->extra.ptr, c->extra.len);
     rift_text_buf_append_n(&c->fields, "]", 1);
   }
   rift_text_buf_append_n(&c->fields, "}", 1);
+  free(c->with.ptr);
   free(c->extra.ptr);
   char *out = rift_text_buf_take(&c->fields);
   memset(c, 0, sizeof *c);

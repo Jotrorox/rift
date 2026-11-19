@@ -132,6 +132,16 @@ welcome := rift.Mini("<gold>Welcome, <rank> <player>!</gold> <gray><click:run_co
 	ArgComponent("rank", rift.Legacy("&c[Admin]")) // a component argument
 rift.SendMessage(ctx.UUID, welcome.Text())
 
+// A style argument wraps what the template puts inside <team>...</team>.
+tag := rift.Mini("<team>[<tag>]</team> <name>").
+	ArgStyle("team", "<#55ffff><bold>").Arg("tag", "RED").Arg("name", ctx.Name)
+
+// A message from the plugin's messages.toml, written as {"message": "...", "args": {...}}.
+rift.SendMessage(ctx.UUID, rift.Msg("invited").Arg("from", "Alex").Text())
+
+// Text you splice into markup yourself: < becomes \< and \ becomes \\.
+safe := rift.Mini("<gray>" + rift.Escape(motdLine))
+
 // Legacy codes, written as {"legacy": "...", "marker": "&"}; .Marker('§') for another marker.
 rift.SendTitle(ctx.UUID, rift.Title{
 	Title:    rift.Mini("<green>Lobby").Text(),
@@ -144,12 +154,32 @@ accept := rift.Component("[Accept]").Color("green").Bold().
 	RunCommand("/party accept Alex").HoverText("Join Alex's party").
 	Extra(rift.Plain(" or ignore it"))
 return rift.Message(accept.Text())
+
+// Other contents, styles and events.
+joined := rift.Translate("multiplayer.player.joined").
+	With(rift.Component("Alex").Color("yellow")).Fallback("Alex joined")
+head := rift.Head("Alex").Hat(false).HoverEntity("minecraft:player", uuid, nil)
+diamond := rift.Sprite("item/diamond").Shadow("#000000", 0.5).HoverItem("minecraft:diamond", 3)
 ```
 
-- `rift.Component` has `Color`, `Bold`, `Italic`, `Underlined`,
-  `Strikethrough`, `Obfuscated`, `RunCommand`, `SuggestCommand`, `OpenURL`,
-  `CopyToClipboard`, `HoverText` (plain), `Hover` (a component), `Insertion`,
-  `Extra` (children) and `Field` (any other key, raw JSON).
+- `rift.Mini` takes `Arg` (shown as written), `ArgComponent` and `ArgStyle`
+  (a [style argument](text.md#style-arguments): markup made only of formatting tags).
+  `rift.Msg(key)` takes the same three. A message comes from the plugin's
+  `messages.toml`; see [Styled text](text.md). It is `Msg` because
+  `rift.Message` is the decision that shows a player text.
+- `rift.Escape(s)` escapes text for splicing into markup. An argument needs no
+  escaping.
+- The component builders:
+
+  | Kind | Functions and methods |
+  | --- | --- |
+  | Content | `rift.Component(text)`, `rift.Translate(key)` with `With(args...)` and `Fallback(s)`, `rift.Keybind(key)`, `rift.Sprite(sprite)` with `Atlas(atlas)`, `rift.Head(name)` with `Hat(false)` |
+  | Style | `Color`, `Bold`, `Italic`, `Underlined`, `Strikethrough`, `Obfuscated`, `Decoration(name, on)` (`Decoration("italic", false)` turns it off), `Font(id)`, `Shadow("#rrggbb", opacity)`, `Insertion` |
+  | Click | `RunCommand`, `SuggestCommand`, `OpenURL`, `CopyToClipboard`, `ChangePage(page)` |
+  | Hover | `HoverText` (plain), `Hover` (a component), `HoverItem(id, count)`, `HoverEntity(type, uuid, name)` (`name` may be nil) |
+  | Other | `Extra` (children), `Field` (any other key, raw JSON) |
+
+  Sprites and heads need 1.21.9 or newer; older clients drop them.
 - Builders nest through the `TextJSON` interface (`JSON() string`), which
   `rift.Text` implements too.
 - The zero `rift.Text{}` is "none" where text is optional: leave out a title's

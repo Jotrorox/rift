@@ -301,7 +301,7 @@ no plugin needs raw JSON for an ordinary component:
 
 | Addition | Rust | Go | C |
 | --- | --- | --- | --- |
-| Message | `text::message(key)` with `arg`, `arg_component`, `arg_style` | `rift.Message(key)` | `rift_message` |
+| Message | `text::message(key)` with `arg`, `arg_component`, `arg_style` | `rift.Msg(key)` | `rift_msg` |
 | Style argument | `Mini::arg_style` | `MiniText.ArgStyle` | `rift_mini_arg_style` |
 | Escape | `text::escape` | `rift.Escape` | `rift_text_escape` |
 | Content | `Component::translate` (with arguments and a fallback), `keybind`, `sprite`, `head` | the same | the same |
