@@ -10,15 +10,20 @@
 //! rift.text.to_legacy(hi)                     -- "§6Hi Steve!"
 //! rift.text.plain(hi)                         -- "Hi Steve!"
 //! rift.text.escape(untrusted)                 -- safe to splice into markup
+//! local m = rift.text.message("greet", { name = ctx.name })  -- as written
+//! rift.text.plain(m, "de")                    -- "Hallo Steve." (a plugin's own)
+//! rift.text.render(m)                         -- a component table, default language
 //! ```
-use super::{Arg, Args, Profile, Text, catalog, legacy, markup};
+use super::{Arg, Args, Form, Profile, Text, catalog, legacy, markup};
 use mlua::{Lua, Table, Value};
 use serde_json::Value as Json;
 
 const MAX_DEPTH: usize = 64;
 
-/// Add `text` to the `rift` table `api`.
-pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
+/// Add `text` to the `rift` table `api`, for a caller in `namespace`: a
+/// persistent plugin's name, whose unqualified message keys are its own, or
+/// `None` for `rift.lua` and script-mode plugins.
+pub(crate) fn install(lua: &Lua, api: &Table, namespace: Option<&str>) -> mlua::Result<()> {
     let text = lua.create_table()?;
     text.raw_set(
         "mini",
@@ -52,29 +57,38 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
         })?,
     )?;
     text.raw_set(
-        "to_legacy",
-        lua.create_function(|_, value: Value| {
-            let text = Text::lua(value, "rift.text.to_legacy").map_err(mlua::Error::runtime)?;
-            Ok(text.to_legacy(Profile::UNKNOWN))
+        "message",
+        lua.create_function(|lua, (key, args): (Value, Option<Table>)| {
+            message(lua, key, args).map_err(mlua::Error::runtime)
         })?,
     )?;
+    let own = namespace.map(str::to_owned);
     text.raw_set(
-        "plain",
-        lua.create_function(|_, value: Value| {
-            let text = Text::lua(value, "rift.text.plain").map_err(mlua::Error::runtime)?;
-            Ok(text.to_string())
+        "render",
+        lua.create_function(move |lua, (value, language): (Value, Option<String>)| {
+            let label = "rift.text.render";
+            let text = Text::lua_as_written(value, label).map_err(mlua::Error::runtime)?;
+            let text = super::resolve(&text, own.as_deref(), language.as_deref(), label)
+                .map_err(mlua::Error::runtime)?;
+            to_lua(lua, &text.for_client(Profile::UNKNOWN))
         })?,
     )?;
-    text.raw_set(
-        "to_mini",
-        lua.create_function(|_, value: Value| {
-            let text = Text::lua(value, "rift.text.to_mini").map_err(mlua::Error::runtime)?;
-            Ok(match text {
-                Text::Plain(plain) => markup::escape(&plain),
-                Text::Component(component) => markup::serialize(&component),
-            })
-        })?,
-    )?;
+    for (name, form) in [
+        ("to_legacy", Form::Legacy),
+        ("plain", Form::Plain),
+        ("to_mini", Form::Mini),
+    ] {
+        let own = namespace.map(str::to_owned);
+        let label = format!("rift.text.{name}");
+        text.raw_set(
+            name,
+            lua.create_function(move |_, (value, language): (Value, Option<String>)| {
+                let text = Text::lua_as_written(value, &label).map_err(mlua::Error::runtime)?;
+                super::convert(&text, own.as_deref(), language.as_deref(), form, &label)
+                    .map_err(mlua::Error::runtime)
+            })?,
+        )?;
+    }
     text.raw_set(
         "escape",
         lua.create_function(|_, text: String| Ok(markup::escape(&text)))?,
@@ -87,8 +101,59 @@ pub(crate) fn install(lua: &Lua, api: &Table) -> mlua::Result<()> {
     api.raw_set("text", text)
 }
 
+/// `rift.text.message(key, args)`: the `message` object as a table, left
+/// as written. It resolves when it is handed to a call, with the caller's
+/// namespace and the recipient's language, so only its shape is checked
+/// here.
+fn message(lua: &Lua, key: Value, args: Option<Table>) -> Result<Table, String> {
+    const LABEL: &str = "rift.text.message";
+    let key = match key {
+        Value::String(key) => key,
+        other => {
+            return Err(format!(
+                "{LABEL}: the key must be a string, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    if key.as_bytes().is_empty() {
+        return Err(format!("{LABEL}: the key must not be empty"));
+    }
+    let object = lua.create_table().map_err(|error| error.to_string())?;
+    object
+        .raw_set("message", key)
+        .map_err(|error| error.to_string())?;
+    if let Some(args) = args {
+        for pair in args.pairs::<Value, Value>() {
+            let (name, value) = pair.map_err(|error| error.to_string())?;
+            let Value::String(name) = name else {
+                return Err(format!("{LABEL}: argument names must be strings"));
+            };
+            match value {
+                Value::String(_)
+                | Value::Integer(_)
+                | Value::Number(_)
+                | Value::Boolean(_)
+                | Value::Table(_) => {}
+                value => {
+                    return Err(format!(
+                        "{LABEL} argument {:?}: unsupported {}",
+                        name.to_string_lossy(),
+                        value.type_name()
+                    ));
+                }
+            }
+        }
+        object
+            .raw_set("args", args)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(object)
+}
+
 /// Markup arguments from a Lua table: strings and numbers are shown as
-/// written, tables are chat components.
+/// written, `{ style = "<red>" }` is a style, other tables are chat
+/// components.
 fn arguments(args: Option<Table>) -> Result<Args, String> {
     let mut parsed = Args::new();
     let Some(args) = args else {
@@ -113,16 +178,40 @@ fn arguments(args: Option<Table>) -> Result<Args, String> {
             Value::Integer(number) => Arg::Text(number.to_string()),
             Value::Number(number) => Arg::Text(number.to_string()),
             Value::Boolean(value) => Arg::Text(value.to_string()),
-            value @ Value::Table(_) => match Text::lua(value, &label)? {
-                Text::Plain(text) => Arg::Text(text),
-                Text::Component(component) => Arg::Component(component),
-            },
+            Value::Table(table) => {
+                let style = table
+                    .raw_get::<Value>("style")
+                    .map_err(|error| format!("{label}: {error}"))?;
+                if style.is_nil() {
+                    match Text::lua(Value::Table(table), &label)? {
+                        Text::Plain(text) => Arg::Text(text),
+                        Text::Component(component) => Arg::Component(component),
+                    }
+                } else {
+                    Arg::Style(style_argument(&table, style, &label)?)
+                }
+            }
             value => return Err(format!("{label}: unsupported {}", value.type_name())),
         };
         parsed.insert(&name, arg);
     }
     parsed.validate("rift.text.mini")?;
     Ok(parsed)
+}
+
+/// A style argument: a table with only `style`, markup made only of
+/// formatting tags.
+fn style_argument(table: &Table, style: Value, label: &str) -> Result<markup::Style, String> {
+    if table.pairs::<Value, Value>().count() != 1 {
+        return Err(format!("{label}: a style argument takes only style"));
+    }
+    let Value::String(source) = style else {
+        return Err(format!("{label}: style must be a string of markup"));
+    };
+    let source = source
+        .to_str()
+        .map_err(|_| format!("{label}: style must be UTF-8"))?;
+    markup::style_arg(&source).map_err(|error| format!("{label}: {error}"))
 }
 
 /// A JSON value as Lua: arrays are sequences, objects tables.
@@ -165,7 +254,7 @@ mod tests {
     fn eval(code: &str) -> String {
         let lua = Lua::new();
         let api = lua.create_table().unwrap();
-        install(&lua, &api).unwrap();
+        install(&lua, &api, None).unwrap();
         lua.globals().set("rift", api).unwrap();
         lua.load(code).eval::<String>().unwrap()
     }
@@ -200,7 +289,7 @@ mod tests {
         );
         let lua = Lua::new();
         let api = lua.create_table().unwrap();
-        install(&lua, &api).unwrap();
+        install(&lua, &api, None).unwrap();
         lua.globals().set("rift", api).unwrap();
         let error = lua
             .load(r#"return rift.text.mini("<bolt>")"#)
@@ -208,5 +297,121 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown tag"), "{error}");
+    }
+
+    #[test]
+    fn lua_style_arguments_wrap_template_text() {
+        assert_eq!(
+            eval(
+                r#"local t = rift.text.mini("<team>[<tag>]</team>",
+                       { team = { style = "<#55ffff><bold>" }, tag = "x" })
+                   return t.color .. "|" .. tostring(t.bold) .. "|" .. t.text"#
+            ),
+            "#55ffff|true|[x]"
+        );
+        assert_eq!(
+            eval(r#"return rift.text.mini("<s>a</s>", { s = { style = "" } }).text"#),
+            "a"
+        );
+        let lua = Lua::new();
+        let api = lua.create_table().unwrap();
+        install(&lua, &api, None).unwrap();
+        lua.globals().set("rift", api).unwrap();
+        let error = |code: &str| lua.load(code).eval::<Value>().unwrap_err().to_string();
+        let extra = error(r#"return rift.text.mini("<s>a", { s = { style = "<red>", x = 1 } })"#);
+        assert!(
+            extra.contains("a style argument takes only style"),
+            "{extra}"
+        );
+        let text = error(r#"return rift.text.mini("<s>a", { s = { style = "<red>words" } })"#);
+        assert!(text.contains("only formatting tags are allowed"), "{text}");
+        let number = error(r#"return rift.text.mini("<s>a", { s = { style = 1 } })"#);
+        assert!(
+            number.contains("style must be a string of markup"),
+            "{number}"
+        );
+    }
+
+    /// `rift.text` for a caller in `namespace`, with the test catalogue.
+    fn messages_lua(namespace: Option<&str>) -> Lua {
+        let lua = Lua::new();
+        let api = lua.create_table().unwrap();
+        install(&lua, &api, namespace).unwrap();
+        lua.globals().set("rift", api).unwrap();
+        lua
+    }
+
+    #[test]
+    fn lua_messages_stay_as_written_until_a_call_renders_them() {
+        let _catalog = catalog::loading(std::sync::Arc::new(catalog::test_catalog()));
+        let lua = messages_lua(Some("party"));
+        let eval = |code: &str| lua.load(code).eval::<String>().unwrap();
+        let error = |code: &str| lua.load(code).eval::<Value>().unwrap_err().to_string();
+        // The object as a table, not resolved: an unknown key is fine here.
+        assert_eq!(
+            eval(
+                r#"local m = rift.text.message("greet", { name = "Alex" })
+                   return m.message .. "|" .. m.args.name .. "|" .. tostring(next(m, nil) ~= nil)"#
+            ),
+            "greet|Alex|true"
+        );
+        assert_eq!(
+            eval(r#"local m = rift.text.message("nope") return m.message .. tostring(m.args)"#),
+            "nopenil"
+        );
+        assert!(error(r#"return rift.text.message("")"#).contains("must not be empty"));
+        assert!(error(r#"return rift.text.message(1)"#).contains("must be a string"));
+        assert!(
+            error(r#"return rift.text.message("greet", { name = function() end })"#)
+                .contains("unsupported function")
+        );
+        // Unqualified keys are the caller's own, in the language asked for.
+        assert_eq!(
+            eval(r#"return rift.text.plain(rift.text.message("greet", { name = "Alex" }), "de")"#),
+            "Hallo Alex."
+        );
+        assert_eq!(
+            eval(r#"return rift.text.plain(rift.text.message("greet", { name = "Alex" }))"#),
+            "Hello Alex."
+        );
+        assert_eq!(
+            eval(r#"return rift.text.to_legacy({ message = "created" }, "de")"#),
+            "Erstellt."
+        );
+        assert_eq!(
+            eval(
+                r#"return rift.text.plain(rift.text.render(rift.text.message("created"), "de_DE"))"#
+            ),
+            "Erstellt."
+        );
+        // `render` resolves markup and legacy codes as well; plain text
+        // stays a string.
+        assert_eq!(
+            eval(
+                r#"local t = rift.text.render({ mini = "<red>Hi <p>", args = { p = "x" } })
+                   return t.color .. "|" .. t.text"#
+            ),
+            "red|Hi x"
+        );
+        assert_eq!(
+            eval(r#"return rift.text.render("<red>as written")"#),
+            "<red>as written"
+        );
+        assert!(
+            error(r#"return rift.text.render(rift.text.message("created"), "d")"#)
+                .contains("rift.text.render: a language is")
+        );
+        assert!(
+            error(r#"return rift.text.plain(rift.text.message("nope"), "de")"#)
+                .contains("rift.text.plain")
+        );
+        // Without a namespace (rift.lua) a key needs its plugin's name.
+        let lua = messages_lua(None);
+        let plain = |code: &str| lua.load(code).eval::<String>();
+        assert_eq!(
+            plain(r#"return rift.text.plain({ message = "party:created" }, "de")"#).unwrap(),
+            "Erstellt."
+        );
+        assert!(plain(r#"return rift.text.plain({ message = "created" })"#).is_err());
     }
 }

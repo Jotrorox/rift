@@ -1,7 +1,7 @@
 // Package rift is the Go SDK for Rift WebAssembly plugins.
 //
 // It wraps the bindings that wit-bindgen-go generates for the
-// rift:plugin@0.2.0 contract (see the gen directory) with plain Go types,
+// rift:plugin@0.2.1 contract (see the gen directory) with plain Go types,
 // registers a default for every hook, and exposes setters for the hooks a
 // plugin implements:
 //

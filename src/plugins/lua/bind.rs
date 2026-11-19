@@ -380,13 +380,13 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
-    // The exact `rift:plugin` version, such as "0.2.0".
+    // The exact `rift:plugin` version, such as "0.2.1".
     meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 
     registration(lua, &rift, state)?;
     helpers(lua, &rift, state)?;
-    crate::text::lua::install(lua, &rift)?;
+    crate::text::lua::install(lua, &rift, Some(spec.name.as_str()))?;
     rift.raw_set("players", players(lua, state)?)?;
     rift.raw_set("store", store(lua, state)?)?;
     rift.raw_set("permissions", permissions(lua, state)?)?;
@@ -877,7 +877,8 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             },
         )?,
     )?;
-    // A string is plain text and a table a chat component.
+    // A string is plain text and a table a chat component, whose messages
+    // are this plugin's (when unqualified) in the target's language.
     type Send = fn(&Services, &str, Text) -> Result<bool, String>;
     let texts: [(&str, &str, Send); 3] = [
         ("message", "message", |services, target, text| {
@@ -895,7 +896,10 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         api.raw_set(
             name,
             function(lua, state, move |_, (target, text): (String, Value)| {
-                let text = Text::lua(text, label).map_err(runtime)?;
+                let text = services
+                    .players()
+                    .for_target(&target, || Text::lua(text, label))
+                    .map_err(runtime)?;
                 send(&services, &target, text).map_err(runtime)
             })?,
         )?;
@@ -908,7 +912,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 title,
                 subtitle,
                 times,
-            } = crate::extensions::players::title(options)?
+            } = services
+                .players()
+                .for_target(&target, || crate::extensions::players::title(options))?
             else {
                 unreachable!("title builds a title action");
             };
@@ -934,8 +940,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua,
             state,
             move |_, (target, options): (String, Option<Table>)| {
-                let crate::extensions::PlayerAction::TabList(changes) =
-                    crate::extensions::players::tab_list(options)?
+                let crate::extensions::PlayerAction::TabList(changes) = services
+                    .players()
+                    .for_target(&target, || crate::extensions::players::tab_list(options))?
                 else {
                     unreachable!("tab_list builds a tab list action");
                 };
@@ -960,7 +967,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             state,
             move |_, (target, name, options): (String, String, Option<Table>)| {
                 let crate::extensions::PlayerAction::BossBar { name, bar } =
-                    crate::extensions::players::boss_bar(name, options)?
+                    services.players().for_target(&target, || {
+                        crate::extensions::players::boss_bar(name, options)
+                    })?
                 else {
                     unreachable!("boss_bar builds a boss bar action");
                 };
@@ -984,11 +993,10 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     api.raw_set(
         "dialog",
         function(lua, state, move |_, (target, spec): (String, Value)| {
-            let dialog = crate::extensions::players::dialog(spec)?;
-            services
-                .players()
-                .show_dialog(&target, dialog)
-                .map_err(runtime)
+            let players = services.players();
+            let dialog =
+                players.for_target(&target, || crate::extensions::players::dialog(spec))?;
+            players.show_dialog(&target, dialog).map_err(runtime)
         })?,
     )?;
     let services = state.services.clone();
@@ -1015,7 +1023,8 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua,
             state,
             move |_, (message, server): (Value, Option<String>)| {
-                let message = Text::lua(message, "message").map_err(runtime)?;
+                // Rendered for each recipient by `broadcast_text`.
+                let message = Text::lua_as_written(message, "message").map_err(runtime)?;
                 services
                     .players()
                     .broadcast_text(message, server.as_deref())
@@ -1469,11 +1478,10 @@ fn background(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 Value::Table(table) if table.contains_key("server")? => "initial_server",
                 _ => "command",
             };
-            let action = crate::extensions::parse_action(hook, decision)?;
-            services
-                .background()
-                .resolve(ticket, action)
-                .map_err(runtime)
+            let background = services.background();
+            let action = background
+                .for_ticket(ticket, || crate::extensions::parse_action(hook, decision))?;
+            background.resolve(ticket, action).map_err(runtime)
         })?,
     )?;
     let run = state.clone();

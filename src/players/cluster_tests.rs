@@ -15,7 +15,7 @@ use crate::{
     messaging::Broker,
     permissions::Authority,
     text::{
-        Text,
+        Text, Unrendered,
         catalog::{self, Notice},
     },
 };
@@ -383,21 +383,53 @@ async fn actions_for_another_peers_players_reach_their_sessions() {
     );
 
     // Broadcasts reach every peer; the routed form counts them all.
+    let unrendered = |text: &Text| Unrendered::new(text.clone(), None, "message").unwrap();
     let everyone = Text::from("everyone");
-    assert_eq!(a.broadcast_routed(&everyone, None).await.unwrap(), 2);
+    assert_eq!(
+        a.broadcast_routed(&unrendered(&everyone), None)
+            .await
+            .unwrap(),
+        2
+    );
     assert_eq!(
         next(&mut alice).await,
         PlayerAction::Message(everyone.clone())
     );
     assert_eq!(next(&mut bob).await, PlayerAction::Message(everyone));
     let games = Text::from("games");
-    assert_eq!(b.broadcast_routed(&games, Some("games")).await.unwrap(), 1);
+    assert_eq!(
+        b.broadcast_routed(&unrendered(&games), Some("games"))
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(next(&mut bob).await, PlayerAction::Message(games));
     assert!(alice.actions.try_recv().is_err());
     // The synchronous broadcast counts this peer and sends the rest on.
-    assert_eq!(b.broadcast(&"sync".into(), None).unwrap(), 1);
+    assert_eq!(b.broadcast(&unrendered(&"sync".into()), None).unwrap(), 1);
     assert_eq!(next(&mut alice).await, PlayerAction::Message("sync".into()));
     assert_eq!(next(&mut bob).await, PlayerAction::Message("sync".into()));
+    // Text that names a message reaches each player in their own language,
+    // whichever peer holds them.
+    catalog::install_test_catalog();
+    alice._handle.set_locale(Some("de_de"));
+    cluster.pump();
+    let greeting = Unrendered::new(
+        Text::Component(json!({"message": "party:greet", "args": {"name": "all"}})),
+        None,
+        "message",
+    )
+    .unwrap();
+    let words = |action: PlayerAction| match action {
+        PlayerAction::Message(text) => text.to_string(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(a.broadcast_routed(&greeting, None).await.unwrap(), 2);
+    assert_eq!(words(next(&mut alice).await), "Hallo all.");
+    assert_eq!(words(next(&mut bob).await), "Hello all.");
+    assert_eq!(b.broadcast(&greeting, None).unwrap(), 1);
+    assert_eq!(words(next(&mut alice).await), "Hallo all.");
+    assert_eq!(words(next(&mut bob).await), "Hello all.");
 
     // `rift admin transfer` of another peer's connection id.
     let result = a

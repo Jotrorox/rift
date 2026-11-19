@@ -1425,12 +1425,16 @@ async fn player_action(
     };
     let mut request = value;
     request["target"] = json!(player);
-    let decoded =
-        rift::players_service::Request::decode(&operation, request.to_string().as_bytes());
-    // Waits for the answer when the player is on another cluster peer.
     let snapshot = app.snapshot();
+    let players = snapshot.extensions.players();
+    let decoded = rift::players_service::Request::decode_for(
+        &operation,
+        request.to_string().as_bytes(),
+        players,
+    );
+    // Waits for the answer when the player is on another cluster peer.
     let result = match decoded {
-        Ok(request) => request.run(snapshot.extensions.players()).await,
+        Ok(request) => request.run(players).await,
         Err(error) => Err(error),
     };
     match result {

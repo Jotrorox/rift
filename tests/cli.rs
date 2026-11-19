@@ -372,6 +372,49 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
 }
 
 #[test]
+fn check_counts_plugin_messages_and_warns_about_replacements_nobody_uses() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("plugins/party")).unwrap();
+    fs::write(fixture.0.join("plugins/party/init.lua"), "return true").unwrap();
+    fs::write(
+        fixture.0.join("plugins/party/messages.toml"),
+        "[messages]\ncreated = \"Created.\"\nleft = \"Left.\"\n[languages.de]\ncreated = \"Erstellt.\"\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("rift.lua"),
+        "rift.plugin('party')
+        return { listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:0' }, routes = { public = 'lobby' }, text = { messages = { ['party:left'] = 'Bye.', ['ghost:hello'] = 'Hi.' } } }",
+    )
+    .unwrap();
+    let output = fixture.run(&["check"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stdout.contains("plugin party: mode script, sandboxed; messages 2, languages 1"),
+        "{stdout}"
+    );
+    let warning = "text.messages[\"ghost:hello\"]: no enabled plugin has the namespace \"ghost\"; the replacement is ignored";
+    assert!(
+        stderr.contains(&format!("rift: warning: {warning}")),
+        "{stderr}"
+    );
+    // An error with --strict.
+    let strict = fixture.run(&["check", "--strict"]);
+    let strict_stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(!strict.status.success());
+    assert!(
+        strict_stderr.contains(&format!("rift: strict: error: {warning}")),
+        "{strict_stderr}"
+    );
+    assert!(
+        !strict_stderr.contains(&format!("rift: warning: {warning}")),
+        "{strict_stderr}"
+    );
+}
+
+#[test]
 fn check_warns_when_a_template_ships_riftperms_without_instance_logins() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join("templates/lobby/plugins")).unwrap();

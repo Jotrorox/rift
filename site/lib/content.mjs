@@ -18,7 +18,7 @@ export const DOCS = [
 
   page('Configure', 'lua', 'Lua configuration', 'Settings as a Lua script, local modules and folder plugins.'),
   page('Configure', 'server-list', 'Server list and tab list', 'MOTD, favicon and player count; tab list header, footer and network-wide players.'),
-  page('Configure', 'text', 'Styled text', 'Markup, legacy codes, themes and translating Rift\'s own messages.'),
+  page('Configure', 'text', 'Styled text', 'Markup, legacy codes, the theme, and Rift\'s and plugins\' messages in each player\'s language.'),
   page('Configure', 'translation', 'Protocol translation', 'Players and backends on different Minecraft versions.'),
   page('Configure', 'bungeecord', 'BungeeCord compatibility', 'Transfers, queries, forwarding, messages and kicks for existing Bukkit/Paper plugins.'),
 

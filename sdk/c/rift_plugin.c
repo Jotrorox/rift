@@ -3,192 +3,206 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Imported Functions from `rift:plugin/players@0.2.0`
+// Imported Functions from `rift:plugin/players@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("list")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("list")))
 extern void __wasm_import_rift_plugin_players_list(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("get")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("get")))
 extern void __wasm_import_rift_plugin_players_get(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("names")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("names")))
 extern void __wasm_import_rift_plugin_players_names(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("message")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("message")))
 extern void __wasm_import_rift_plugin_players_message(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("action-bar")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("action-bar")))
 extern void __wasm_import_rift_plugin_players_action_bar(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("title")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("title")))
 extern void __wasm_import_rift_plugin_players_title(uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("tab-list")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("tab-list")))
 extern void __wasm_import_rift_plugin_players_tab_list(uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("boss-bar")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("boss-bar")))
 extern void __wasm_import_rift_plugin_players_boss_bar(uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, float, uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("kick")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("kick")))
 extern void __wasm_import_rift_plugin_players_kick(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("dialog")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("dialog")))
 extern void __wasm_import_rift_plugin_players_dialog(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("clear-dialog")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("clear-dialog")))
 extern void __wasm_import_rift_plugin_players_clear_dialog(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("transfer")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("transfer")))
 extern void __wasm_import_rift_plugin_players_transfer(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("broadcast")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("broadcast")))
 extern void __wasm_import_rift_plugin_players_broadcast(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("lookup")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("lookup")))
 extern void __wasm_import_rift_plugin_players_lookup(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("search")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("search")))
 extern void __wasm_import_rift_plugin_players_search(uint8_t *, size_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("set-language")))
+__attribute__((__import_module__("rift:plugin/players@0.2.1"), __import_name__("set-language")))
 extern void __wasm_import_rift_plugin_players_set_language(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/store@0.2.0`
+// Imported Functions from `rift:plugin/store@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("get")))
+__attribute__((__import_module__("rift:plugin/store@0.2.1"), __import_name__("get")))
 extern void __wasm_import_rift_plugin_store_get(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("set")))
+__attribute__((__import_module__("rift:plugin/store@0.2.1"), __import_name__("set")))
 extern void __wasm_import_rift_plugin_store_set(uint8_t *, size_t, uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("delete")))
+__attribute__((__import_module__("rift:plugin/store@0.2.1"), __import_name__("delete")))
 extern void __wasm_import_rift_plugin_store_delete(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("increment")))
+__attribute__((__import_module__("rift:plugin/store@0.2.1"), __import_name__("increment")))
 extern void __wasm_import_rift_plugin_store_increment(uint8_t *, size_t, uint8_t *, size_t, int64_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("list")))
+__attribute__((__import_module__("rift:plugin/store@0.2.1"), __import_name__("list")))
 extern void __wasm_import_rift_plugin_store_list(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/permissions@0.2.0`
+// Imported Functions from `rift:plugin/permissions@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("has")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("has")))
 extern int32_t __wasm_import_rift_plugin_permissions_has(uint8_t *, size_t, uint8_t *, size_t);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("set")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("set")))
 extern void __wasm_import_rift_plugin_permissions_set(uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("add-group")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("add-group")))
 extern void __wasm_import_rift_plugin_permissions_add_group(uint8_t *, size_t, uint8_t *, size_t, int32_t, int64_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("remove-group")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("remove-group")))
 extern void __wasm_import_rift_plugin_permissions_remove_group(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("groups")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("groups")))
 extern void __wasm_import_rift_plugin_permissions_groups(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("list-groups")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("list-groups")))
 extern void __wasm_import_rift_plugin_permissions_list_groups(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("meta")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("meta")))
 extern void __wasm_import_rift_plugin_permissions_meta(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("set-meta")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.1"), __import_name__("set-meta")))
 extern void __wasm_import_rift_plugin_permissions_set_meta(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, int64_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/bus@0.2.0`
+// Imported Functions from `rift:plugin/bus@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("publish")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.1"), __import_name__("publish")))
 extern void __wasm_import_rift_plugin_bus_publish(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("request")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.1"), __import_name__("request")))
 extern void __wasm_import_rift_plugin_bus_request(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("subscribe")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.1"), __import_name__("subscribe")))
 extern void __wasm_import_rift_plugin_bus_subscribe(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("unsubscribe")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.1"), __import_name__("unsubscribe")))
 extern int32_t __wasm_import_rift_plugin_bus_unsubscribe(int64_t);
 
-__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("stream-publish")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.1"), __import_name__("stream-publish")))
 extern void __wasm_import_rift_plugin_bus_stream_publish(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/servers@0.2.0`
+// Imported Functions from `rift:plugin/servers@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("create")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("create")))
 extern void __wasm_import_rift_plugin_servers_create(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("remove")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("remove")))
 extern void __wasm_import_rift_plugin_servers_remove(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("start")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("start")))
 extern void __wasm_import_rift_plugin_servers_start(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("stop")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("stop")))
 extern void __wasm_import_rift_plugin_servers_stop(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("download")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("download")))
 extern void __wasm_import_rift_plugin_servers_download(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("control")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.1"), __import_name__("control")))
 extern void __wasm_import_rift_plugin_servers_control(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/timers@0.2.0`
+// Imported Functions from `rift:plugin/timers@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("every")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.1"), __import_name__("every")))
 extern int64_t __wasm_import_rift_plugin_timers_every(int32_t);
 
-__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("after")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.1"), __import_name__("after")))
 extern int64_t __wasm_import_rift_plugin_timers_after(int32_t);
 
-__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("cancel")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.1"), __import_name__("cancel")))
 extern int32_t __wasm_import_rift_plugin_timers_cancel(int64_t);
 
-// Imported Functions from `rift:plugin/background@0.2.0`
+// Imported Functions from `rift:plugin/background@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("defer")))
+__attribute__((__import_module__("rift:plugin/background@0.2.1"), __import_name__("defer")))
 extern void __wasm_import_rift_plugin_background_defer(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("resolve")))
+__attribute__((__import_module__("rift:plugin/background@0.2.1"), __import_name__("resolve")))
 extern void __wasm_import_rift_plugin_background_resolve(int64_t, int32_t, uint8_t *, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("run")))
+__attribute__((__import_module__("rift:plugin/background@0.2.1"), __import_name__("run")))
 extern void __wasm_import_rift_plugin_background_run(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("is-worker")))
+__attribute__((__import_module__("rift:plugin/background@0.2.1"), __import_name__("is-worker")))
 extern int32_t __wasm_import_rift_plugin_background_is_worker(void);
 
-// Imported Functions from `rift:plugin/log@0.2.0`
+// Imported Functions from `rift:plugin/log@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/log@0.2.0"), __import_name__("log")))
+__attribute__((__import_module__("rift:plugin/log@0.2.1"), __import_name__("log")))
 extern void __wasm_import_rift_plugin_log_log(int32_t, uint8_t *, size_t);
 
-// Imported Functions from `rift:plugin/meta@0.2.0`
+// Imported Functions from `rift:plugin/meta@0.2.1`
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("name")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("name")))
 extern void __wasm_import_rift_plugin_meta_name(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("version")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("version")))
 extern void __wasm_import_rift_plugin_meta_version(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("data-dir")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("data-dir")))
 extern void __wasm_import_rift_plugin_meta_data_dir(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("config-dir")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("config-dir")))
 extern void __wasm_import_rift_plugin_meta_config_dir(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("clock")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("clock")))
 extern double __wasm_import_rift_plugin_meta_clock(void);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("time")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("time")))
 extern int64_t __wasm_import_rift_plugin_meta_time(void);
 
-__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("api")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.1"), __import_name__("api")))
 extern void __wasm_import_rift_plugin_meta_api(uint8_t *);
 
-// Exported Functions from `rift:plugin/handler@0.2.0`
+// Imported Functions from `rift:plugin/text@0.2.1`
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#init")))
+__attribute__((__import_module__("rift:plugin/text@0.2.1"), __import_name__("render")))
+extern void __wasm_import_rift_plugin_text_render(int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/text@0.2.1"), __import_name__("plain")))
+extern void __wasm_import_rift_plugin_text_plain(int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/text@0.2.1"), __import_name__("to-legacy")))
+extern void __wasm_import_rift_plugin_text_to_legacy(int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/text@0.2.1"), __import_name__("to-mini")))
+extern void __wasm_import_rift_plugin_text_to_mini(int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
+
+// Exported Functions from `rift:plugin/handler@0.2.1`
+
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#init")))
 void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -268,7 +282,7 @@ void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) 
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#reload")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#reload")))
 void __wasm_export_exports_rift_plugin_handler_reload_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -284,7 +298,7 @@ void __wasm_export_exports_rift_plugin_handler_reload_post_return(uint8_t * arg0
 }
 
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#route")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#route")))
 void __wasm_export_exports_rift_plugin_handler_route_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -313,7 +327,7 @@ void __wasm_export_exports_rift_plugin_handler_route_post_return(uint8_t * arg0)
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#login")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#login")))
 void __wasm_export_exports_rift_plugin_handler_login_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -371,7 +385,7 @@ void __wasm_export_exports_rift_plugin_handler_login_post_return(uint8_t * arg0)
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#initial-server")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#initial-server")))
 void __wasm_export_exports_rift_plugin_handler_initial_server_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -429,7 +443,7 @@ void __wasm_export_exports_rift_plugin_handler_initial_server_post_return(uint8_
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#before-transfer")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#before-transfer")))
 void __wasm_export_exports_rift_plugin_handler_before_transfer_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -487,7 +501,7 @@ void __wasm_export_exports_rift_plugin_handler_before_transfer_post_return(uint8
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#command")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#command")))
 void __wasm_export_exports_rift_plugin_handler_command_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -545,7 +559,7 @@ void __wasm_export_exports_rift_plugin_handler_command_post_return(uint8_t * arg
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#suggest")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#suggest")))
 void __wasm_export_exports_rift_plugin_handler_suggest_post_return(uint8_t * arg0) {
   size_t len = *((size_t*) (arg0 + sizeof(void*)));
   if (len > 0) {
@@ -583,7 +597,7 @@ void __wasm_export_exports_rift_plugin_handler_suggest_post_return(uint8_t * arg
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#status")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#status")))
 void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -681,7 +695,7 @@ void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#http")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#http")))
 void __wasm_export_exports_rift_plugin_handler_http_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -699,7 +713,7 @@ void __wasm_export_exports_rift_plugin_handler_http_post_return(uint8_t * arg0) 
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#chat")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#chat")))
 void __wasm_export_exports_rift_plugin_handler_chat_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -757,7 +771,7 @@ void __wasm_export_exports_rift_plugin_handler_chat_post_return(uint8_t * arg0) 
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#kick")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#kick")))
 void __wasm_export_exports_rift_plugin_handler_kick_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -823,7 +837,7 @@ void __wasm_export_exports_rift_plugin_handler_kick_post_return(uint8_t * arg0) 
 
 
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#work-init")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#work-init")))
 void __wasm_export_exports_rift_plugin_handler_work_init_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -838,7 +852,7 @@ void __wasm_export_exports_rift_plugin_handler_work_init_post_return(uint8_t * a
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#work")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.1#work")))
 void __wasm_export_exports_rift_plugin_handler_work_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -1374,6 +1388,10 @@ void rift_plugin_servers_result_string_string_free(rift_plugin_servers_result_st
 
 void rift_plugin_background_decision_free(rift_plugin_background_decision_t *ptr) {
   rift_plugin_types_decision_free(ptr);
+}
+
+void rift_plugin_text_text_free(rift_plugin_text_text_t *ptr) {
+  rift_plugin_types_text_free(ptr);
 }
 
 void exports_rift_plugin_handler_context_free(exports_rift_plugin_handler_context_t *ptr) {
@@ -3289,7 +3307,259 @@ void rift_plugin_meta_api(rift_plugin_string_t *ret) {
   *ret = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#init")))
+bool rift_plugin_text_render(rift_plugin_text_text_t *text, rift_plugin_string_t *maybe_language, rift_plugin_string_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_string_t language;
+  language.is_some = maybe_language != NULL;if (maybe_language) {
+    language.val = *maybe_language;
+  }
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
+  int32_t option;
+  uint8_t * option5;
+  size_t option6;
+  if ((language).is_some) {
+    const rift_plugin_string_t *payload4 = &(language).val;
+    option = 1;
+    option5 = (uint8_t *) (*payload4).ptr;
+    option6 = (*payload4).len;
+  } else {
+    option = 0;
+    option5 = 0;
+    option6 = 0;
+  }
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_text_render(variant, variant1, variant2, option, option5, option6, ptr);
+  rift_plugin_servers_result_string_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_text_plain(rift_plugin_text_text_t *text, rift_plugin_string_t *maybe_language, rift_plugin_string_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_string_t language;
+  language.is_some = maybe_language != NULL;if (maybe_language) {
+    language.val = *maybe_language;
+  }
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
+  int32_t option;
+  uint8_t * option5;
+  size_t option6;
+  if ((language).is_some) {
+    const rift_plugin_string_t *payload4 = &(language).val;
+    option = 1;
+    option5 = (uint8_t *) (*payload4).ptr;
+    option6 = (*payload4).len;
+  } else {
+    option = 0;
+    option5 = 0;
+    option6 = 0;
+  }
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_text_plain(variant, variant1, variant2, option, option5, option6, ptr);
+  rift_plugin_servers_result_string_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_text_to_legacy(rift_plugin_text_text_t *text, rift_plugin_string_t *maybe_language, rift_plugin_string_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_string_t language;
+  language.is_some = maybe_language != NULL;if (maybe_language) {
+    language.val = *maybe_language;
+  }
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
+  int32_t option;
+  uint8_t * option5;
+  size_t option6;
+  if ((language).is_some) {
+    const rift_plugin_string_t *payload4 = &(language).val;
+    option = 1;
+    option5 = (uint8_t *) (*payload4).ptr;
+    option6 = (*payload4).len;
+  } else {
+    option = 0;
+    option5 = 0;
+    option6 = 0;
+  }
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_text_to_legacy(variant, variant1, variant2, option, option5, option6, ptr);
+  rift_plugin_servers_result_string_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_text_to_mini(rift_plugin_text_text_t *text, rift_plugin_string_t *maybe_language, rift_plugin_string_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_string_t language;
+  language.is_some = maybe_language != NULL;if (maybe_language) {
+    language.val = *maybe_language;
+  }
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
+  int32_t option;
+  uint8_t * option5;
+  size_t option6;
+  if ((language).is_some) {
+    const rift_plugin_string_t *payload4 = &(language).val;
+    option = 1;
+    option5 = (uint8_t *) (*payload4).ptr;
+    option6 = (*payload4).len;
+  } else {
+    option = 0;
+    option5 = 0;
+    option6 = 0;
+  }
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_text_to_mini(variant, variant1, variant2, option, option5, option6, ptr);
+  rift_plugin_servers_result_string_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#init")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_init(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_registration_string_t ret;
@@ -3317,7 +3587,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_init(uint8_t * arg, size_t a
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#reload")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#reload")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_reload(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_void_string_t ret;
@@ -3337,13 +3607,13 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_reload(uint8_t * arg, size_t
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#shutdown")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#shutdown")))
 void __wasm_export_exports_rift_plugin_handler_shutdown(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_shutdown(&arg1);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#route")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#route")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_route(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, uint8_t * arg3, size_t arg4, int32_t arg5, uint8_t * arg6, size_t arg7, uint8_t * arg8, size_t arg9, int32_t arg10, int32_t arg11, uint8_t * arg12, size_t arg13) {
   rift_plugin_option_string_t option;
   switch (arg11) {
@@ -3399,7 +3669,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_route(uint8_t * arg, size_t 
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#login")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#login")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -3578,7 +3848,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#initial-server")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#initial-server")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -3757,7 +4027,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#before-transfer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#before-transfer")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -3936,7 +4206,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * ar
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#command")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#command")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4115,7 +4385,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#suggest")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#suggest")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4230,7 +4500,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#status")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#status")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_status(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, int32_t arg3, uint8_t * arg4, size_t arg5, int32_t arg6, uint8_t * arg7, size_t arg8, int32_t arg9, int64_t arg10, int64_t arg11) {
   rift_plugin_option_string_t option;
   switch (arg6) {
@@ -4351,7 +4621,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_status(uint8_t * arg, size_t
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#http")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#http")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_http(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, uint8_t * arg3, size_t arg4, uint8_t * arg5, size_t arg6, uint8_t * arg7, size_t arg8, uint8_t * arg9, size_t arg10) {
   exports_rift_plugin_handler_http_request_t arg11 = (rift_plugin_types_http_request_t) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) },
@@ -4382,7 +4652,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_http(uint8_t * arg, size_t a
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#chat")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#chat")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_chat(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4565,7 +4835,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_chat(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#kick")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#kick")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_kick(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4744,7 +5014,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_kick(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#join")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#join")))
 void __wasm_export_exports_rift_plugin_handler_join(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4854,7 +5124,7 @@ void __wasm_export_exports_rift_plugin_handler_join(uint8_t * arg) {
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#after-transfer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#after-transfer")))
 void __wasm_export_exports_rift_plugin_handler_after_transfer(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4964,7 +5234,7 @@ void __wasm_export_exports_rift_plugin_handler_after_transfer(uint8_t * arg) {
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#disconnect")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#disconnect")))
 void __wasm_export_exports_rift_plugin_handler_disconnect(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -5074,7 +5344,7 @@ void __wasm_export_exports_rift_plugin_handler_disconnect(uint8_t * arg) {
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#message")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#message")))
 void __wasm_export_exports_rift_plugin_handler_message(int64_t arg, uint8_t * arg0, size_t arg1, uint8_t * arg2, size_t arg3, int32_t arg4, uint8_t * arg5, size_t arg6) {
   rift_plugin_option_string_t option;
   switch (arg4) {
@@ -5097,12 +5367,12 @@ void __wasm_export_exports_rift_plugin_handler_message(int64_t arg, uint8_t * ar
   exports_rift_plugin_handler_message(&arg7);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#timer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#timer")))
 void __wasm_export_exports_rift_plugin_handler_timer(int64_t arg) {
   exports_rift_plugin_handler_timer((uint64_t) (arg));
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#event")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#event")))
 void __wasm_export_exports_rift_plugin_handler_event(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2) {
   exports_rift_plugin_handler_rift_event_t arg3 = (rift_plugin_types_rift_event_t) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) },
@@ -5111,7 +5381,7 @@ void __wasm_export_exports_rift_plugin_handler_event(uint8_t * arg, size_t arg0,
   exports_rift_plugin_handler_event(&arg3);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#dialog")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#dialog")))
 void __wasm_export_exports_rift_plugin_handler_dialog(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -5238,7 +5508,7 @@ void __wasm_export_exports_rift_plugin_handler_dialog(uint8_t * arg) {
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#job-done")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#job-done")))
 void __wasm_export_exports_rift_plugin_handler_job_done(int64_t arg, int32_t arg0, uint8_t * arg1, size_t arg2) {
   exports_rift_plugin_handler_result_list_u8_string_t result;
   switch (arg0) {
@@ -5257,7 +5527,7 @@ void __wasm_export_exports_rift_plugin_handler_job_done(int64_t arg, int32_t arg
   exports_rift_plugin_handler_job_done((uint64_t) (arg), &arg3);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#work-init")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#work-init")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_work_init(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_void_string_t ret;
@@ -5277,7 +5547,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_work_init(uint8_t * arg, siz
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.2.0#work")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.1#work")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_work(uint8_t * arg, size_t arg0) {
   rift_plugin_list_u8_t arg1 = (rift_plugin_list_u8_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_list_u8_string_t ret;

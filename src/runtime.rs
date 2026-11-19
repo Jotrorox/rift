@@ -3479,6 +3479,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     if let Some(warning) = crate::check::offline_mode(&snapshot.config) {
         log_warn!("{warning}");
     }
+    for warning in snapshot.config.text.warnings() {
+        log_warn!("{warning}");
+    }
     for (name, listener) in listeners {
         log_info!("listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
@@ -3738,6 +3741,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 let was_online = snapshot.config.authentication.online_mode;
                 publish(&mut snapshot, next, &current, &mut health, &metrics).await;
                 if was_online && let Some(warning) = crate::check::offline_mode(&snapshot.config) {
+                    log_warn!("{warning}");
+                }
+                for warning in snapshot.config.text.warnings() {
                     log_warn!("{warning}");
                 }
                 // A configuration-derived write: the leader's in a cluster.

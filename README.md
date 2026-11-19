@@ -29,7 +29,8 @@ Running Rift needs no Java and no separate Lua installation.
 - **[Server list and tab list](docs/server-list.md):** network MOTD and
   favicon; tab list header, footer and network-wide players.
 - **[Styled text](docs/text.md):** markup such as
-  `<gradient:gold:red>Welcome</gradient>` in every text a player sees.
+  `<gradient:gold:red>Welcome</gradient>` in every text a player sees, and
+  Rift's and plugins' messages in each player's language.
 - **[Dialogs](docs/dialogs.md):** 1.21.6+ screens with inputs and buttons.
 - **[Clustering](docs/clustering.md):** several proxies that all accept
   players, with one player list, a shared bus and replicated state, and no

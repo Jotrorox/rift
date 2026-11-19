@@ -1006,6 +1006,19 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
     let port = fixture.peer(drained).game;
     let mut modern = login_accepted(&fixture, port, "Modern", 766, NextState::Login);
     let mut legacy = login_accepted(&fixture, port, "Legacy", 47, NextState::Login);
+    // A client has its Login Success before the peer lists the player (the
+    // name's claim commits in between), and leaving hands off only the
+    // players it lists.
+    fixture.wait_until(&format!("{drained} to list both players"), || {
+        let reply = fixture
+            .http(drained, "GET", "/api/players", None)
+            .filter(|reply| reply.status == 200)?;
+        let players = reply.body["players"].as_array()?;
+        ["Modern", "Legacy"]
+            .iter()
+            .all(|name| players.iter().any(|player| player["name"] == *name))
+            .then_some(())
+    });
     let left = fixture
         .admin(&leader, &["cluster", "leave", drained])
         .unwrap_or_else(|error| panic!("cluster leave: {error}"));

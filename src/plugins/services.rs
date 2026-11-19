@@ -20,7 +20,7 @@ use crate::{
     extensions::{PlayerAction, Players, storage::Store},
     messaging::{Broker, Error as BusError, Stream, SubscribeOptions, SubscriptionScope},
     permissions::Authority,
-    text::Text,
+    text::{Text, Unrendered},
 };
 use bytes::Bytes;
 use rift_permissions::{
@@ -198,6 +198,21 @@ impl Services {
         MetaApi(&self.0)
     }
 
+    /// `text.render`, `plain`, `to-legacy` and `to-mini`: `text` as written,
+    /// with markup, legacy codes and this plugin's messages (when
+    /// unqualified) resolved in `language` or the default, written in
+    /// `form`. The same as `rift.text` in a Lua plugin, and independent of
+    /// any hook, so it works in `init`, `reload` and background workers.
+    pub fn text(
+        &self,
+        text: &Text,
+        language: Option<&str>,
+        form: crate::text::Form,
+        label: &str,
+    ) -> Result<String, String> {
+        crate::text::convert(text, Some(self.0.spec.name.as_str()), language, form, label)
+    }
+
     pub fn cluster(&self) -> ClusterApi<'_> {
         ClusterApi(&self.0)
     }
@@ -301,6 +316,14 @@ impl PlayersApi<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// Run `convert`, which turns this plugin's text for `target` into
+    /// [`Text`], so that a `message` object in it is one of this plugin's
+    /// (when unqualified) in the target's language.
+    pub fn for_target<R>(&self, target: &str, convert: impl FnOnce() -> R) -> R {
+        self.players()
+            .rendering_for(Some(self.0.spec.name.as_str()), target, convert)
+    }
+
     pub fn list(&self, server: Option<&str>) -> Result<Vec<PlayerInfo>, String> {
         self.players().list(server)
     }
@@ -319,10 +342,11 @@ impl PlayersApi<'_> {
 
     /// `players.message-json`: a JSON text component.
     pub fn message_json(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.message_text(target, Text::json(message, "message")?)
+        let message = self.for_target(target, || Text::json(message, "message"))?;
+        self.message_text(target, message)
     }
 
-    /// A message already checked by [`Text`].
+    /// A message already checked by [`Text`] (see [`PlayersApi::for_target`]).
     pub fn message_text(&self, target: &str, message: Text) -> Result<bool, String> {
         self.send(target, PlayerAction::Message(message))
     }
@@ -333,7 +357,8 @@ impl PlayersApi<'_> {
 
     /// `players.action-bar-json`: a JSON text component.
     pub fn action_bar_json(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.action_bar_text(target, Text::json(message, "action bar text")?)
+        let message = self.for_target(target, || Text::json(message, "action bar text"))?;
+        self.action_bar_text(target, message)
     }
 
     /// An action bar already checked by [`Text`].
@@ -361,7 +386,7 @@ impl PlayersApi<'_> {
             if text.is_empty() {
                 Ok(Text::Plain(String::new()))
             } else {
-                Text::json(text, label)
+                self.for_target(target, || Text::json(text, label))
             }
         };
         self.title(
@@ -387,14 +412,16 @@ impl PlayersApi<'_> {
         let action = if header_json.is_none() && footer_json.is_none() {
             PlayerAction::TabList(None)
         } else {
-            PlayerAction::TabList(Some(crate::tab_list::Override {
-                header: header_json
-                    .map(|header| component(header, "tab list header"))
-                    .transpose()?,
-                footer: footer_json
-                    .map(|footer| component(footer, "tab list footer"))
-                    .transpose()?,
-            }))
+            self.for_target(target, || -> Result<_, String> {
+                Ok(PlayerAction::TabList(Some(crate::tab_list::Override {
+                    header: header_json
+                        .map(|header| component(header, "tab list header"))
+                        .transpose()?,
+                    footer: footer_json
+                        .map(|footer| component(footer, "tab list footer"))
+                        .transpose()?,
+                })))
+            })?
         };
         self.send(target, action)
     }
@@ -405,8 +432,8 @@ impl PlayersApi<'_> {
         name: &str,
         bar: Option<&BossBarSpec>,
     ) -> Result<bool, String> {
-        let bar = bar
-            .map(|bar| -> Result<_, String> {
+        let bar = self.for_target(target, || {
+            bar.map(|bar| -> Result<_, String> {
                 if !(0.0..=1.0).contains(&bar.progress) {
                     return Err("boss bar progress must be a number from 0 to 1".into());
                 }
@@ -430,7 +457,8 @@ impl PlayersApi<'_> {
                     flags,
                 })
             })
-            .transpose()?;
+            .transpose()
+        })?;
         self.players()
             .boss_bar(target, name, bar)
             .map_err(str::to_owned)
@@ -439,10 +467,12 @@ impl PlayersApi<'_> {
     /// `players.dialog`: show a dialog given as JSON (the vanilla dialog
     /// format). Clicks on its plugin actions come back to this plugin.
     pub fn dialog(&self, target: &str, dialog_json: &str) -> Result<bool, String> {
-        self.show_dialog(target, crate::dialog::Dialog::parse_json(dialog_json)?)
+        let dialog = self.for_target(target, || crate::dialog::Dialog::parse_json(dialog_json))?;
+        self.show_dialog(target, dialog)
     }
 
-    /// Show an already validated dialog on behalf of this plugin.
+    /// Show an already validated dialog on behalf of this plugin (see
+    /// [`PlayersApi::for_target`]).
     pub fn show_dialog(&self, target: &str, dialog: crate::dialog::Dialog) -> Result<bool, String> {
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
         self.players()
@@ -497,7 +527,8 @@ impl PlayersApi<'_> {
 
     /// `players.kick-json`: a JSON text component.
     pub fn kick_json(&self, target: &str, reason: &str) -> Result<bool, String> {
-        self.kick_text(target, Text::json(reason, "kick reason")?)
+        let reason = self.for_target(target, || Text::json(reason, "kick reason"))?;
+        self.kick_text(target, reason)
     }
 
     /// A kick reason already checked by [`Text`].
@@ -516,7 +547,7 @@ impl PlayersApi<'_> {
 
     /// `players.broadcast-json`: a JSON text component.
     pub fn broadcast_json(&self, message: &str) -> Result<u32, String> {
-        self.broadcast_text(Text::json(message, "message")?, None)
+        self.broadcast_text(Text::json_as_written(message, "message")?, None)
     }
 
     /// Like [`PlayersApi::broadcast`], only to the players on one server or
@@ -525,9 +556,12 @@ impl PlayersApi<'_> {
         self.broadcast_text(Text::plain(message, "message")?, server)
     }
 
-    /// A message already checked by [`Text`], to everyone or to the players
-    /// on one server or service group.
+    /// A message as written ([`Text::json_as_written`],
+    /// [`Text::lua_as_written`] or plain text), to everyone or to the
+    /// players on one server or service group. It is checked here, and a
+    /// `message` object in it renders in each recipient's language.
     pub fn broadcast_text(&self, message: Text, server: Option<&str>) -> Result<u32, String> {
+        let message = Unrendered::new(message, Some(self.0.spec.name.as_str()), "message")?;
         self.players()
             .broadcast(&message, server)
             .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
@@ -1192,6 +1226,18 @@ impl BackgroundApi<'_> {
         let ticket = self.0.handle();
         self.0.shared.background.defer(ticket)?;
         Ok(ticket)
+    }
+
+    /// Run `convert`, which turns the text of the answer for `ticket` into
+    /// [`Text`], with this plugin's namespace and the language of the
+    /// player the deferred call is about.
+    pub fn for_ticket<R>(&self, ticket: u64, convert: impl FnOnce() -> R) -> R {
+        let language = self.0.shared.background.language(ticket);
+        crate::text::rendering(
+            Some(self.0.spec.name.as_str()),
+            language.as_deref(),
+            convert,
+        )
     }
 
     /// `resolve`: answer a deferred hook. False when nobody waits for the

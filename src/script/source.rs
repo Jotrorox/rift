@@ -4,6 +4,7 @@
 //! Persistent ones are trusted code that must never run in the configuration
 //! sandbox, so only their manifest is captured, with a fingerprint of the
 //! folder for the reload diff. `mode = "script"` folders load as before.
+//! Any plugin folder's `messages.toml` is captured too, parsed but not run.
 use std::{
     collections::BTreeMap,
     fs,
@@ -14,6 +15,7 @@ use std::{
 
 use super::MAX_SOURCE_BYTES;
 use crate::plugins::manifest::{self, Manifest, Mode};
+use crate::text::messages::{self, Messages};
 
 const MAX_ENTRIES: usize = 1024;
 const MAX_FILES: usize = 256;
@@ -47,6 +49,9 @@ pub(crate) struct ScriptSource {
     pub files: Arc<BTreeMap<String, SourceFile>>,
     /// `plugins/<name>/plugin.toml` by folder name.
     pub installed: Arc<BTreeMap<String, InstalledPlugin>>,
+    /// `plugins/<name>/messages.toml` by folder name, persistent or script
+    /// mode, or why it cannot be used. Folders without one are absent.
+    pub plugin_messages: Arc<BTreeMap<String, Result<Messages, String>>>,
 }
 
 impl ScriptSource {
@@ -62,6 +67,7 @@ impl ScriptSource {
                 .to_owned(),
             files: Arc::new(BTreeMap::new()),
             installed: Arc::new(BTreeMap::new()),
+            plugin_messages: Arc::new(BTreeMap::new()),
         }
     }
 
@@ -87,6 +93,7 @@ impl ScriptSource {
         }
         let files = Arc::make_mut(&mut snapshot.files);
         let installed = Arc::make_mut(&mut snapshot.installed);
+        let plugin_messages = Arc::make_mut(&mut snapshot.plugin_messages);
         for directory in ["lua", "plugins"] {
             match fs::symlink_metadata(root.join(directory)) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -97,9 +104,14 @@ impl ScriptSource {
                         root.join(directory).display()
                     )));
                 }
-                Ok(_) if directory == "plugins" => {
-                    collect_plugins(root, files, installed, &mut bytes, &mut entries)?
-                }
+                Ok(_) if directory == "plugins" => collect_plugins(
+                    root,
+                    files,
+                    installed,
+                    plugin_messages,
+                    &mut bytes,
+                    &mut entries,
+                )?,
                 Ok(_) => collect(root, directory, 0, files, &mut bytes, &mut entries)?,
             }
         }
@@ -112,6 +124,7 @@ fn collect_plugins(
     root: &Path,
     files: &mut BTreeMap<String, SourceFile>,
     installed: &mut BTreeMap<String, InstalledPlugin>,
+    plugin_messages: &mut BTreeMap<String, Result<Messages, String>>,
     bytes: &mut usize,
     entries: &mut usize,
 ) -> io::Result<()> {
@@ -139,8 +152,14 @@ fn collect_plugins(
         }
         let folder = root.join(&relative);
         let manifest_path = folder.join(manifest::FILE);
-        let is_plugin = fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir())
-            && fs::symlink_metadata(&manifest_path).is_ok_and(|meta| meta.is_file());
+        let is_folder = fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir());
+        // Read whether or not the folder is a plugin: an `init.lua` alone
+        // makes a script-mode one.
+        if is_folder && let Some(catalog) = messages::read(&folder, name) {
+            plugin_messages.insert(name.to_owned(), catalog);
+        }
+        let is_plugin =
+            is_folder && fs::symlink_metadata(&manifest_path).is_ok_and(|meta| meta.is_file());
         if !is_plugin {
             collect(root, &relative, 1, files, bytes, entries)?;
             continue;
@@ -184,7 +203,9 @@ const MAX_PLUGIN_BYTES: u64 = 1024 * 1024 * 1024;
 /// may not contain symbolic links (an artifact must not escape it). Hidden
 /// (dot) entries and the top-level `data/` are not hashed; a hidden entry may
 /// not be a symbolic link either, and the manifest keeps the entry out of
-/// both.
+/// both. The top-level `messages.toml` is not hashed either: it is read with
+/// the configuration, so a changed one takes effect on a reload without
+/// restarting the plugin.
 fn fingerprint(folder: &Path, manifest: &Manifest) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     let fail =
@@ -208,7 +229,7 @@ fn fingerprint(folder: &Path, manifest: &Manifest) -> Result<String, String> {
             let Some(name) = name.to_str() else {
                 return Err(fail(&directory, &"plugin paths must be UTF-8"));
             };
-            if relative.as_os_str().is_empty() && name == "data" {
+            if relative.as_os_str().is_empty() && (name == "data" || name == messages::FILE) {
                 continue;
             }
             let child = relative.join(name);

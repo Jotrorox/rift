@@ -13,7 +13,9 @@
 //     other hook.
 // - login(ctx) returns deny("You are not welcome here.") when ctx.name equals
 //   the configured `deny` name exactly, otherwise continue.
-// - command(ctx) returns message("Hello, <ctx.name>!").
+// - command(ctx) returns the message `greeting` with the argument `name` set
+//   to ctx.name, which Rift renders from messages.toml in the player's
+//   language ("Hello, <ctx.name>!" by default).
 // - join(ctx) calls players.message(ctx.uuid, "Welcome, <ctx.name>!"), then
 //   store.increment("hello", "joins", 1). Host errors are ignored.
 // - message(msg): when msg.reply is set, publishes msg.payload unchanged to
@@ -78,7 +80,14 @@ void exports_rift_plugin_handler_login(rift_context_t *ctx, rift_decision_t *ret
 }
 
 void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_decision_t *ret) {
-  rift_decision_message_fmt(ret, "Hello, " RIFT_STR_FMT "!", RIFT_STR_ARG(ctx->name));
+  // The text lives in messages.toml, translated per player.
+  char *name = rift_string_cstr(&ctx->name);
+  rift_msg_t greeting = rift_msg("greeting");
+  rift_msg_arg(&greeting, "name", name);
+  char *json = rift_msg_finish(&greeting);
+  rift_decision_message(ret, rift_text_json(json));  // copies
+  free(json);
+  free(name);
   rift_context_free(ctx);
 }
 

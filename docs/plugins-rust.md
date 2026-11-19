@@ -33,7 +33,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = "0.2.0"
+rift-plugin = "0.2.1"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
@@ -44,12 +44,12 @@ strip = true
 ```
 
 - [`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
-  plugin contract (`rift:plugin@0.2.0`), not the proxy. Each published version
+  plugin contract (`rift:plugin@0.2.1`), not the proxy. Each published version
   has a `sdk/rust/v…` git tag. In a Rift checkout `{ path = "…/sdk/rust" }`
   works as well.
 - The release profile keeps the component small.
 - Check the result with `wasm-tools component wit my_plugin.wasm`: it exports
-  `rift:plugin/handler@0.2.0` and imports the `rift:plugin/*` interfaces it
+  `rift:plugin/handler@0.2.1` and imports the `rift:plugin/*` interfaces it
   uses.
 
 ## A minimal plugin
@@ -124,7 +124,7 @@ example and the host's conformance fixture.
 | `suggestion`, `status-override` | `Suggestion::new(text).tooltip(text)`; `StatusOverride { motd: Some(..), ..Default::default() }`. |
 | `title-spec`, `boss-bar-spec` | `TitleSpec::new(title).subtitle(sub).times(10, 70, 20)`, `TitleSpec::subtitle_only(sub)`; `BossBarSpec` is the plain record, its `text` a `Text`. |
 | configuration JSON | `rift_plugin::config::<T>(json)` decodes with serde. |
-| `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `background`, `meta` | Modules of the same names. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers; `meta::api()` is the host's `rift:plugin` version. |
+| `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `background`, `meta`, `text` | Modules of the same names. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers; `meta::api()` is the host's `rift:plugin` version. |
 | `log` | `log::info!` and friends: the SDK installs a logger before `init` (and before `work_init` on a worker). Also re-exported as `rift_plugin::log::info!`. |
 | `result<T, string>` | `Result<T, String>` with the host's message. |
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
@@ -140,7 +140,7 @@ constructors and builders take `impl Into<Text>`:
 | Value | Becomes |
 | --- | --- |
 | `&str`, `String` | plain text |
-| `text::mini(..)`, `text::legacy(..)`, `text::Component` | JSON text |
+| `text::mini(..)`, `text::legacy(..)`, `text::message(..)`, `text::Component` | JSON text |
 | `serde_json::Value` | JSON text |
 | `Text::json(string)` | JSON text you already hold as a string |
 
@@ -154,6 +154,18 @@ let welcome = text::mini("<gold>Welcome, <player>!</gold> <gray><click:run_comma
     .arg("player", &ctx.name)                                // shown as written, never parsed
     .arg_component("rank", text::legacy("&c[Admin]"));       // a component argument
 players::message(&ctx.uuid, welcome)?;
+
+// A style argument wraps what the template puts inside <team>...</team>.
+let tag = text::mini("<team>[<tag>]</team> <name>")
+    .arg_style("team", "<#55ffff><bold>")
+    .arg("tag", "RED")
+    .arg("name", &ctx.name);
+
+// A message from the plugin's messages.toml, written as {"message": "...", "args": {...}}.
+players::message(&ctx.uuid, text::message("invited").arg("from", "Alex"))?;
+
+// Text you splice into markup yourself: `<` becomes `\<` and `\` becomes `\\`.
+let safe = text::mini(format!("<gray>{}", text::escape(&motd_line)));
 
 // Legacy codes, written as {"legacy": "...", "marker": "&"}; `.marker('§')` for another marker.
 players::title(
@@ -172,16 +184,53 @@ let accept = text::Component::text("[Accept]")
 let reply = Action::message(accept);
 
 let tip = Suggestion::new("lobby").tooltip(text::mini("<gray>The <aqua>main</aqua> lobby"));
+
+// Other contents, styles and events.
+let joined = text::Component::translate("multiplayer.player.joined")
+    .with(text::Component::text("Alex").color("yellow"))
+    .fallback("Alex joined");
+let head = text::Component::head("Alex").hat(false).hover_entity("minecraft:player", &uuid);
+let diamond = text::Component::sprite("item/diamond")
+    .shadow("#000000", 0.5)
+    .hover_item("minecraft:diamond", 3);
 ```
 
 - `players::message`, `action_bar`, `kick` and `broadcast` take the text
   directly. `players::tab_list` takes `Option<Text>` for header and footer
   (both `None` restores the configured tab list). `players::title` and
   `players::boss_bar` take the records.
-- `text::Component` has `color`, `bold`, `italic`, `underlined`,
-  `strikethrough`, `obfuscated`, `run_command`, `suggest_command`, `open_url`,
-  `copy_to_clipboard`, `hover_text` (plain), `hover` (a component),
-  `insertion`, `extra` (a child) and `field` (any other key).
+- `text::mini` takes `arg` (shown as written), `arg_component` and
+  `arg_style` (a [style argument](text.md#style-arguments): markup made only of formatting
+  tags). `text::message(key)` takes the same three. A message comes from the
+  plugin's `messages.toml`; see [plugin messages](text.md#plugin-messages).
+- `text::escape(&str)` escapes text for splicing into markup. An argument
+  needs no escaping.
+- `text::render(text, language)`, `text::plain`, `text::to_legacy` and
+  `text::to_mini` (the contract's `text` interface, since 0.2.1: set
+  `min_api = "0.2.1"` in `plugin.toml`) ask Rift to convert text, with
+  markup, legacy codes and the plugin's messages resolved in `language`
+  (`Some("de")`) or the default. They take `impl Into<Text>` and return
+  `Result<String, String>`: compact JSON, the words, `§` codes or markup.
+  Use them for text that leaves through a bus payload, an HTTP response or
+  a log line, and in `init` to check a template from the configuration:
+
+  ```rust
+  // In init: a bad template in the configuration fails the start.
+  text::render(text::mini(&config.greeting), None)?;
+  // The plugin's own message `created` without formatting, in German.
+  let line = text::plain(text::message("created"), Some("de"))?;
+  ```
+- `text::Component` builds a component:
+
+  | Kind | Methods |
+  | --- | --- |
+  | Content | `text(s)`, `translate(key)` with `with(arg)` and `fallback(s)`, `keybind(key)`, `sprite(sprite)` with `atlas(atlas)`, `head(name)` with `hat(false)` |
+  | Style | `color`, `bold`, `italic`, `underlined`, `strikethrough`, `obfuscated`, `decoration(name, on)` (`decoration("italic", false)` turns it off), `font(id)`, `shadow("#rrggbb", opacity)`, `insertion` |
+  | Click | `run_command`, `suggest_command`, `open_url`, `copy_to_clipboard`, `change_page(page)` |
+  | Hover | `hover_text` (plain), `hover` (a component), `hover_item(id, count)`, `hover_entity(type, uuid)`, `hover_entity_named(type, uuid, name)` |
+  | Other | `extra` (a child), `field(key, value)` (any other key) |
+
+  Sprites and heads need 1.21.9 or newer; older clients drop them.
 - Every builder implements `Display` (its JSON) and converts into
   `serde_json::Value`, so builders nest.
 

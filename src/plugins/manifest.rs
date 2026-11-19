@@ -992,7 +992,17 @@ jit = false
             with("min_api = \"0.2.0\"").unwrap().min_api.as_deref(),
             Some("0.2.0")
         );
+        // 0.2.1 added the `text` interface; a plugin that calls it says so.
+        assert_eq!(
+            with("min_api = \"0.2.1\"").unwrap().min_api.as_deref(),
+            Some("0.2.1")
+        );
         assert_eq!(Manifest::parse(MINIMAL, "relaxoban").unwrap().min_api, None);
+        let newer = with("min_api = \"0.2.2\"").unwrap_err();
+        assert!(
+            newer.contains("needs rift:plugin 0.2.2") && newer.contains("implements 0.2.1"),
+            "{newer}"
+        );
         let newer = with("min_api = \"0.2.99\"").unwrap_err();
         assert!(
             newer.contains("needs rift:plugin 0.2.99") && newer.contains("Update Rift"),

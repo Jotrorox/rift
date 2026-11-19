@@ -991,6 +991,44 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
     );
 }
 
+/// `rift.lua` has no catalogue: it names any plugin's message by qualified
+/// key, rendered in the language of the player who sees it.
+#[tokio::test]
+async fn players_api_renders_qualified_messages_for_each_player() {
+    crate::text::catalog::install_test_catalog();
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        assert(players.message('Alice', { message = 'party:greet', args = { name = 'Bob' } }))
+        assert(players.kick('Bob', { message = 'party:greet', args = { name = 'Alice' } }))
+        assert(players.broadcast({ message = 'party:greet', args = { name = 'all' } }) == 2)
+        assert(players.broadcast({ text = 'plain' }) == 2)
+        return { deny = { message = 'party:denied' } }
+    end"#,
+    );
+    let (alice_handle, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    alice_handle.set_locale(Some("de_de"));
+    let (_bob_handle, mut bob) = joined(&runtime, 10, "Bob", "lobby");
+    let words = |queue: &mut tokio::sync::mpsc::Receiver<PlayerAction>| {
+        drain(queue)
+            .into_iter()
+            .map(|action| match action {
+                PlayerAction::Message(text) | PlayerAction::Kick(text) => text.to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut player = runtime.session(context(1)).unwrap();
+    player.context.language = Some("de".into());
+    let Action::Deny(reason) = player.decision("login").await.unwrap() else {
+        panic!("expected a denial");
+    };
+    // The decision is in the language of the player it is about.
+    assert_eq!(reason.to_string(), "Kein Zutritt.");
+    assert_eq!(words(&mut alice), ["Hallo Bob.", "Hallo all.", "plain"]);
+    assert_eq!(words(&mut bob), ["Hello Alice.", "Hello all.", "plain"]);
+}
+
 #[tokio::test]
 async fn players_api_takes_chat_component_tables_for_rich_text() {
     use crate::text::Text;

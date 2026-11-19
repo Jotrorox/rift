@@ -250,12 +250,17 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
         let manifest = &spec.manifest;
         let engine = manifest.engine.map_or("none", |engine| engine.name());
         lines.push(format!(
-            "plugin {} {}: mode persistent, engine {engine}, trusted; restart {}{}; capabilities {}",
+            "plugin {} {}: mode persistent, engine {engine}, trusted; restart {}{}; capabilities {}{}",
             spec.name,
             manifest.version,
             manifest.restart.name(),
             if manifest.hot_reload { ", hot reload" } else { "" },
-            manifest.describe_capabilities()
+            manifest.describe_capabilities(),
+            config
+                .text
+                .namespace(&spec.name)
+                .map(message_counts)
+                .unwrap_or_default()
         ));
         if let Some(kind) = manifest.engine
             && !engines.available(kind)
@@ -264,6 +269,16 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
                 "plugin {}: {}; startup and reload will refuse it",
                 spec.name,
                 rift::plugins::worker::Engines::unavailable(kind)
+            ));
+        }
+    }
+    // Script-mode plugins run inside the configuration script; only their
+    // catalogues are listed on their own.
+    for (name, messages) in config.text.namespaces() {
+        if !messages.is_empty() && !config.plugins.iter().any(|spec| spec.name == name) {
+            lines.push(format!(
+                "plugin {name}: mode script, sandboxed{}",
+                message_counts(messages)
             ));
         }
     }
@@ -281,6 +296,18 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
         );
     }
     (lines, warnings)
+}
+
+/// `; messages 3, languages 1` for a plugin with a `messages.toml`.
+fn message_counts(messages: &rift::text::messages::Messages) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+    format!(
+        "; messages {}, languages {}",
+        messages.len(),
+        messages.languages().count()
+    )
 }
 
 /// A cluster peer's own settings (`cluster.toml` beside `path`): the token
@@ -508,6 +535,9 @@ pub fn strict(config: &Config, path: &Path) -> Report {
             .into_iter()
             .filter(|warning| warning.contains("is not available")),
     );
+    // Replacements for a plugin that is not enabled: warnings in plain
+    // `rift check` and at load.
+    report.errors.extend(config.text.warnings().iter().cloned());
     #[cfg(feature = "wasm")]
     for spec in &config.plugins {
         if spec.manifest.engine == Some(rift::plugins::manifest::EngineKind::Wasm) {

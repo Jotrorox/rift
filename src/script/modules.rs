@@ -10,6 +10,11 @@ use super::{ScriptSource, check_deadline};
 #[derive(Debug, Default)]
 pub(crate) struct PersistentPlugins(pub Vec<(String, String)>);
 
+/// Script-mode plugins `rift.plugin(name, config)` loaded, in load order,
+/// so configuration evaluation finds their `messages.toml`.
+#[derive(Debug, Default)]
+pub(crate) struct ScriptPlugins(pub Vec<String>);
+
 /// The configuration table handed to a persistent plugin's `init`.
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const MAX_CONFIG_DEPTH: usize = 32;
@@ -168,6 +173,7 @@ pub(super) fn install(
     let files = source.files.clone();
     let installed = source.installed.clone();
     lua.set_app_data(PersistentPlugins::default());
+    lua.set_app_data(ScriptPlugins::default());
     api.raw_set(
         "plugin",
         lua.create_function(move |lua, (name, config): (String, Value)| {
@@ -242,6 +248,9 @@ pub(super) fn install(
             } else {
                 value
             };
+            if let Some(mut records) = lua.app_data_mut::<ScriptPlugins>() {
+                records.0.push(name.clone());
+            }
             plugins.raw_set(name, value.clone())?;
             Ok(value)
         })?,

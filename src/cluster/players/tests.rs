@@ -595,7 +595,8 @@ async fn actions_and_broadcasts_reach_players_on_other_peers() {
     assert_eq!(transfer["backend"], "survival");
     assert_eq!(transfer["admin"], true);
     // Broadcasts count the whole network.
-    assert_eq!(a.broadcast_routed(&hello, None).await.unwrap(), 1);
+    let broadcast = crate::text::Unrendered::new(hello.clone(), None, "message").unwrap();
+    assert_eq!(a.broadcast_routed(&broadcast, None).await.unwrap(), 1);
     assert_eq!(next(&mut alice).await, PlayerAction::Message(hello));
     let reason = Text::Plain("bye".into());
     assert!(

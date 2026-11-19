@@ -21,7 +21,10 @@
 ///   0.1.5 without its duplicates: one `text` type instead of plain and
 ///   `-json` forms, one `decision`, and `dialog`, `chat` and `kick` in
 ///   `handler`. Components built against 0.1 do not load.
-package rift:plugin@0.2.0;
+/// - 0.2.1 adds the `text` interface. A plugin that calls it sets
+///   `min_api = "0.2.1"` in its manifest, so an older Rift refuses it with
+///   a reason instead of a missing import.
+package rift:plugin@0.2.1;
 
 interface types {
     /// Log severity.
@@ -525,8 +528,24 @@ interface meta {
     clock: func() -> f64;
     /// Unix time in seconds.
     time: func() -> s64;
-    /// The `rift:plugin` version this host implements, such as `0.2.0`.
+    /// The `rift:plugin` version this host implements, such as `0.2.1`.
     api: func() -> string;
+}
+
+/// What `rift.text` does in Lua, for every engine.
+interface text {
+    use types.{text};
+
+    /// The JSON text component `text` becomes: markup, legacy codes and
+    /// messages resolved, in `language` or the default. Also the way to
+    /// check a template from the plugin's own configuration during `init`.
+    render: func(text: text, language: option<string>) -> result<string, string>;
+    /// The words without formatting.
+    plain: func(text: text, language: option<string>) -> result<string, string>;
+    /// The text with `§` codes.
+    to-legacy: func(text: text, language: option<string>) -> result<string, string>;
+    /// Markup that writes the text.
+    to-mini: func(text: text, language: option<string>) -> result<string, string>;
 }
 
 /// Hooks the host calls. Every export has a default in each SDK, and the
@@ -603,6 +622,7 @@ world core {
     import background;
     import log;
     import meta;
+    import text;
     export handler;
 }
 

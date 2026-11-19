@@ -14,7 +14,9 @@
 //     other hook.
 //   - login(ctx) returns deny(plain("You are not welcome here.")) when ctx.name
 //     equals the configured deny name exactly, otherwise continue.
-//   - command(ctx) returns message(plain("Hello, <ctx.name>!")).
+//   - command(ctx) returns the message greeting with the argument name set
+//     to ctx.name, which Rift renders from messages.toml in the player's
+//     language ("Hello, <ctx.name>!" by default).
 //   - join(ctx) calls players.message(ctx.uuid, plain("Welcome, <ctx.name>!")),
 //     then store.increment("hello", "joins", 1). Host errors are ignored.
 //   - message(msg): when msg.reply is set, publishes msg.payload unchanged to
@@ -62,7 +64,8 @@ func init() {
 	})
 
 	rift.OnCommand(func(ctx rift.Context) rift.Decision {
-		return rift.Message(rift.Plain("Hello, " + ctx.Name + "!"))
+		// The text lives in messages.toml, translated per player.
+		return rift.Message(rift.Msg("greeting").Arg("name", ctx.Name).Text())
 	})
 
 	rift.OnJoin(func(ctx rift.Context) {

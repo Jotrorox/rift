@@ -2,7 +2,7 @@
 
 A plugin is code that receives Rift's events and calls Rift's host API. Every
 plugin uses the same contract, [`wit/rift-plugin.wit`](../wit/rift-plugin.wit)
-(`rift:plugin@0.2.0`): one event schema, one set of answers, one host API. What
+(`rift:plugin@0.2.1`): one event schema, one set of answers, one host API. What
 differs is where the code runs:
 
 | Mode | What it is | Trust | Configured with |
@@ -25,6 +25,7 @@ plugin, `hello`, in all four languages with identical behavior.
 | Let a bus service decide logins | [Decisions answered over the message bus](remote-decisions.md) |
 | Know the events and their answers | [Plugin events and commands](plugin-events.md) |
 | Message, kick or transfer players | [Online players API](players-api.md) |
+| Style text, ship messages in each player's language | [Styled text](text.md), [plugin messages](text.md#plugin-messages) |
 | Store data, schedule work, call HTTP | [Host services](host-services.md) |
 | Write a persistent plugin | [Lua](plugins-lua.md), [Rust](plugins-rust.md), [C](plugins-c.md), [Go](plugins-go.md) |
 | Operate plugins: restarts, reloads, logs | [Running plugins](plugin-operations.md) |
@@ -136,6 +137,16 @@ WebAssembly enforces all three grants; Lua does not:
 grants Lua does not enforce, so the trust each plugin gets is visible before
 anything starts.
 
+## `messages.toml`
+
+A plugin folder, persistent or script mode, may hold a `messages.toml` beside
+its `plugin.toml` or `init.lua`: the plugin's own messages, in each player's
+language, which the operator can reword by qualified key (`party:invited`).
+Rift reads and checks it with the configuration, without running plugin code,
+and `rift check` prints its message and language counts. A changed file
+applies on the next reload without restarting the plugin. The `hello`
+examples ship one. See [plugin messages](text.md#plugin-messages).
+
 ## Host API
 
 Every engine exposes the same host API; the
@@ -153,7 +164,8 @@ underscores (`set_language`).
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
 | `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](plugin-operations.md#logs). Control characters are replaced. |
 | `background` | `defer()`, `resolve(ticket, decision)`, `run(payload)`, `is-worker()` | [Background work](plugin-events.md#background-work). |
-| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.0`. |
+| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.1`. |
+| `text` | `render(text, language?)`, `plain`, `to-legacy`, `to-mini` | Since 0.2.1 (set `min_api = "0.2.1"`); what [`rift.text`](text.md#rifttext-in-lua) does in Lua. Each converts [`text`](plugin-events.md#text) with markup, legacy codes and [messages](text.md#plugin-messages) resolved, the plugin's own by unqualified key, in `language` (a tag such as `de` or `de_de`) or the default, and returns compact JSON, the words, `§` codes or markup. An invalid text or language is the error. It works in `init`, `reload` and background workers, so `init` can check a template from the configuration. |
 
 Calls that wait (bus requests, server operations, store writes) block only the
 plugin's own thread. Persistent plugins get no per-call budgets beyond their
@@ -285,8 +297,9 @@ interfaces, but never changes an existing type or adds a case to an existing
 enum or variant, since exports are checked exactly.
 
 A host function a component calls needs a host that has it: such a plugin names
-the release in [`min_api`](#plugintoml). Breaking changes move to the next
-minor version until 1.0.
+the release in [`min_api`](#plugintoml). `0.2.1` added the `text` interface,
+so a plugin that calls it sets `min_api = "0.2.1"`. Breaking changes move to
+the next minor version until 1.0.
 
 ## Moving from 0.1
 

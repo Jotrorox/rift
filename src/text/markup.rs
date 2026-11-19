@@ -9,14 +9,16 @@
 //! Markup is parsed into a JSON text component at the call and never stored
 //! or sent as markup. Arguments (`<player>`) are inserted as written: their
 //! text is never parsed, so a relayed player name cannot add tags. Styles
-//! (`<accent>`) come from the operator's theme.
+//! (`<accent>`) come from the operator's theme or from a style argument; an
+//! argument wins over a theme style of the same name.
 //!
 //! | Tag | Effect |
 //! | --- | --- |
 //! | `<red>`, `<#ff8800>`, `<color:red>`, `<c:#ff8800>` | colour (`grey`, `dark_grey` also work) |
 //! | `<bold>` `<b>`, `<italic>` `<i>` `<em>`, `<underlined>` `<u>`, `<strikethrough>` `<st>`, `<obfuscated>` `<obf>` | decoration; `<!bold>` or `<bold:false>` turns it off |
-//! | `<gradient:red:#5555ff[:...]>` | a colour per character, interpolated between the stops |
-//! | `<rainbow>`, `<rainbow:0.5>` | a rainbow, optionally starting at another hue (0..1) |
+//! | `<gradient:red:#5555ff[:...][:phase]>` | a colour per character, interpolated between the stops, shifted by `phase` (-1..1) |
+//! | `<transition:red:#5555ff[:...][:phase]>` | one colour: the point `phase` (-1..1) along the stops |
+//! | `<rainbow>`, `<rainbow:0.5>`, `<rainbow:!>`, `<rainbow:!0.5>` | a rainbow, optionally starting at another hue (-1..1); `!` reverses it |
 //! | `<hover:show_text:'markup'>` | hover text; also `show_item:id[:count]`, `show_entity:type:uuid[:'name']` |
 //! | `<click:run_command:/cmd>` | click; also `suggest_command`, `open_url`, `copy_to_clipboard`, `change_page` |
 //! | `<insert:text>` | text inserted into chat on shift-click |
@@ -24,9 +26,11 @@
 //! | `<shadow:black[:0.5]>`, `<!shadow>` | text shadow colour and opacity (default 0.25) |
 //! | `<newline>` `<br>` | line break |
 //! | `<key:key.jump>` | the player's key binding |
+//! | `<sprite:[atlas:]sprite>` | a sprite from an atlas (`object` content, 1.21.9) |
+//! | `<head:name>`, `<head:uuid>`, `<head:name:false>` | a player's head; `false` leaves out the hat layer |
 //! | `<lang:key[:'arg']...>`, `<lang_or:key:'fallback'[:'arg']...>` | translation; arguments are markup |
 //! | `<reset>` | close every open tag |
-//! | `<name>` | an argument, or a style of the theme |
+//! | `<name>` | an argument (text, a component or a style), or a style of the theme |
 //!
 //! `</tag>` closes the latest open tag of that kind and those opened after
 //! it; tags left open end with the text. `\<` writes a literal `<` and `\\`
@@ -50,6 +54,8 @@ pub enum Arg {
     Text(String),
     /// A JSON text component, inserted with its own formatting.
     Component(Json),
+    /// A style: `<name>` opens it and `</name>` closes it, like a theme style.
+    Style(Style),
 }
 
 /// Named values for markup arguments.
@@ -70,6 +76,12 @@ impl Args {
     /// `<name>` shows a component.
     pub fn component(mut self, name: &str, value: Json) -> Self {
         self.insert(name, Arg::Component(value));
+        self
+    }
+
+    /// `<name>...</name>` applies `value`, like a theme style.
+    pub fn style(mut self, name: &str, value: Style) -> Self {
+        self.insert(name, Arg::Style(value));
         self
     }
 
@@ -468,8 +480,11 @@ enum Node {
 #[derive(Debug, Clone, PartialEq)]
 enum Frame {
     Style(Style),
-    Gradient(Vec<u32>),
-    Rainbow(f64),
+    /// The stops and a phase in 0..=1, a negative phase already turned into
+    /// reversed stops.
+    Gradient(Vec<u32>, f64),
+    /// The phase and whether the rainbow runs backwards.
+    Rainbow(f64, bool),
 }
 
 /// An open tag while parsing: which `</...>` closes it and what it holds.
@@ -516,12 +531,13 @@ fn decoration(name: &str) -> Option<usize> {
     })
 }
 
-const BUILTIN: [&str; 23] = [
+const BUILTIN: [&str; 26] = [
     "color",
     "colour",
     "c",
     "reset",
     "gradient",
+    "transition",
     "rainbow",
     "hover",
     "click",
@@ -531,6 +547,8 @@ const BUILTIN: [&str; 23] = [
     "newline",
     "br",
     "key",
+    "sprite",
+    "head",
     "lang",
     "tr",
     "translate",
@@ -696,33 +714,35 @@ impl Parser<'_> {
                 })
             }
             "gradient" => {
-                let stops = tag
-                    .args
-                    .iter()
-                    .map(|value| {
-                        colour(value)
-                            .and_then(|color| color::parse(&color))
-                            .ok_or_else(|| {
-                                tag.error(format!("{value:?} is not a colour name or #rrggbb"))
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if stops.len() < 2 {
-                    return Err(tag.error("needs at least two colours"));
-                }
-                Ok(Parsed::Open(Frame::Gradient(stops)))
+                let (stops, phase) = stops(tag)?;
+                Ok(Parsed::Open(Frame::Gradient(stops, phase)))
+            }
+            "transition" => {
+                let (stops, phase) = stops(tag)?;
+                style(Style {
+                    color: Some(color::to_hex(color::gradient(&stops, phase))),
+                    ..Style::default()
+                })
             }
             "rainbow" => {
-                let phase = match tag.args.as_slice() {
-                    [] => 0.0,
-                    [value] => value
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|phase| (0.0..=1.0).contains(phase))
-                        .ok_or_else(|| tag.error("phase must be a number in 0..=1"))?,
+                let (reverse, phase) = match tag.args.as_slice() {
+                    [] => (false, ""),
+                    [value] => match value.strip_prefix('!') {
+                        Some(phase) => (true, phase),
+                        None => (false, value.as_str()),
+                    },
                     _ => return Err(tag.error("takes at most a phase")),
                 };
-                Ok(Parsed::Open(Frame::Rainbow(phase)))
+                let phase = if phase.is_empty() {
+                    0.0
+                } else {
+                    phase
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|phase| (-1.0..=1.0).contains(phase))
+                        .ok_or_else(|| tag.error("phase must be a number in -1..=1"))?
+                };
+                Ok(Parsed::Open(Frame::Rainbow(phase, reverse)))
             }
             "font" => {
                 let font = tag.rest(0).ok_or_else(|| tag.error("needs a font"))?;
@@ -880,6 +900,50 @@ impl Parser<'_> {
                     .ok_or_else(|| tag.error("needs a key binding"))?;
                 Ok(Parsed::Insert(json!({"keybind": key})))
             }
+            "sprite" => {
+                let (atlas, sprite) = match tag.args.as_slice() {
+                    [sprite] => (None, sprite),
+                    [atlas, sprite] => (Some(atlas), sprite),
+                    _ => return Err(tag.error("takes a sprite, optionally after its atlas")),
+                };
+                if let Some(atlas) = atlas
+                    && !crate::dialog::identifier(atlas)
+                {
+                    return Err(tag.error(format!("{atlas:?} is not an atlas id")));
+                }
+                if !crate::dialog::identifier(sprite) {
+                    return Err(tag.error(format!("{sprite:?} is not a sprite id")));
+                }
+                let mut object = json!({"object": "atlas", "sprite": sprite});
+                if let Some(atlas) = atlas {
+                    object["atlas"] = atlas.clone().into();
+                }
+                Ok(Parsed::Insert(object))
+            }
+            "head" => {
+                let (player, hat) = match tag.args.as_slice() {
+                    [player] => (player, true),
+                    [player, hat] if hat == "true" => (player, true),
+                    [player, hat] if hat == "false" => (player, false),
+                    _ => {
+                        return Err(
+                            tag.error("takes a player name or UUID and an optional true or false")
+                        );
+                    }
+                };
+                let profile = if let Some(uuid) = uuid_value(player) {
+                    json!({"id": uuid_ints(uuid)})
+                } else if player_name(player) {
+                    json!({"name": player})
+                } else {
+                    return Err(tag.error(format!("{player:?} is not a player name or UUID")));
+                };
+                let mut object = json!({"object": "player", "player": profile});
+                if !hat {
+                    object["hat"] = false.into();
+                }
+                Ok(Parsed::Insert(object))
+            }
             "lang" | "tr" | "translate" | "lang_or" | "tr_or" | "translate_or" => {
                 let fallback = name.ends_with("_or");
                 let key = tag
@@ -908,18 +972,21 @@ impl Parser<'_> {
             "selector" | "score" | "nbt" => {
                 Err(tag.error("is not markup; write the JSON component, which the server resolves"))
             }
+            // An argument wins over a theme style of the same name: a caller
+            // cannot know every operator's theme.
             _ => {
-                if let Some(style) = self.styles.get(name) {
+                if let Some(arg) = self.args.get(name) {
                     no_args()?;
-                    return Ok(Parsed::Open(Frame::Style(style.clone())));
+                    return Ok(match arg {
+                        Arg::Text(text) => Parsed::Text(text.clone()),
+                        Arg::Component(component) => Parsed::Insert(component.clone()),
+                        Arg::Style(style) => Parsed::Open(Frame::Style(style.clone())),
+                    });
                 }
-                match self.args.get(name) {
-                    Some(arg) => {
+                match self.styles.get(name) {
+                    Some(style) => {
                         no_args()?;
-                        Ok(match arg {
-                            Arg::Text(text) => Parsed::Text(text.clone()),
-                            Arg::Component(component) => Parsed::Insert(component.clone()),
-                        })
+                        Ok(Parsed::Open(Frame::Style(style.clone())))
                     }
                     None => Err(tag.error("unknown tag; not built in, an argument or a style")),
                 }
@@ -928,10 +995,84 @@ impl Parser<'_> {
     }
 }
 
+/// The stops and phase of `<gradient>` and `<transition>`: two or more
+/// colours, then an optional phase in -1..=1 (no colour name is a number).
+/// As in MiniMessage, a negative phase is `1 + phase` along the reversed
+/// stops, so the phase returned is in 0..=1.
+fn stops(tag: &Tag) -> Result<(Vec<u32>, f64), String> {
+    let mut colours = tag.args.as_slice();
+    let mut phase = 0.0;
+    if let Some((last, before)) = colours.split_last()
+        && let Ok(number) = last.parse::<f64>()
+    {
+        if !(-1.0..=1.0).contains(&number) {
+            return Err(tag.error("phase must be a number in -1..=1"));
+        }
+        phase = number;
+        colours = before;
+    }
+    let mut stops = colours
+        .iter()
+        .map(|value| {
+            colour(value)
+                .and_then(|color| color::parse(&color))
+                .ok_or_else(|| tag.error(format!("{value:?} is not a colour name or #rrggbb")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if stops.len() < 2 {
+        return Err(tag.error("needs at least two colours"));
+    }
+    if phase < 0.0 {
+        stops.reverse();
+        phase += 1.0;
+    }
+    Ok((stops, phase))
+}
+
 /// A UUID with or without dashes.
 fn uuid_like(text: &str) -> bool {
     let digits = text.bytes().filter(u8::is_ascii_hexdigit).count();
     digits == 32 && text.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// The value of a UUID with or without dashes.
+fn uuid_value(text: &str) -> Option<u128> {
+    if !uuid_like(text) {
+        return None;
+    }
+    let digits: String = text.chars().filter(|c| *c != '-').collect();
+    u128::from_str_radix(&digits, 16).ok()
+}
+
+/// A UUID as vanilla writes it in JSON: four ints, most significant first.
+fn uuid_ints(uuid: u128) -> [i32; 4] {
+    [96, 64, 32, 0].map(|shift| (uuid >> shift) as u32 as i32)
+}
+
+/// The UUID of vanilla's four-int form, with dashes.
+fn uuid_text(ints: &[Json]) -> Option<String> {
+    let [a, b, c, d] = ints else {
+        return None;
+    };
+    let mut uuid = 0u128;
+    for value in [a, b, c, d] {
+        let value = i32::try_from(value.as_i64()?).ok()?;
+        uuid = (uuid << 32) | u128::from(value as u32);
+    }
+    let hex = format!("{uuid:032x}");
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+}
+
+/// A plausible player name: 1..=16 of `A-Za-z0-9_`.
+fn player_name(text: &str) -> bool {
+    (1..=16).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 enum Parsed {
@@ -956,11 +1097,17 @@ impl Painter {
         };
         self.index += 1;
         let rgb = match &self.frame {
-            Frame::Gradient(stops) => color::gradient(stops, t),
-            Frame::Rainbow(phase) => {
-                // A rainbow does not repeat its first colour at the end.
+            Frame::Gradient(stops, phase) => color::gradient_shifted(stops, t, *phase),
+            Frame::Rainbow(phase, reverse) => {
+                // A rainbow does not repeat its first colour at the end; a
+                // reversed one starts where a forward one ends.
+                let step = if *reverse {
+                    self.total.saturating_sub(self.index)
+                } else {
+                    self.index - 1
+                };
                 let t = if self.total > 0 {
-                    (self.index - 1) as f64 / self.total as f64
+                    step as f64 / self.total as f64
                 } else {
                     0.0
                 };
@@ -1101,6 +1248,12 @@ fn render(
     Ok(())
 }
 
+/// The style of a style argument: markup made only of formatting tags, the
+/// same rule as a theme style. Empty markup styles nothing.
+pub fn style_arg(markup: &str) -> Result<Style, String> {
+    style_only(markup)
+}
+
 /// A style from markup made only of formatting tags, for the theme.
 fn style_only(markup: &str) -> Result<Style, String> {
     let parser = Parser {
@@ -1156,8 +1309,8 @@ fn typed_hover(event: &Json) -> Option<Json> {
 }
 
 /// Markup for `component`: the inverse of [`parse`] for what markup can
-/// express. Score, selector, NBT and object content is written as its
-/// plain text.
+/// express. Score, selector and NBT content, and object content that
+/// `<sprite>` and `<head>` cannot express, is written as its plain text.
 pub fn serialize(component: &Json) -> String {
     let mut out = String::new();
     write_markup(component, &Style::default(), &mut out, 0);
@@ -1298,6 +1451,80 @@ fn hover_tag(event: &Json) -> Option<String> {
     }
 }
 
+/// Keys of a component that markup writes as style or children, beside
+/// its content.
+const STYLE_KEYS: [&str; 14] = [
+    "color",
+    "bold",
+    "italic",
+    "underlined",
+    "strikethrough",
+    "obfuscated",
+    "font",
+    "shadow_color",
+    "insertion",
+    "click_event",
+    "hover_event",
+    "clickEvent",
+    "hoverEvent",
+    "extra",
+];
+
+/// `<sprite>` or `<head>` for `object` content that has only what the tags
+/// can express.
+fn object_tag(fields: &Map<String, Json>) -> Option<String> {
+    let only = |content: &[&str]| {
+        fields.iter().all(|(key, value)| {
+            content.contains(&key.as_str())
+                || STYLE_KEYS.contains(&key.as_str())
+                || (key == "type" && value == "object")
+        })
+    };
+    match fields.get("object")?.as_str()? {
+        "atlas" => {
+            if !only(&["object", "atlas", "sprite"]) {
+                return None;
+            }
+            let sprite = fields.get("sprite")?.as_str()?;
+            if !crate::dialog::identifier(sprite) {
+                return None;
+            }
+            match fields.get("atlas") {
+                None => Some(format!("<sprite:{}>", quoted(sprite))),
+                Some(atlas) => {
+                    let atlas = atlas
+                        .as_str()
+                        .filter(|atlas| crate::dialog::identifier(atlas))?;
+                    Some(format!("<sprite:{}:{}>", quoted(atlas), quoted(sprite)))
+                }
+            }
+        }
+        "player" => {
+            if !only(&["object", "player", "hat"]) {
+                return None;
+            }
+            let player = match fields.get("player")? {
+                Json::String(name) => name.clone(),
+                Json::Object(profile) if profile.len() == 1 => match profile.iter().next()? {
+                    (key, Json::String(name)) if key == "name" => name.clone(),
+                    (key, Json::Array(ints)) if key == "id" => uuid_text(ints)?,
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            if !player_name(&player) && uuid_value(&player).is_none() {
+                return None;
+            }
+            match fields.get("hat") {
+                None | Some(Json::Bool(true)) => Some(format!("<head:{player}>")),
+                Some(Json::Bool(false)) => Some(format!("<head:{player}:false>")),
+                Some(_) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn write_markup(component: &Json, parent: &Style, out: &mut String, depth: usize) {
     if depth > 64 {
         return;
@@ -1351,6 +1578,8 @@ fn write_markup(component: &Json, parent: &Style, out: &mut String, depth: usize
                 out.push_str(&tag);
             } else if let Some(key) = fields.get("keybind").and_then(Json::as_str) {
                 out.push_str(&format!("<key:{}>", quoted(key)));
+            } else if let Some(tag) = object_tag(fields) {
+                out.push_str(&tag);
             } else {
                 let mut plain = String::new();
                 super::flatten_own(component, &mut plain);
@@ -1603,6 +1832,10 @@ mod tests {
             "<lang_or:k:'F':'<red>a'> <key:key.jump>",
             r"literal \<red> and \\",
             "line<br>break",
+            "<sprite:item/diamond>",
+            "<sprite:blocks:block/stone> <head:Notch:false>",
+            "<sprite:'minecraft:items':'minecraft:item/diamond'>",
+            "<red><head:069a79f4-44e9-4726-a5be-fca90e38aaf5></red> <head:Notch>",
         ] {
             let parsed = mini(markup);
             let serialized = serialize(&parsed);
@@ -1616,5 +1849,249 @@ mod tests {
             serialize(&json!([{"text": "a", "bold": true}, "b"])),
             "<bold>ab</bold>"
         );
+    }
+
+    #[test]
+    fn style_arguments_wrap_what_the_template_puts_inside() {
+        let args = Args::new()
+            .style("team", style_arg("<#55ffff><bold>").unwrap())
+            .text("tag", "x")
+            .style("none", style_arg("").unwrap());
+        let parsed = |markup: &str| parse(markup, &args, &Styles::default());
+        assert_eq!(
+            parsed("<team>[<tag>]</team> y").unwrap(),
+            json!({"text": "", "extra": [
+                {"text": "[x]", "color": "#55ffff", "bold": true},
+                {"text": " y"},
+            ]})
+        );
+        // Closing the style closes the tags opened inside it.
+        assert_eq!(
+            parsed("<italic><team><red>a</team>b").unwrap(),
+            json!({"text": "", "extra": [
+                {"text": "a", "color": "red", "bold": true, "italic": true},
+                {"text": "b", "italic": true},
+            ]})
+        );
+        assert_eq!(parsed("<none>a</none>").unwrap(), json!({"text": "a"}));
+        assert_eq!(
+            parsed("<hover:show_text:'<team>tip'>x").unwrap()["hover_event"]["value"],
+            json!({"text": "tip", "color": "#55ffff", "bold": true})
+        );
+        assert_eq!(
+            parsed("<team:x>a").unwrap_err(),
+            "<team:x> at byte 0: takes no arguments"
+        );
+        assert_eq!(
+            style_arg("<red>text").unwrap_err(),
+            "only formatting tags are allowed, found text \"text\""
+        );
+        assert!(style_arg("<gradient:red:blue>").is_err());
+        assert!(style_arg("<key:key.jump>").is_err());
+        assert!(style_arg("<head:Notch>").is_err());
+        assert_eq!(style_arg("").unwrap(), Style::default());
+    }
+
+    #[test]
+    fn an_argument_beats_a_theme_style_of_the_same_name() {
+        assert_eq!(mini("<accent>x"), json!({"text": "x", "color": "aqua"}));
+        assert_eq!(
+            parse(
+                "<accent>",
+                &Args::new().text("accent", "shown"),
+                &Styles::default()
+            )
+            .unwrap(),
+            json!({"text": "shown"})
+        );
+        let args = Args::new().style("info", style_arg("<red>").unwrap());
+        assert_eq!(
+            parse("<info>x</info>", &args, &Styles::default()).unwrap(),
+            json!({"text": "x", "color": "red"})
+        );
+    }
+
+    #[test]
+    fn transitions_pick_one_colour_along_the_stops() {
+        assert_eq!(
+            mini("<transition:#ff0000:#0000ff>ab"),
+            json!({"text": "ab", "color": "#ff0000"})
+        );
+        assert_eq!(mini("<transition:#ff0000:#0000ff:1>ab")["color"], "#0000ff");
+        assert_eq!(
+            mini("<transition:#ff0000:#0000ff:0.5>ab")["color"],
+            "#800080"
+        );
+        assert_eq!(
+            mini("<transition:#ff0000:#00ff00:#0000ff:0.5>x")["color"],
+            "#00ff00"
+        );
+        // A negative phase is `1 + phase` along the reversed stops.
+        assert_eq!(
+            mini("<transition:#ff0000:#0000ff:-0.25>x")["color"],
+            "#bf0040"
+        );
+        assert_eq!(
+            mini("<transition:#ff0000:#0000ff:0.25>x")["color"],
+            "#bf0040"
+        );
+        assert_eq!(mini("<transition:#ff0000:#0000ff:-1>x")["color"], "#0000ff");
+        assert_eq!(
+            mini("<transition:red:blue>a</transition>b"),
+            json!({"text": "", "extra": [{"text": "a", "color": "#ff5555"}, {"text": "b"}]})
+        );
+        assert_eq!(
+            error("<transition:red:blue:2>x"),
+            "<transition:red:blue:2> at byte 0: phase must be a number in -1..=1"
+        );
+        assert_eq!(
+            error("<transition:red:0.5>x"),
+            "<transition:red:0.5> at byte 0: needs at least two colours"
+        );
+        assert_eq!(
+            error("<transition:red:orange>x"),
+            "<transition:red:orange> at byte 0: \"orange\" is not a colour name or #rrggbb"
+        );
+    }
+
+    #[test]
+    fn gradients_take_a_phase() {
+        for text in ["a", "abc", "abcdefghij"] {
+            assert_eq!(
+                mini(&format!("<gradient:red:gold:blue:0>{text}")),
+                mini(&format!("<gradient:red:gold:blue>{text}"))
+            );
+        }
+        let colours = |markup: &str| {
+            mini(markup)["extra"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part["color"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Past the last stop the gradient runs back to the first.
+        assert_eq!(
+            colours("<gradient:#ff0000:#0000ff:0.5>abc"),
+            ["#800080", "#0000ff", "#800080"]
+        );
+        assert_eq!(
+            colours("<gradient:#ff0000:#0000ff:-1>abc"),
+            ["#0000ff", "#800080", "#ff0000"]
+        );
+        assert_eq!(
+            error("<gradient:red:blue:1.5>x"),
+            "<gradient:red:blue:1.5> at byte 0: phase must be a number in -1..=1"
+        );
+    }
+
+    #[test]
+    fn rainbows_reverse_and_take_negative_phases() {
+        let reversed = mini("<rainbow:!>abc");
+        assert_eq!(reversed["extra"][0]["color"], "#0000ff");
+        assert_eq!(reversed["extra"][1]["color"], "#00ff00");
+        assert_eq!(reversed["extra"][2]["color"], "#ff0000");
+        let shifted = mini("<rainbow:!0.5>ab");
+        assert_eq!(shifted["extra"][0]["color"], "#ff0000");
+        assert_eq!(shifted["extra"][1]["color"], "#00ffff");
+        assert_eq!(mini("<rainbow:-0.5>abc"), mini("<rainbow:0.5>abc"));
+        assert_eq!(
+            error("<rainbow:2>x"),
+            "<rainbow:2> at byte 0: phase must be a number in -1..=1"
+        );
+        assert!(error("<rainbow:!x>a").contains("phase must be a number"));
+    }
+
+    #[test]
+    fn sprites_and_heads_are_objects() {
+        assert_eq!(
+            mini("<sprite:item/diamond>"),
+            json!({"object": "atlas", "sprite": "item/diamond"})
+        );
+        assert_eq!(
+            mini("<sprite:blocks:block/stone>"),
+            json!({"object": "atlas", "atlas": "blocks", "sprite": "block/stone"})
+        );
+        assert_eq!(
+            mini("<sprite:'minecraft:items':'minecraft:item/diamond'>"),
+            json!({"object": "atlas", "atlas": "minecraft:items", "sprite": "minecraft:item/diamond"})
+        );
+        assert_eq!(
+            mini("<head:Notch>"),
+            json!({"object": "player", "player": {"name": "Notch"}})
+        );
+        assert_eq!(mini("<head:Notch:true>"), mini("<head:Notch>"));
+        assert_eq!(
+            mini("<head:Notch:false>"),
+            json!({"object": "player", "player": {"name": "Notch"}, "hat": false})
+        );
+        let id = json!({"object": "player",
+                        "player": {"id": [110787060, 1156138790, -1514210135, 238594805]}});
+        assert_eq!(mini("<head:069a79f4-44e9-4726-a5be-fca90e38aaf5>"), id);
+        assert_eq!(mini("<head:069A79F444E94726A5BEFCA90E38AAF5>"), id);
+        assert_eq!(
+            serialize(&id),
+            "<head:069a79f4-44e9-4726-a5be-fca90e38aaf5>"
+        );
+        assert_eq!(mini("<red><sprite:item/diamond>")["color"], "red");
+        assert_eq!(
+            error("<sprite>"),
+            "<sprite> at byte 0: takes a sprite, optionally after its atlas"
+        );
+        assert_eq!(
+            error("<sprite:a:b:c>"),
+            "<sprite:a:b:c> at byte 0: takes a sprite, optionally after its atlas"
+        );
+        assert_eq!(
+            error("<sprite:Item/Diamond>"),
+            "<sprite:Item/Diamond> at byte 0: \"Item/Diamond\" is not a sprite id"
+        );
+        assert_eq!(
+            error("<head:not a name>"),
+            "<head:not a name> at byte 0: \"not a name\" is not a player name or UUID"
+        );
+        assert!(error("<head:abcdefghijklmnopq>").contains("not a player name"));
+        assert_eq!(
+            error("<head:Notch:maybe>"),
+            "<head:Notch:maybe> at byte 0: takes a player name or UUID and an optional true \
+             or false"
+        );
+        assert!(error("<head>").contains("takes a player name"));
+        // What the tags cannot express stays out of them.
+        assert!(
+            !serialize(&json!({"object": "atlas", "sprite": "a", "fallback": {"text": "x"}}))
+                .contains("<sprite")
+        );
+        assert!(
+            !serialize(&json!({"object": "player", "player": {"name": "a", "properties": []}}))
+                .contains("<head")
+        );
+    }
+
+    #[test]
+    fn new_tags_are_not_names() {
+        for name in ["transition", "sprite", "head"] {
+            assert!(
+                Args::new().text(name, "x").validate("args").is_err(),
+                "{name}"
+            );
+            assert!(Styles::empty().set(name, "<red>").is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn escape_matches_the_shared_vectors() {
+        // The SDKs carry the same list.
+        for (text, escaped) in [
+            ("plain", "plain"),
+            ("a < b", r"a \< b"),
+            ("<red>", r"\<red>"),
+            (r"\", r"\\"),
+            (r"\<", r"\\\<"),
+            ("", ""),
+        ] {
+            assert_eq!(escape(text), escaped, "{text:?}");
+            assert_eq!(mini(escaped), json!({"text": text}), "{text:?}");
+        }
     }
 }

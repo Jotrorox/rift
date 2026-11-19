@@ -2,12 +2,14 @@
 //! deadline overruns, stop requests, capabilities, captured output,
 //! background work and the player directory.
 //!
-//! - `init(config)`: fails with `config.fail` when set; otherwise registers
-//!   the commands `probe` (permission `probe.use`, dynamic suggestions),
-//!   `slow` (alias `sl`), `whois` (also for the console), `lang` and
-//!   `tempgroup`, and the hooks `login`, `command`, `join`, `suggest` and
-//!   `status`.
-//! - `reload(config)`: fails when `config.fail` is set.
+//! - `init(config)`: fails with `config.fail` when set, and with the error of
+//!   `text.render` when `config.check` (a JSON text) does not render;
+//!   otherwise registers the commands `probe` (permission `probe.use`,
+//!   dynamic suggestions), `slow` (alias `sl`), `whois` (also for the
+//!   console), `lang`, `tempgroup` and `text`, and the hooks `login`,
+//!   `command`, `join`, `suggest` and `status`.
+//! - `reload(config)`: fails when `config.fail` is set or `config.check`
+//!   does not render.
 //! - `login(ctx)`: name `Spin` loops forever, name `Trap` panics (a trap
 //!   after the panic message on stderr), name `Dialog` is shown a dialog with
 //!   a text input `answer` and a `dynamic/custom` action `reply` (additions
@@ -48,12 +50,16 @@
 //!     `permissions.add-group(ctx.uuid, group, expires-at)` and the message
 //!     `added <true|false>`, or the host's error; `usage: tempgroup <group>
 //!     <expires-at>` for anything else.
+//!   - `text`: arguments `<language or -> <json text>`; the message
+//!     `<render> | <plain> | <to-legacy> | <to-mini>` of the `text`
+//!     interface, each `error: <the host's error>` when it fails.
 //! - `job_done(handle, outcome)`: resolves the ticket of a `slow` command
 //!   with the message `done: <result as text>` or `failed: <error>`.
 //! - `work_init(config)` (worker): logs `worker ready` at info level.
 //! - `work(payload)` (worker): the payload in ASCII upper case; payload
 //!   `fail` fails with `worker says no`; payload `sleep` sleeps 300 ms and
-//!   answers `SLEPT`.
+//!   answers `SLEPT`; payload `text <language>` answers the plugin's message
+//!   `denied` without formatting in that language (`text.plain`).
 use rift_plugin::{
     Action, CommandSpec, Context, DialogResponse, Hook, Ping, Plugin, Registration, StatusOverride,
     SuggestKind, Suggestion, Text, TitleSpec, background, meta, permissions, players, text,
@@ -67,6 +73,21 @@ use std::time::Duration;
 struct Config {
     #[serde(default)]
     fail: Option<String>,
+    /// A JSON text the plugin checks with `text.render`.
+    #[serde(default)]
+    check: Option<String>,
+}
+
+impl Config {
+    fn check(self) -> Result<(), String> {
+        if let Some(reason) = self.fail {
+            return Err(reason);
+        }
+        if let Some(template) = self.check {
+            text::render(Text::json(template), None)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -84,10 +105,7 @@ fn spin() -> ! {
 
 impl Plugin for Probe {
     fn init(&mut self, config: &str) -> Result<Registration, String> {
-        let config: Config = rift_plugin::config(config)?;
-        if let Some(reason) = config.fail {
-            return Err(reason);
-        }
+        rift_plugin::config::<Config>(config)?.check()?;
         Ok(Registration::new()
             .command(
                 CommandSpec::new("probe")
@@ -98,6 +116,7 @@ impl Plugin for Probe {
             .command(CommandSpec::new("whois").console())
             .command(CommandSpec::new("lang"))
             .command(CommandSpec::new("tempgroup"))
+            .command(CommandSpec::new("text"))
             .hooks([
                 Hook::Login,
                 Hook::Command,
@@ -108,8 +127,7 @@ impl Plugin for Probe {
     }
 
     fn reload(&mut self, config: &str) -> Result<(), String> {
-        let config: Config = rift_plugin::config(config)?;
-        config.fail.map_or(Ok(()), Err)
+        rift_plugin::config::<Config>(config)?.check()
     }
 
     fn login(&mut self, ctx: Context) -> Action {
@@ -198,6 +216,7 @@ impl Plugin for Probe {
             Some("whois") => whois(&ctx),
             Some("lang") => lang(&ctx),
             Some("tempgroup") => tempgroup(&ctx),
+            Some("text") => convert(&ctx),
             _ => report(&ctx),
         }
     }
@@ -221,6 +240,10 @@ impl Plugin for Probe {
     fn work(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, String> {
         match payload.as_slice() {
             b"fail" => Err("worker says no".into()),
+            [b't', b'e', b'x', b't', b' ', language @ ..] => {
+                let language = String::from_utf8_lossy(language);
+                text::plain(text::message("denied"), Some(&*language)).map(String::into_bytes)
+            }
             b"sleep" => {
                 std::thread::sleep(Duration::from_millis(300));
                 Ok(b"SLEPT".to_vec())
@@ -294,6 +317,25 @@ fn tempgroup(ctx: &Context) -> Action {
         Ok(added) => Action::message(format!("added {added}")),
         Err(error) => Action::message(error),
     }
+}
+
+/// `text <language or -> <json text>`: the four functions of the `text`
+/// interface.
+fn convert(ctx: &Context) -> Action {
+    let (language, json) = ctx.args.split_once(' ').unwrap_or((ctx.args.as_str(), ""));
+    let language = (language != "-").then_some(language);
+    let source = Text::json(json);
+    let results = [
+        text::render(source.clone(), language),
+        text::plain(source.clone(), language),
+        text::to_legacy(source.clone(), language),
+        text::to_mini(source, language),
+    ];
+    let results: Vec<String> = results
+        .into_iter()
+        .map(|result| result.unwrap_or_else(|error| format!("error: {error}")))
+        .collect();
+    Action::message(results.join(" | "))
 }
 
 /// `probe`: what the guest can see.

@@ -226,6 +226,115 @@ fn invalid_installed_plugins_and_registrations_are_rejected() {
 }
 
 #[test]
+fn plugin_messages_are_read_with_the_configuration_and_replaced_by_the_operator() {
+    use rift::text::Args;
+    let fixture = Fixture::new();
+    fixture.installed();
+    fixture.write(
+        "plugins/relaxoban/messages.toml",
+        "[messages]\nbanned = { text = \"<bad>Banned: <reason>\", args = [\"reason\"] }\n[languages.de]\nbanned = \"<bad>Gesperrt: <reason>\"\n",
+    );
+    // A script-mode folder: an `init.lua` alone.
+    fixture.write("plugins/greeter/init.lua", "return true");
+    fixture.write(
+        "plugins/greeter/messages.toml",
+        "[messages]\nhello = \"Hello.\"\n",
+    );
+    let config = fixture
+        .load(
+            r#"
+        config.text = {
+            messages = { ['greeter:hello'] = 'Hi.' },
+            languages = { de = { ['relaxoban:banned'] = 'Weg: <reason>' } },
+        }
+        rift.plugin('relaxoban')
+        rift.plugin('greeter')
+    "#,
+        )
+        .unwrap();
+    let text = &config.text;
+    assert!(text.warnings().is_empty());
+    assert_eq!(text.namespace("relaxoban").unwrap().len(), 1);
+    assert_eq!(
+        text.message(None, "greeter:hello", &Args::new(), None)
+            .unwrap(),
+        serde_json::json!({"text": "Hi."})
+    );
+    let banned = |language| {
+        text.message_text(
+            Some("relaxoban"),
+            "banned",
+            &Args::new().text("reason", "spam"),
+            language,
+        )
+        .unwrap()
+        .to_string()
+    };
+    assert_eq!(banned(Some("de_de")), "Weg: spam");
+    assert_eq!(banned(None), "Banned: spam");
+    // The catalogue is not part of the fingerprint: a changed one applies on
+    // a reload without restarting the plugin.
+    let fingerprint = config.plugins[0].fingerprint.clone();
+    fixture.write(
+        "plugins/relaxoban/messages.toml",
+        "[messages]\nbanned = \"Banned.\"\n",
+    );
+    let changed = fixture.load("rift.plugin('relaxoban')").unwrap();
+    assert_eq!(changed.plugins[0].fingerprint, fingerprint);
+    assert_eq!(
+        changed
+            .text
+            .message_text(Some("relaxoban"), "banned", &Args::new(), None)
+            .unwrap()
+            .to_string(),
+        "Banned."
+    );
+    // A replacement for a plugin that is not enabled is a warning.
+    let disabled = fixture
+        .load("config.text = { messages = { ['relaxoban:banned'] = 'x' } }")
+        .unwrap();
+    assert_eq!(disabled.text.warnings().len(), 1);
+    assert!(
+        disabled.text.warnings()[0].contains("no enabled plugin has the namespace \"relaxoban\""),
+        "{:?}",
+        disabled.text.warnings()
+    );
+    for (script, expected) in [
+        (
+            "rift.plugin('relaxoban')\nconfig.text = { messages = { ['relaxoban:nope'] = 'x' } }",
+            "unknown message \"relaxoban:nope\"",
+        ),
+        (
+            "rift.plugin('relaxoban')\nconfig.text = { messages = { ['relaxoban:banned'] = 'Banned <who>' } }",
+            "text.messages[\"relaxoban:banned\"]: <who> at byte 7: unknown tag",
+        ),
+    ] {
+        let error = fixture.load(script).unwrap_err().to_string();
+        assert!(error.contains(expected), "{script}: {error}");
+    }
+    fixture.write("plugins/relaxoban/messages.toml", "typo = 1");
+    let error = fixture
+        .load("rift.plugin('relaxoban')")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("plugin relaxoban: ")
+            && error.contains("messages.toml: unknown key \"typo\""),
+        "{error}"
+    );
+    // The broken catalogue of a plugin that is not enabled is not an error.
+    fixture.load("").unwrap();
+    // `rift` names Rift's own messages.
+    fixture.write("plugins/rift/init.lua", "return true");
+    fixture.write("plugins/rift/messages.toml", "[messages]\na = \"x\"\n");
+    let error = fixture.load("rift.plugin('rift')").unwrap_err().to_string();
+    assert!(
+        error.contains("reserved for Rift's own messages"),
+        "{error}"
+    );
+}
+
+#[test]
 fn plugins_is_an_alias_for_extensions() {
     let fixture = Fixture::new();
     let auth = "config.authentication = { online_mode = true }\nconfig.forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' }\n";

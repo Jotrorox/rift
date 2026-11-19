@@ -1,38 +1,62 @@
 use super::*;
-use crate::text::catalog::Catalog;
+use crate::text::{catalog::Catalog, messages::Messages};
 use std::sync::Arc;
+
+/// Entries in `text.messages` and in each `text.languages` table: Rift's
+/// own messages and replacements for plugin messages by qualified key.
+const MAX_ENTRIES: usize = 1024;
+/// Styles in `text.theme`.
+const MAX_STYLES: usize = 256;
+const MAX_LANGUAGES: usize = 64;
 
 /// `text = { theme = { name = markup }, messages = { key = markup },
 /// languages = { tag = { key = markup } } }`: the theme's named styles,
 /// replacements for Rift's own messages and their translations, checked
 /// here so a mistake fails the load instead of a player's login.
-pub(super) fn parse(root: &Table) -> Result<Arc<Catalog>, String> {
+///
+/// `plugins` are the `messages.toml` catalogues of the enabled plugins by
+/// namespace, checked with this theme. `namespace:key` entries in
+/// `messages` and `languages` replace their messages.
+pub(super) fn parse(
+    root: &Table,
+    plugins: Vec<(String, Messages)>,
+) -> Result<Arc<Catalog>, String> {
     let Some(values) = options(root, "text", &["theme", "messages", "languages"])? else {
-        return Ok(Arc::new(Catalog::default()));
-    };
-    let entries = |table: Table, path: &str| -> Result<Vec<(String, String)>, String> {
-        let mut pairs = Vec::new();
-        for pair in table.pairs::<Value, Value>() {
-            let (name, value) = pair.map_err(|error| format!("{path}: {error}"))?;
-            let name = string(name, &format!("{path} key"))?;
-            let value = string(value, &format!("{path}[{name:?}]"))?;
-            if pairs.len() >= 256 {
-                return Err(format!("{path}: at most 256 entries"));
-            }
-            pairs.push((name, value));
+        let mut catalog = Catalog::default();
+        for (namespace, messages) in plugins {
+            catalog = catalog.with_plugin(&namespace, messages)?;
         }
-        pairs.sort();
-        Ok(pairs)
+        return Ok(Arc::new(catalog));
     };
-    let pairs = |key: &str| -> Result<Vec<(String, String)>, String> {
+    let entries =
+        |table: Table, path: &str, limit: usize| -> Result<Vec<(String, String)>, String> {
+            let mut pairs = Vec::new();
+            for pair in table.pairs::<Value, Value>() {
+                let (name, value) = pair.map_err(|error| format!("{path}: {error}"))?;
+                let name = string(name, &format!("{path} key"))?;
+                let value = string(value, &format!("{path}[{name:?}]"))?;
+                if pairs.len() >= limit {
+                    return Err(format!("{path}: at most {limit} entries"));
+                }
+                pairs.push((name, value));
+            }
+            pairs.sort();
+            Ok(pairs)
+        };
+    let pairs = |key: &str, limit: usize| -> Result<Vec<(String, String)>, String> {
         match options_map(&values, key)? {
-            Some(table) => entries(table, &format!("text.{key}")),
+            Some(table) => entries(table, &format!("text.{key}"), limit),
             None => Ok(Vec::new()),
         }
     };
-    let theme = pairs("theme")?;
-    let messages = pairs("messages")?;
-    let mut catalog = Catalog::new(borrowed(&theme), borrowed(&messages))?;
+    let theme = pairs("theme", MAX_STYLES)?;
+    let messages = pairs("messages", MAX_ENTRIES)?;
+    let mut catalog = Catalog::themed(borrowed(&theme))?;
+    // Plugins first: the operator's replacements are checked against them.
+    for (namespace, plugin) in plugins {
+        catalog = catalog.with_plugin(&namespace, plugin)?;
+    }
+    catalog = catalog.with_messages(borrowed(&messages))?;
     if let Some(languages) = options_map(&values, "languages")? {
         let mut tags = Vec::new();
         for pair in languages.pairs::<Value, Value>() {
@@ -43,10 +67,10 @@ pub(super) fn parse(root: &Table) -> Result<Arc<Catalog>, String> {
                     "text.languages.{tag} must be a table of messages by key"
                 ));
             };
-            if tags.len() >= 64 {
-                return Err("text.languages: at most 64 languages".into());
+            if tags.len() >= MAX_LANGUAGES {
+                return Err(format!("text.languages: at most {MAX_LANGUAGES} languages"));
             }
-            let messages = entries(table, &format!("text.languages.{tag}"))?;
+            let messages = entries(table, &format!("text.languages.{tag}"), MAX_ENTRIES)?;
             tags.push((tag, messages));
         }
         tags.sort();

@@ -333,7 +333,11 @@ impl PlayerRequests {
                     .strip_prefix(rift::players_service::PREFIX)
                     .and_then(|rest| rest.strip_prefix('.'))
                     .unwrap_or_default();
-                let request = rift::players_service::Request::decode(operation, &message.payload);
+                let request = rift::players_service::Request::decode_for(
+                    operation,
+                    &message.payload,
+                    &players,
+                );
                 let audited = request
                     .as_ref()
                     .ok()
