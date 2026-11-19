@@ -1,12 +1,12 @@
 # Clustering: several active proxies
 
 > [!NOTE]
-> **Status: design proposal, revision 2.** Nothing described here is
+> **Status: design accepted, revision 2.** Nothing described here is
 > implemented yet. This document is the plan for the branch that adds
 > clustering. It grows with the branch and becomes the user guide when the
-> branch merges. Revision 2 follows a review of revision 1. Choices that still
-> need the owner are listed under [decisions](#decisions), each with its
-> options; the rest of the document assumes the recommended option.
+> branch merges. Revision 2 follows a review of revision 1. The choices it
+> rests on were decided by the owner and are recorded under
+> [decisions](#decisions), with the options that were weighed.
 
 Today exactly one Rift process accepts players. That process also holds the
 message broker, the player registry, the node controller and the instance
@@ -348,7 +348,7 @@ kicked by its owning peer when the ban applies.
 > A cluster uses the replicated SQLite backend. `database.backend =
 > "postgres"` with a [standby](database.md#standby-controllers) stays
 > available for networks that want one active proxy; combining it with
-> `cluster` is a configuration error. See [decisions](#decisions).
+> `cluster` is a configuration error (decision 5).
 
 ## Players
 
@@ -880,14 +880,16 @@ throughout.
 
 ## Decisions
 
-Each question lists its options with their trade-offs. The recommended option
-comes first; the rest of this document assumes it.
+Each question was decided on 2026-11-19. The chosen option comes first and is
+marked **(chosen)**; the others are kept with their trade-offs as the record
+of what was weighed. Reopening a decision means changing this section and
+every part of the document that depends on it.
 
 ### 1. How writes reach the database
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Leader executes typed operations, replicates changesets** (recommended) | Serializable by construction; no read sets, retries or conflict detection; a closed set of operations is easy to test | Every write site becomes a typed operation; follower writes cost a round trip to the leader |
+| **Leader executes typed operations, replicates changesets** (chosen) | Serializable by construction; no read sets, retries or conflict detection; a closed set of operations is easy to test | Every write site becomes a typed operation; follower writes cost a round trip to the leader |
 | Optimistic changesets from any peer (revision 1) | Writes run on the peer that makes them; closures stay as they are | Not serializable as specified: cached statements skip the authorizer, unique constraints are invisible, a new leader has no change index; retries starve under load |
 | Replicate SQL statements (rqlite style) | Small entries; no session extension | Rust logic between statements cannot be replicated; every statement must be deterministic |
 
@@ -895,7 +897,7 @@ comes first; the rest of this document assumes it.
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Claims in Raft, attributes broadcast by the owning peer** (recommended) | Uniqueness is linearizable; skins and server moves stay out of the log and snapshots | Two mechanisms; attributes can lag claims by milliseconds |
+| **Claims in Raft, attributes broadcast by the owning peer** (chosen) | Uniqueness is linearizable; skins and server moves stay out of the log and snapshots | Two mechanisms; attributes can lag claims by milliseconds |
 | Everything in Raft | One mechanism, one ordering | 1–3 KB per login and an entry per server switch, bigger snapshots, slower tab lists |
 | Nothing in Raft (gossip only, RedisBungee style) | No commit on login | Duplicate logins across peers become possible again |
 
@@ -903,14 +905,14 @@ comes first; the rest of this document assumes it.
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Refuse** (recommended) | No duplicates, no stale bans, caps hold | A peer cut off from the majority admits nobody |
+| **Refuse** (chosen) | No duplicates, no stale bans, caps hold | A peer cut off from the majority admits nobody |
 | Allow local-only logins, reconcile on rejoin | Players can still join a cut-off peer | Duplicate sessions, banned players admitted, `max_players` exceeded; the reconciliation kicks someone |
 
 ### 4. Existing players on a cut-off peer
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Keep for `partition_grace` (60 s), then disconnect** (recommended) | Short blips disconnect nobody; long partitions end with true counts and players able to rejoin elsewhere | A partition longer than the grace disconnects players whose backends may still work |
+| **Keep for `partition_grace` (60 s), then disconnect** (chosen) | Short blips disconnect nobody; long partitions end with true counts and players able to rejoin elsewhere | A partition longer than the grace disconnects players whose backends may still work |
 | Keep indefinitely | Nobody is disconnected by a partition | The majority's counts understate, so idle stops and caps misbehave; the players cannot be messaged or moved from the majority side |
 | Disconnect when fenced | Simplest; counts are true immediately | Every short network blip disconnects a whole proxy's players |
 
@@ -918,14 +920,14 @@ comes first; the rest of this document assumes it.
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Never: `cluster` with `backend = "postgres"` is an error; keep standby mode** (recommended) | One replicated backend to test; no external single point of failure | Networks with highly available PostgreSQL cannot reuse it for a cluster |
+| **Never: `cluster` with `backend = "postgres"` is an error; keep standby mode** (chosen) | One replicated backend to test; no external single point of failure | Networks with highly available PostgreSQL cannot reuse it for a cluster |
 | Later, as an alternative state store | Uses an existing HA database; no Raft for durable state | A third mode of every write path; PostgreSQL becomes the availability limit again |
 
 ### 6. A peer whose `rift.lua` differs from the deployed revision
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Adopt if it matches an older deployed revision, otherwise refuse to start** (recommended) | Stale hosts update themselves; hand edits are never silently lost | A hand-edited host needs an explicit `--adopt-deployed` |
+| **Adopt if it matches an older deployed revision, otherwise refuse to start** (chosen) | Stale hosts update themselves; hand edits are never silently lost | A hand-edited host needs an explicit `--adopt-deployed` |
 | Always adopt the deployed revision | No operator action ever | Hand edits on one host vanish without notice |
 | Always refuse to start | Nothing is ever overwritten | Every stale host needs manual work |
 
@@ -933,14 +935,14 @@ comes first; the rest of this document assumes it.
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Explicit `rift admin cluster` commands, bootstrap settings in `cluster.toml`** (recommended) | No circular dependency; a configuration typo cannot remove voters; each change is deliberate | A second place to configure; membership is not visible in `rift.lua` |
+| **Explicit `rift admin cluster` commands, bootstrap settings in `cluster.toml`** (chosen) | No circular dependency; a configuration typo cannot remove voters; each change is deliberate | A second place to configure; membership is not visible in `rift.lua` |
 | `cluster.peers` in the replicated `rift.lua` | One file describes everything | A peer needs the file to join the cluster that holds the file; a typo can drop voters |
 
 ### 8. Leader-only work in plugins
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Named leases with a fencing token, plus `scope` on `rift.every` (default `cluster`, meaning one peer)** (recommended) | Safe under leader changes; existing broadcast timers do not suddenly run once per peer | A new API to learn; `scope = "peer"` must be chosen for per-peer jobs |
+| **Named leases with a fencing token, plus `scope` on `rift.every` (default `cluster`, meaning one peer)** (chosen) | Safe under leader changes; existing broadcast timers do not suddenly run once per peer | A new API to learn; `scope = "peer"` must be chosen for per-peer jobs |
 | `rift.cluster.is_leader()` only | Tiny API | Racy: a deposed leader still sees `true` until it notices |
 | Run all plugins only on the leader | No plugin changes | Session events happen on every peer, so plugins must run everywhere |
 
@@ -948,27 +950,27 @@ comes first; the rest of this document assumes it.
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Load every plugin; flag ones without a `cluster` declaration in `plugin.toml`** (recommended) | Existing plugins keep working; operators see which ones to check | A plugin that keeps network-wide state in memory misbehaves until fixed |
+| **Load every plugin; flag ones without a `cluster` declaration in `plugin.toml`** (chosen) | Existing plugins keep working; operators see which ones to check | A plugin that keeps network-wide state in memory misbehaves until fixed |
 | Refuse plugins without the declaration | No silent misbehavior | Every existing plugin breaks on the first cluster start |
 
 ### 10. Learners and writes
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Learners send operations to the leader** (recommended) | Learners can be full proxies; voters stay few | Writes from distant learners pay their distance to the leader |
+| **Learners send operations to the leader** (chosen) | Learners can be full proxies; voters stay few | Writes from distant learners pay their distance to the leader |
 | Read-only learners | Simpler | A learner cannot admit players, since logins write claims |
 
 ### 11. Default scope of user subjects
 
 | Option | For | Against |
 | --- | --- | --- |
-| **`cluster`** (recommended) | Plugins and backends talk across the whole network, as they expect from one bus | Chatty subjects cross peer links; they need `scope = "local"` |
+| **`cluster`** (chosen) | Plugins and backends talk across the whole network, as they expect from one bus | Chatty subjects cross peer links; they need `scope = "local"` |
 | `local`, opt in to `cluster` | No cross-peer traffic unless asked | Existing plugins stop seeing each other across peers |
 
 ### 12. Witnesses and controller-only voters
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Witnesses are full replicas that may lead but hand leadership to a player-serving voter** (recommended) | Simple, uses Raft as is; works on any host that can reach the nodes | The witness holds all state and the bus-login key |
+| **Witnesses are full replicas that may lead but hand leadership to a player-serving voter** (chosen) | Simple, uses Raft as is; works on any host that can reach the nodes | The witness holds all state and the bus-login key |
 | Log-only witnesses that never lead | Holds no state | Needs custom voting rules on top of openraft |
 | Dedicated controller voters with no game listener | Proxies and control work separated; proxies scale as learners | More hosts to run for small networks |
