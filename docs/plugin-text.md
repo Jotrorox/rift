@@ -78,9 +78,11 @@ invited = "<accent><from></accent> hat dich in eine Party eingeladen."
 ```
 
 - `[messages]` holds the defaults. A value is a template, or a table with
-  `text` and the `args` the template may use.
-- `[languages.<tag>]` holds templates only. A language uses the arguments its
-  default declares and need not translate every key.
+  `text`, the `args` the template may use and the `styles` it may use
+  ([style arguments](#style-arguments)).
+- `[languages.<tag>]` holds templates only. A language uses the arguments and
+  styles its default declares and need not translate every key.
+- Parsing is strict, like `plugin.toml`: an unknown key is an error.
 - Templates are [markup](text.md#markup-tags) with the operator's
   [theme](text.md#theme), as in `text.messages`.
 
@@ -117,8 +119,9 @@ players::message(&target, text::message("invited").arg("from", &ctx.name))?;
   `rift.lua` and bus services have no catalog, so they always qualify.
 - Arguments are strings or numbers (shown as written, never parsed),
   components, or [style arguments](#style-arguments).
-- Rift checks the call: an unknown key, a missing argument or an argument the
-  message does not declare is an error at the call, whoever the recipient is.
+- Rift checks the call: an unknown key, a missing argument, an argument the
+  message does not declare, or content where the message declares a style is
+  an error at the call, whoever the recipient is.
 
 ### Whose language
 
@@ -135,6 +138,11 @@ default.
 
 `players.set-language` and the client's locale decide a player's language, as
 [today](plugin-events.md#the-player-directory-and-languages).
+
+Rift resolves a message at the call, in the language of the call's recipient,
+so text never carries an unresolved message further into Rift. Text in the
+configuration itself, such as the MOTD or a tab list template, is rendered
+once when the configuration loads, in the default language.
 
 ### Operator replacements
 
@@ -205,8 +213,10 @@ rift.text.mini("<team>[<tag>]</team> <name>", {
 - The value is markup made only of formatting tags, the same rule as a
   [theme](text.md#theme) style: color, decoration, font, shadow, insert,
   click and hover.
-- It works in `mini` and `message` objects. A catalog lists a style argument
-  in `args` like any other; the template decides what it wraps.
+- It works in `mini` and `message` objects. A catalog declares a style
+  argument under `styles` instead of `args`, so its templates can be checked:
+  `{ text = "<team>[<tag>]</team> <name>", args = ["tag", "name"], styles = ["team"] }`.
+  The template decides what the style wraps.
 - This is what lets an operator's replacement keep a color the plugin
   computes, such as a rank or team color: a component argument can only carry
   text the plugin chose, not text the template chose.
@@ -309,15 +319,12 @@ translated message, so the examples keep identical behavior.
 | --- | --- |
 | `src/text/markup.rs` | `Arg::Style`; arguments before theme styles; `<transition>`, phases, `<rainbow:!>`, `<sprite>`, `<head>`; `to_mini` writes the new tags back |
 | `src/text/catalog.rs` | A `Catalog` holds namespaces beside Rift's notices: declared arguments, defaults, languages and the operator's replacements by qualified key. The lookup order and the fallback stay one function for both |
-| `src/text/mod.rs` | `expand` knows the `message` object. A `Text` checked at the call keeps its messages unresolved, with their keys qualified; `Text::for_client` resolves them with the session's language, which `catalog::language()` already carries on the session's task |
-| `src/extensions/players.rs`, `src/plugins/services.rs` | `broadcast` renders once per language in use instead of once |
+| `src/text/mod.rs` | `expand` knows the `message` object and resolves it with the caller's namespace and the recipient's language, which each host call sets around the conversion. Text for several recipients stays a template until `broadcast` renders it |
+| `src/extensions/players.rs`, `src/plugins/services.rs` | Every action looks up its target's language before it converts the text; `broadcast` renders once per language in use instead of once |
 | Plugin loading | Read and check `messages.toml` where the manifest is read; pass the plugin's namespace to every host call that takes text |
 | `wit/rift-plugin.wit`, `src/plugins/wasm/bindings.rs`, `src/text/lua.rs` | The `text` interface and the `rift.text` additions |
 | `sdk/` | Builders, `escape`, the interface bindings, version 0.2.1 |
 | `src/check.rs` | Catalog checks and the per-plugin counts |
-
-A message whose catalog disappears between the call and the render, because a
-reload removed the plugin, shows its default words as captured at the call.
 
 ## Plan
 
@@ -360,11 +367,16 @@ once: Lua, the SDKs, bus replies and the configuration.
 
 ### 3. When a message is rendered
 
-**When it is sent to a client, not at the call.** A call has no single
-language: `broadcast` has many recipients, and a player's language can change
-between the call and the send. The call still checks the key and the
-arguments, so a mistake is an error for the plugin and never a broken message
-for a player.
+**At the call, in the recipient's language.** Every call that takes text
+names who sees it: a target, or the player an event is about. `broadcast` is
+the one call with several recipients, and it renders once per language in
+use.
+
+- *When the text is sent to the client*: text would carry unresolved
+  messages through every path that handles it (queues, tab lists, boss bars,
+  the bus), and one path that forgot to resolve would send clients an object
+  they cannot read. The only gain is a language that changes between the call
+  and the send.
 
 ### 4. Arguments and theme styles with one name
 
