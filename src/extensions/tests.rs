@@ -56,6 +56,36 @@ fn context(id: u64) -> Context {
 }
 
 #[test]
+fn jobs_take_a_cluster_scope_that_defaults_to_the_leader() {
+    use crate::cluster::queues::jobs::Scope;
+    let config = Config::from_lua(
+        &source("jobs = { a = { every_ms = 1000, run = function() end }, b = { every_ms = 1000, run = function() end, scope = 'peer' } }"),
+        "jobs.lua",
+    )
+    .unwrap();
+    let jobs = &config.extensions.as_ref().unwrap().jobs;
+    assert_eq!(jobs["a"].scope, Scope::Cluster);
+    assert_eq!(jobs["b"].scope, Scope::Peer);
+    assert_eq!(jobs["b"].every, Duration::from_secs(1));
+    assert!(
+        Config::from_lua(
+            &source("jobs = { a = { every_ms = 1000, run = function() end, scope = 'leader' } }"),
+            "jobs.lua",
+        )
+        .is_err()
+    );
+    // rift.every takes the same option before its function.
+    let script = format!(
+        "rift.every('sweep', 1000, {{ scope = 'peer' }}, function() end)\nrift.every('tick', 1000, function() end)\n{}",
+        source("api_version = 1")
+    );
+    let config = Config::from_lua(&script, "every.lua").unwrap();
+    let jobs = &config.extensions.as_ref().unwrap().jobs;
+    assert_eq!(jobs["sweep"].scope, Scope::Peer);
+    assert_eq!(jobs["tick"].scope, Scope::Cluster);
+}
+
+#[test]
 fn queue_pressure_excludes_expired_cancelled_and_disconnected_tickets() {
     let runtime = runtime("api_version=1, queues={game=1}");
     let first = runtime.session(context(1)).unwrap();

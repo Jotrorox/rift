@@ -31,6 +31,7 @@ Watch these alongside the process or service status:
 | Capacity/access pressure | `rift_connections_rate_limited_total`, `rift_logins_rate_limited_total`, `rift_connections_access_rejected_total`, `rift_connections_proxy_rejected_total` |
 | Memory | `rift_process_resident_memory_bytes` and `rift_process_resident_memory_available` on Linux |
 | Changes | `rift_reloads_total`, `rift_reload_failures_total`, `rift_player_transfers_total`, `rift_player_transfer_failures_total` |
+| [Cluster](clustering.md#metrics) health | `rift_cluster_is_leader`, `rift_cluster_peer_up`, `rift_cluster_replication_lag`, `rift_cluster_diverged`, `rift_cluster_config_reload_failed` |
 
 - **Backend health** is TCP reachability, not a successful Minecraft login.
   Backends stay eligible before the first probe and always report up when
@@ -44,6 +45,19 @@ Watch these alongside the process or service status:
 - **Memory** is the Linux process RSS, not a container memory limit or an
   estimate of memory per player. Rift omits the resident-byte gauge when
   availability is zero.
+
+### In a cluster
+
+Every peer of a [cluster](clustering.md) serves its own metrics; scrape each
+one. The series above count the peer's own connections and players; add them up
+across peers for the network. A peer also serves `rift_cluster_*` series: Raft term, leadership and lease, commit and applied index, log
+size, divergence, each peer's reachability, replication lag (on the leader),
+proposal latency and outcomes, bus forwarding and drops, and each peer's
+configuration state. [Clustering](clustering.md#metrics) lists them with
+alerting suggestions, and [log lines](clustering.md#log-lines) lists the
+`rift: cluster: ...` lines worth watching, such as
+`lost contact with the leader`, `this replica diverged` and
+`leaving: transferred N players to other peers and disconnected M`.
 
 ## Connection events
 

@@ -362,6 +362,61 @@ fn packet_ids_and_disconnect_encoding_follow_the_version_and_phase() {
 }
 
 #[test]
+fn transfer_packets_follow_the_version_and_phase() {
+    // The ids are those of the pinned packet lists the translator uses.
+    let data =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/rift-translation/data");
+    for number in 766..=777 {
+        let version = ProtocolVersion::new(number).unwrap();
+        let source = std::fs::read_to_string(data.join(format!("{number}.json"))).unwrap();
+        let names: serde_json::Value = serde_json::from_str(&source).unwrap();
+        for (state, list) in [
+            (State::Configuration, "configuration/clientbound"),
+            (State::Play, "play/clientbound"),
+        ] {
+            let expected = names["packets"][list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|name| name == "transfer")
+                .unwrap();
+            let packet = transfer(version, state, "eu-2.example.com", 25566).unwrap();
+            assert_eq!(packet.id as usize, expected, "{number} {state:?}");
+            let mut bytes = packet.data.as_slice();
+            assert_eq!(read_string(&mut bytes, 32767).unwrap(), "eu-2.example.com");
+            assert_eq!(read_varint(&mut bytes).unwrap(), 25566);
+            assert!(bytes.is_empty());
+        }
+        assert!(transfer(version, State::Login, "eu-2.example.com", 25566).is_err());
+        assert!(transfer(version, State::Play, "", 25566).is_err());
+    }
+    // Each change of the ids, and the release before the packet existed.
+    for (number, configuration, play) in [
+        (766, Some(0x0b), Some(0x73)),
+        (767, Some(0x0b), Some(0x73)),
+        (768, Some(0x0b), Some(0x7a)),
+        (772, Some(0x0b), Some(0x7a)),
+        (773, Some(0x0b), Some(0x7f)),
+        (774, Some(0x0b), Some(0x7f)),
+        (775, Some(0x0b), Some(0x81)),
+        (776, Some(0x0b), Some(0x81)),
+        (777, Some(0x0c), Some(0x84)),
+        (765, None, None),
+        (764, None, None),
+        (340, None, None),
+        (47, None, None),
+    ] {
+        let version = ProtocolVersion::new(number).unwrap();
+        assert_eq!(version.transfer_id(State::Configuration), configuration);
+        assert_eq!(version.transfer_id(State::Play), play);
+        assert_eq!(version.transfer_id(State::Login), None);
+        if configuration.is_none() {
+            assert!(transfer(version, State::Play, "eu-2.example.com", 25566).is_err());
+        }
+    }
+}
+
+#[test]
 fn state_transitions_require_acknowledgements_and_track_each_direction() {
     let version = ProtocolVersion::new(774).unwrap();
     let mut state = ConnectionState::new(State::Login);

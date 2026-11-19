@@ -40,6 +40,7 @@ Each plugin entry, here and in the HTTP API, has these fields:
 | `calls` | Awaited hooks plus queued observer events, timer ticks and bus messages |
 | `last_error`, `hooks`, `commands`, `capabilities` | The last error, and what the plugin registered and was granted |
 | `restartable` | `true` for persistent plugins |
+| `cluster_warning` | In a [cluster](plugins.md#plugins-in-a-cluster), why to check a persistent plugin whose `plugin.toml` does not declare `cluster = true`; otherwise null |
 
 ## Startup
 

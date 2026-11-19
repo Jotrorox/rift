@@ -91,6 +91,32 @@ async fn serve(
     drop(snapshot);
     let directory = query.as_deref() == Some("directory");
     let manifest = query.as_deref() == Some("manifest");
+    // In a cluster, template storage is written from the replicated
+    // manifest on every peer: changes go through it (docs/clustering.md,
+    // "Templates and other files"). Reads serve this peer's copy.
+    if templates
+        && matches!(method, Method::PUT | Method::DELETE)
+        && let Some(files) = rift::cluster::files::active()
+    {
+        let result = match segments(&relative) {
+            Ok(segments) if method == Method::PUT => files
+                .put_template(&segments, directory, &body)
+                .await
+                .map(|value| {
+                    if directory {
+                        (StatusCode::CREATED, super::Json(value)).into_response()
+                    } else {
+                        super::Json(value).into_response()
+                    }
+                }),
+            Ok(segments) => files
+                .delete_template(&segments)
+                .await
+                .map(|value| super::Json(value).into_response()),
+            Err(failure) => Err(failure),
+        };
+        return result.unwrap_or_else(failed);
+    }
     let result = tokio::task::spawn_blocking(move || -> io::Result<Response> {
         let segments = segments(&relative)?;
         let target = resolve(&base, &segments)?;

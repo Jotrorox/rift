@@ -59,6 +59,11 @@ into `on_message`, with a fresh sandboxed VM.
   subject, `message.reply`.
 - Publishing never waits for receivers or disk. Delivery counts describe
   enqueueing, not completed handler execution.
+- In a [cluster](messaging.md#in-a-cluster), `messaging.subscriptions`
+  have `"cluster"` scope: they hear user subjects published on any peer.
+  `delivered` counts this peer's subscribers only. Persistent Lua plugins
+  can choose `"local"` with `rift.subscribe(subject, { scope = "local" })`
+  (see [Lua plugins](plugins-lua.md)).
 
 ## Message players
 

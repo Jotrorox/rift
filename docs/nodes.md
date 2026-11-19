@@ -21,12 +21,14 @@ agents only prepare server directories and run processes.
 ```
 
 > [!NOTE]
-> There is exactly one active proxy. The message broker and the player
-> registry both live in the proxy process, so nodes add game-server capacity,
-> not proxy capacity. With the instance database in
-> [PostgreSQL or MariaDB](database.md), a second controller can wait as a
-> [standby](database.md#standby-controllers) and take over, adopting the
-> nodes' running servers, when the active one stops.
+> Nodes add game-server capacity, not proxy capacity. For more proxies, run a
+> [cluster](clustering.md): every peer accepts players, the Raft leader is the
+> controller, agents connect to any peer, and each peer is also a node named
+> after itself, with no `rift node` on its host. With one proxy and the
+> instance database in [PostgreSQL or MariaDB](database.md), a second
+> controller can instead wait as a [standby](database.md#standby-controllers)
+> and take over, adopting the nodes' running servers, when the active one
+> stops.
 
 [examples/nodes.lua](../examples/nodes.lua) is a complete controller
 configuration.
@@ -200,12 +202,12 @@ which [memory limits](server-limits.md#memory-limits) need.
 
 | Option | Meaning |
 | --- | --- |
-| `--controller` | The controller's `messaging.listen` address |
+| `--controller` | The controller's `messaging.listen` address. Repeat it for every peer of a [cluster](clustering.md): the agent connects to the first that accepts and moves on to the next when one fails |
 | `--name` | This node's name in `rift.config.nodes` |
 | `--root` | All server directories and caches live below it |
 | `--ca` | PEM certificate(s) that sign the controller's messaging certificate |
 | `--token-env` | Variable holding this node's token (default `RIFT_NODE_TOKEN`) |
-| `--server-name` | TLS name of the controller certificate (default: the controller host) |
+| `--server-name` | TLS name of the controller certificate (default: each controller's host) |
 | `--web` | The controller's web API, needed for templates; `https://` unless loopback |
 | `--forwarding-secret-env` | Variable with a fallback forwarding secret, used only when the controller sends none (a controller older than the agent); default `RIFT_FORWARDING_SECRET`. Naming it explicitly makes the variable required |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
@@ -655,6 +657,7 @@ groups.
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
 | The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. |
+| In a [cluster](clustering.md), the leader changes | The agent reconnects to another peer if its own went away. The new leader fences the agent with its term, then reconciles and adopts its servers; the agent refuses control commands of an older term. Servers keep running. |
 
 Each server runs in its own process group, which the agent kills when it stops
 or kills the server. When the agent itself dies from `SIGKILL` or the OOM
@@ -719,6 +722,22 @@ principal.
 - Servers do not inherit the agent's secrets: the variables named by
   `--token-env` and `--forwarding-secret-env` are removed from every server's
   environment.
+
+**In a cluster**
+
+- Agents connect to any peer (one `--controller` per peer) and the node's
+  session is claimed cluster-wide, so a second session on another peer
+  closes the first.
+- Only the leader sends control commands, each tagged with its Raft term.
+  The agent stores the highest term it has seen in `.rift-fence` below
+  `--root` and refuses control commands of a lower term, or without a term
+  once fenced, so a deposed leader cannot start, stop or remove servers.
+  Inspection (`logs`, `console`, `files`, `upload`, `tree`, `read`) is not
+  fenced and may come from any peer's web API.
+- An agent too old to be fenced gets no control commands in a cluster;
+  `rift check --strict` and the leader's log report it.
+- The agent each peer runs for its own host needs no token and no login: it
+  answers on the peer's own broker.
 
 **Server settings on a node**
 

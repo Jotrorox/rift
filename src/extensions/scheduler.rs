@@ -1,7 +1,10 @@
 //! Named fixed-delay jobs, and the `rift.permissions.on_change` handlers of
 //! API v3. A job name cannot overlap, even across reload generations.
 use super::{Context, Extensions, PERMISSION_EVENTS, fields, invalid, token};
-use crate::permissions::Notification;
+use crate::{
+    cluster::queues::jobs::{self, Scope},
+    permissions::Notification,
+};
 use mlua::{Function, Table, Value};
 use rift_permissions::{Actor, ChangeEvent};
 use std::{
@@ -23,7 +26,15 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(5);
 /// not take a worker that a login or command callback needs within 50 ms.
 pub(super) const MAX_CONCURRENT_JOBS: usize = 2;
 
-pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Duration>> {
+/// One `extensions.jobs` entry: its interval and where it runs in a
+/// cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Job {
+    pub every: Duration,
+    pub scope: Scope,
+}
+
+pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Job>> {
     let mut jobs = BTreeMap::new();
     if value.is_nil() {
         return Ok(jobs);
@@ -42,7 +53,7 @@ pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Duration>> {
                 "invalid job name or more than 32 jobs",
             ));
         }
-        fields(&job, &["every_ms", "run"])?;
+        fields(&job, &["every_ms", "run", "scope"])?;
         let every = match job.raw_get::<Value>("every_ms")? {
             Value::Integer(every) if (100..=86_400_000).contains(&every) => every as u64,
             _ => {
@@ -52,7 +63,25 @@ pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Duration>> {
             }
         };
         job.raw_get::<Function>("run")?;
-        jobs.insert(name, Duration::from_millis(every));
+        let scope = match job.raw_get::<Value>("scope")? {
+            Value::Nil => Scope::default(),
+            Value::String(scope) => {
+                let scope = scope.to_str()?.to_owned();
+                Scope::parse(Some(scope.as_str())).map_err(mlua::Error::runtime)?
+            }
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "job scope must be \"cluster\" or \"peer\"",
+                ));
+            }
+        };
+        jobs.insert(
+            name,
+            Job {
+                every: Duration::from_millis(every),
+                scope,
+            },
+        );
     }
     Ok(jobs)
 }
@@ -90,7 +119,7 @@ impl Extensions {
         if let Some(script) = &self.script {
             let mut gates = self.job_gates.lock().unwrap();
             gates.retain(|_, gate| gate.strong_count() > 0);
-            for (name, every) in &script.jobs {
+            for (name, job) in &script.jobs {
                 let gate = gates
                     .get(name)
                     .and_then(std::sync::Weak::upgrade)
@@ -98,12 +127,16 @@ impl Extensions {
                 gates.insert(name.clone(), Arc::downgrade(&gate));
                 let runtime = self.clone();
                 let name = name.clone();
-                let every = *every;
+                let Job { every, scope } = *job;
                 tasks.push(tokio::spawn(async move {
                     loop {
                         // First execution waits a full interval. Waiting after completion
                         // avoids catch-up bursts and an unbounded queue of missed ticks.
                         tokio::time::sleep(every).await;
+                        // In a cluster a `cluster` job runs on the leader only.
+                        if !jobs::due(scope) {
+                            continue;
+                        }
                         if let Err(error) = runtime.run_job(&name, &gate).await {
                             log_error!("extension job {name}: {error}");
                         }

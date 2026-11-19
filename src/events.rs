@@ -60,9 +60,13 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(listener: &str, peer: SocketAddr) -> Self {
+        // The process-local counter is the low bits of the id; the cluster
+        // peer and its incarnation are the high bits (all zero on a single
+        // Rift), so ids are unique across a cluster and stay below 2^53
+        // (see `rift::players::identity`).
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id: rift::players::identity::connection_id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
             listener: listener.to_owned(),
             peer,
             started: Instant::now(),

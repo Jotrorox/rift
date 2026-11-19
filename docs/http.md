@@ -174,6 +174,7 @@ rift.config.web = {
 | `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
 | `perms` | Read the [permission store](permissions.md) through `/api/perms` and the dashboard's permission views: groups, players, compiled subjects, traces, registered nodes, the change log and exports. Writing needs `config` |
 | `plugins` | Restart persistent [plugins](plugin-operations.md) (unrestricted scope only); reading plugin state needs `read`, plugin logs `logs` |
+| `cluster` | Hand a [cluster's](clustering.md) leadership to another peer and drain peers, from the [cluster panel](#the-cluster-panel) or `/api/cluster/…` (unrestricted scope only); the cluster's status needs `read` |
 
 ### Group scopes
 
@@ -185,8 +186,8 @@ rift.config.web = {
 
 Scoped listings omit other groups and servers, backend routing and
 configuration paths. Global counters and listener information remain visible.
-`config`, `deploy`, `extensions`, `plugins` and `perms` require unrestricted
-scope, because they affect or expose the whole proxy.
+`cluster`, `config`, `deploy`, `extensions`, `plugins` and `perms` require
+unrestricted scope, because they affect or expose the whole proxy.
 
 ### Tokens from the environment
 
@@ -237,8 +238,8 @@ The status and metrics servers are unauthenticated; see
 
 | Sidebar section | What you can do |
 | --- | --- |
-| Overview, Network | See listeners, backends, routes and live counters; edit the server list and tab list |
-| Servers | See lifecycle state, start and stop servers, create instances from service groups, remove them with explicit file retention/deletion labels, follow logs, send console commands and manage [files](#template-and-server-files) |
+| Overview, Network | See listeners, backends, routes and live counters, and on a cluster peer the [cluster panel](#the-cluster-panel); edit the server list and tab list |
+| Servers | See lifecycle state (with each server's peer in a cluster), start and stop servers, create instances from service groups, remove them with explicit file retention/deletion labels, follow logs, send console commands and manage [files](#template-and-server-files) |
 | Configuration | Edit, validate, save and apply the complete Lua source, and reload edits made on disk; edit groups and templates field by field; restart plugins; exercise `/ext` methods, paths and request bodies |
 | Permissions | Edit permission groups, players and nodes, and read their change history |
 | Activity | Browse configuration deployment history, roll back and read operator audit records |
@@ -348,6 +349,57 @@ without its token are summarized the same way.
   without a final result.
 - These are local records, not a tamper-proof external audit log.
 
+### In a cluster
+
+On a [cluster](clustering.md) peer, deployment history and operator audit
+records are replicated, so `GET /api/deployments`, rollbacks and
+`GET /api/audit` give the same answer on every peer (`"replicated": true`):
+
+- `PUT /api/config`, structured edits, rollbacks and a reload of an edited
+  `rift.lua` are deployments: Rift evaluates the source as every peer would,
+  refuses it with `409` if a shared section depends on `rift.peer` (the
+  message names the peer and section), commits it, applies it on the peer
+  that took the request and writes it to every other peer's `rift.lua`,
+  which then reloads. A peer whose reload fails keeps its configuration and
+  shows the reason in `GET /api/cluster` under `configuration`.
+- Unauthenticated request summaries stay with each peer.
+- The Servers table gains a Peer column: the peer whose own node runs each
+  server, or none for servers on `rift node` agents.
+- `rift cluster init` moves the records directory's `deployments.json` and
+  `audit.jsonl` into the cluster; afterwards the files are no longer
+  written.
+
+### The cluster panel
+
+On a cluster peer the Overview page shows a Cluster panel, from
+`GET /api/cluster` (see [status](clustering.md#status)); a single Rift shows
+none. It lists:
+
+- the peer serving the dashboard, the leader and term, the commit, applied
+  and snapshot indexes, the log size and the last deployment;
+- a warning while the replica diverged and is being repaired, while there is
+  no leader, while this peer has not joined and while a membership change
+  commits;
+- each peer's role (leader, voter, learner, witness or pending),
+  reachability and when this peer last heard from it, incarnation,
+  replication lag (known on the leader only; flagged beyond 1,000 entries),
+  players, load (from its node's agent), version (flagged when it differs
+  from this peer's), configuration (in sync, behind the last deployment, a
+  failed reload with its reason, or the shared sections it evaluates
+  differently), and its labels and `[node]` limits.
+
+Operators with the `cluster` permission also get, each after a confirmation:
+
+- **Transfer leadership** hands the leadership to the best caught-up voter
+  (`POST /api/cluster/transfer-leader`), and **Make leader** to the chosen
+  voter;
+- **Drain** takes a peer out of service as `rift admin cluster leave` does
+  (`POST /api/cluster/peers/{name}/leave`): it transfers its players to other
+  peers and exits until it is started again. Draining the peer that serves
+  the dashboard ends the dashboard's connection.
+
+A follower forwards both to the leader, as the admin commands do.
+
 ## Template and server files
 
 The Files page and `/api/files` serve two kinds of folders, like CloudNet's
@@ -380,6 +432,14 @@ dashboard; see [Templates and server software](templates.md).
 node token (`rift.config.nodes.<name>.token_env`) to mirror template folders.
 That token can only read template files; every other request, and every
 write, is refused with `403`. Node reads are not audited, like other reads.
+
+On a [cluster](clustering.md#templates-and-other-files) peer, template writes
+and deletes change the replicated template manifest: the response comes once
+a majority of voting peers hold the uploaded file and the change is
+committed, and every peer then writes the same `template_storage`. A write
+fails with `500` while fewer than a majority of voters are reachable.
+Top-level names starting with a dot are refused. Reads (and node agents)
+use the peer's own copy, so any peer serves the same templates.
 
 ## Limits
 

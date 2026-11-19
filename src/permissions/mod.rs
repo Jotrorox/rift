@@ -3,8 +3,9 @@
 //! the change log ([`audit`]), LuckPerms import and export ([`import`]), the
 //! Lua `rift.permissions` module ([`lua`]), the `/perms` grammar shared by
 //! every command surface ([`command`]), the bus handlers and change fan-out
-//! ([`control`]), the `/api/perms` HTTP routes ([`http`]) and the replication
-//! contract a follower proxy will implement ([`follower`]).
+//! ([`control`]), the `/api/perms` HTTP routes ([`http`]), every write as a
+//! typed operation ([`ops`]) and the replication contract a follower proxy
+//! will implement ([`follower`]).
 //!
 //! The model, the resolver and the wire types live in the `rift-permissions`
 //! crate so backends resolve exactly as the proxy does; nothing here walks
@@ -18,6 +19,7 @@ pub mod follower;
 pub mod http;
 mod import;
 pub(crate) mod lua;
+pub mod ops;
 mod store;
 
 pub use audit::LogQuery;

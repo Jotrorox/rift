@@ -2,12 +2,14 @@
 
 A queue caps how many players a backend holds and makes the rest wait in
 line. `queues = { survival = 100 }` in
-[`rift.config.plugins`](extensions.md#set-up) sets a process-local capacity
-of 100 for that backend. Queues require online authentication.
+[`rift.config.plugins`](extensions.md#set-up) sets a capacity of 100 for that
+backend. Queues require online authentication. In a
+[cluster](#in-a-cluster) the capacity and the line are network-wide; a single
+Rift counts its own players.
 
 - The capacity counts initial attachments and transfers in progress as well as
   joined sessions. It does not count players connected directly to Paper or
-  through another Rift process.
+  through a Rift process outside the cluster.
 - All entry paths, including administrator transfers, reserve capacity
   atomically before opening the backend.
 - During preflight the player holds the old and the target slot. Failure
@@ -83,3 +85,50 @@ initial join, with `/server` and on every transfer.
 - Destination names are lowercased in the node. The node is checked like
   [server access](permissions.md#server-access), in the contexts the proxy
   knows for the player, and `*` or `rift.*` include it.
+
+## In a cluster
+
+In a [cluster](clustering.md) of several proxies, every peer runs the same
+queues and players on every peer wait in one line per destination. The
+**queue service runs on the leader**; each ticket stays on the peer that holds
+the player's session.
+
+- **One order.** Each peer reports its tickets and the slots its sessions hold
+  to the leader when they change and at least once a second. The leader
+  stamps each new ticket's arrival and orders the tickets of every peer by
+  priority, then arrival, exactly as a single Rift orders its own.
+- **Positions** in "you are in position N" count every peer's tickets.
+- **Capacity counts the network.** A destination's used slots are the slots
+  held by sessions on every live peer, or the players the cluster's
+  replicated player list puts there, whichever is more.
+- **Turns.** When the head of a line may enter, the leader tells the head's
+  peer at once, and that peer moves the player as a single Rift does. The
+  head stays first until it has entered, so one head completes its entry
+  before the next is considered. Bypass and priority work as above, checked
+  on the player's own peer.
+- **Leader changes.** Every peer submits its tickets again with the arrivals
+  the old leader stamped, and the new leader rebuilds the same order. It
+  collects for two seconds before it lets the next head in, so a ticket that
+  has not been resubmitted yet is not jumped. Players notice at most a short
+  pause.
+- **Lost peers.** When a peer stops reporting for `cluster.peer_timeout`, or
+  expires or restarts, the leader drops its tickets and its slots; its
+  players were disconnected with it.
+- **Scaling** reads the network-wide line on the leader, where the scaler
+  runs; other peers report the line as the leader last told them.
+
+**Consistency.** The order of a line is decided only by the leader. Each peer
+decides about its own players from the leader's last answer, which is at
+most a second old while the leader is reachable:
+
+- A queued player enters only while that answer is less than five seconds
+  old. Without a leader (an election, a partition), queues wait.
+- A player who is not queued (a direct `/server`, an initial join, a
+  transfer) enters when the slots last reported leave room and nobody is
+  waiting. Two peers can each admit such a player in the same second, so a
+  destination can briefly hold one player more per peer than its capacity;
+  queued players then wait until enough leave, as after a bypass.
+- Tickets live in the memory of their peer: they survive leader changes,
+  not a restart of the player's own peer, which disconnects the player
+  anyway.
+

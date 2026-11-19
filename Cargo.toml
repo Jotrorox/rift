@@ -65,7 +65,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 serde_json.workspace = true
 serde = { workspace = true, features = ["rc"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
-rusqlite = { version = "0.42", features = ["bundled"] }
+# `backup`: cluster snapshots and backups use SQLite's online backup API.
+rusqlite = { version = "0.42", features = ["backup", "bundled"] }
 # database.backend = "postgres": the instance database on a PostgreSQL server.
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 futures-util = { version = "0.3", default-features = false }
@@ -93,6 +94,9 @@ http-body-util = { version = "0.1", optional = true }
 wasmtime = { version = "50.0.2", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
 wasmtime-wasi = { version = "50.0.2", optional = true, default-features = false, features = ["p2"] }
 wasmtime-wasi-http = { version = "50.0.2", optional = true, default-features = false, features = ["default-send-request", "p2"] }
+# Clustering (docs/clustering.md): Raft, and the tokio runtime openraft runs on.
+openraft = { version = "0.10.0", default-features = false, features = ["tokio-rt", "serde"] }
+openraft-rt-tokio = "0.10.0"
 
 [features]
 default = ["wasm"]
@@ -108,6 +112,8 @@ libc = "0.2"
 [dev-dependencies]
 # The end-to-end permission tests run the real backend client.
 rift-permissions-client.workspace = true
+# The cluster simulation runs on the paused tokio clock.
+tokio = { workspace = true, features = ["test-util"] }
 
 [profile.release]
 lto = "thin"

@@ -191,6 +191,7 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
         agent::Agent::new(agent::Options {
             controller: self.server.local_addr().unwrap().to_string(),
             server_name: "localhost".into(),
+            fallback_controllers: vec![],
             ca: PathBuf::new(),
             name: name.into(),
             token: token.into(),
@@ -202,6 +203,8 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
                 .into_owned()]),
             forwarding_secret: Some("node secret".into()),
             forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
+            local_templates: None,
+            any_program: false,
         })
         .unwrap()
     }
@@ -959,6 +962,12 @@ fn agent_options_require_a_token_and_default_to_java() {
     unsafe { std::env::set_var("RIFT_NODE_OPTIONS_TEST_TOKEN", TOKEN) };
     let options = agent::Options::parse(&args(&[])).unwrap();
     assert_eq!(options.server_name, "10.0.0.2");
+    // Every peer of a cluster, each verified for its own host.
+    let options = agent::Options::parse(&args(&["--controller", "[fd00::3]:7443"])).unwrap();
+    assert_eq!(
+        options.controllers(),
+        [("10.0.0.2:7443", "10.0.0.2"), ("[fd00::3]:7443", "fd00::3")]
+    );
     assert_eq!(
         options.allowed_programs,
         BTreeSet::from(["java".to_owned()])
@@ -1023,6 +1032,7 @@ async fn servers_on_a_node_start_with_their_own_bus_login() {
     let logins = Arc::new(rift::instance_login::Logins::with_key([9; 32]));
     logins.set_bus(rift::instance_login::Bus {
         address: "10.0.0.2:7443".into(),
+        fallback_addresses: Vec::new(),
         server_name: "rift.internal".into(),
         certificate: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".into(),
     });

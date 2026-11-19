@@ -72,6 +72,7 @@ mode = "persistent"         # or "script"; default "persistent"
 engine = "wasm"             # "lua" or "wasm"; required for persistent plugins
 entry = "relaxoban.wasm"    # default "init.lua" for Lua; required for WebAssembly
 hot_reload = false          # call reload(config) instead of restarting on a config change
+cluster = true              # optional: works with one instance per cluster peer ("aware" also works)
 
 [deadlines]                 # milliseconds
 login = 2000                # any hook that is awaited (see the event table)
@@ -109,6 +110,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `engine` | required | An engine missing from this build is a warning in `rift check`, an error in `rift check --strict`, and refused at startup and reload. |
 | `entry` | `init.lua` (Lua) | A relative path of at most 256 bytes inside the folder, without `..`, not inside `data/` and without hidden (dot) components. |
 | `hot_reload` | `false` | See [reloads](plugin-operations.md#reloads). |
+| `cluster` | not declared | `true` or `"aware"` declares that the plugin works in a [cluster](#plugins-in-a-cluster); `false` is the same as leaving it out. Allowed in `"script"` manifests too. |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown`, `work` and the awaited hooks of the [event table](plugin-events.md#all-events). Awaited hooks allow 1–10 000 ms, `http` up to 60 000. Observers have no deadline and are rejected here. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook ([deadlines and failures](plugin-events.md#deadlines-and-failures), [restarts](plugin-operations.md#failures-and-restarts)). |
 | `[background]` | no workers | See [background work](plugin-events.md#background-work). |
@@ -156,6 +158,41 @@ underscores (`set_language`).
 Calls that wait (bus requests, server operations, store writes) block only the
 plugin's own thread. Persistent plugins get no per-call budgets beyond their
 deadlines.
+
+## Plugins in a cluster
+
+In a [cluster](clustering.md) of several proxies every peer loads every
+plugin and runs its own instance. Session events (login, chat, commands,
+joins) arrive on the peer that holds the session, so plugin code sees each of
+them once. What differs from a single Rift:
+
+- **In-memory state is per peer.** A counter, cache or list a plugin keeps in
+  memory holds only what its own peer saw. Keep network-wide state in the
+  [store](host-services.md#persistent-state), which the cluster replicates,
+  or on the bus.
+- **Jobs.** `rift.every` jobs (in the configuration script and Lua plugins)
+  run on the leader only by default (`scope = "cluster"`); `scope = "peer"`
+  runs them everywhere. `rift.timers.*` and the WebAssembly `timers`
+  interface tick on every peer: the contract has no scoped timer yet, so a
+  WebAssembly job that must run once takes a lease instead.
+- **Work that must run once** takes a lease: `rift.cluster.lease(name,
+  ttl_ms)` returns a fencing token on at most one peer at a time ([leases in
+  a cluster](host-services.md#leases-in-a-cluster)). The leases are
+  available to the configuration script and Lua plugins; WebAssembly plugins
+  cannot reach them yet.
+
+A plugin whose author checked these points declares it in `plugin.toml`:
+
+```toml
+cluster = true
+```
+
+Every plugin loads with or without the declaration, so existing plugins keep
+working. In a cluster, persistent plugins without it are flagged: `rift check`
+warns about each one, and the plugin status in `rift admin plugins list`,
+`GET /api/plugins` (`cluster_warning`) and the dashboard's Plugins view says
+"not declared cluster-aware". The flag is advice for the operator, not a
+refusal. A single Rift never shows it.
 
 ## Trust model
 

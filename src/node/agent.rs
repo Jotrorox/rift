@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -38,12 +38,12 @@ use crate::{
 
 pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node> --root <directory> --ca <certificate.pem> [options]\n\
     Runs game servers for a Rift controller on this host.\n\
-    --controller <host:port>  the controller's messaging.listen address (QUIC)\n\
+    --controller <host:port>  the controller's messaging.listen address (QUIC); repeat it for every peer of a cluster, tried in turn\n\
     --name <node>             this node's name in the controller's rift.config.nodes\n\
     --root <directory>        all server and cache directories live below it\n\
     --ca <file>               PEM certificate(s) that sign the controller's messaging certificate\n\
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
-    --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
+    --server-name <name>      TLS name of the controller certificate (default: each controller's host)\n\
     --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
     --forwarding-secret-env <variable>  fallback forwarding secret for controllers that do not send theirs (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
@@ -51,8 +51,13 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
 /// Parsed `rift node` arguments.
 #[derive(Debug, Clone)]
 pub struct Options {
+    /// The first `--controller`, and the TLS name its certificate is
+    /// verified for.
     pub controller: String,
     pub server_name: String,
+    /// Every further `--controller` (the other peers of a cluster), with its
+    /// TLS name. The agent tries them in turn when a controller fails.
+    pub fallback_controllers: Vec<(String, String)>,
     pub ca: PathBuf,
     pub name: String,
     pub token: String,
@@ -63,13 +68,49 @@ pub struct Options {
     /// secret of its own in `prepare` (a controller older than this agent).
     pub forwarding_secret: Option<String>,
     pub forwarding_secret_env: String,
+    /// The embedded agent of a cluster peer reads templates from its
+    /// peer's own template storage instead of fetching them over `--web`.
+    pub local_templates: Option<PathBuf>,
+    /// The embedded agent of a cluster peer runs any program its
+    /// configuration names, as servers on the proxy's own host do; a
+    /// `rift node` agent only runs its `--allow-program` list.
+    pub any_program: bool,
 }
 
 impl Options {
+    /// The options of the node agent a cluster peer runs in its own process
+    /// (docs/clustering.md, "Servers on the peers' own hosts"): node `name`
+    /// (the peer's name) with its servers below `root`. It needs no
+    /// controller address, certificate or token: it answers commands on the
+    /// peer's own broker ([`Agent::serve_broker`]).
+    pub fn embedded(
+        name: &str,
+        root: PathBuf,
+        local_templates: Option<PathBuf>,
+        forwarding_secret: Option<String>,
+    ) -> Self {
+        Self {
+            controller: String::new(),
+            server_name: String::new(),
+            fallback_controllers: Vec::new(),
+            ca: PathBuf::new(),
+            name: name.to_owned(),
+            token: String::new(),
+            root,
+            web: None,
+            allowed_programs: BTreeSet::new(),
+            forwarding_secret,
+            forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
+            local_templates,
+            any_program: true,
+        }
+    }
+
     pub fn parse(args: &[String]) -> io::Result<Self> {
         let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidInput, message);
         let mut values: BTreeMap<&str, String> = BTreeMap::new();
         let mut allowed_programs = BTreeSet::new();
+        let mut controllers = Vec::new();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.as_str();
@@ -96,6 +137,10 @@ impl Options {
                     return Err(invalid("--allow-program must not be empty".into()));
                 }
                 allowed_programs.insert(value);
+            } else if flag == "--controller" {
+                if !controllers.contains(&value) {
+                    controllers.push(value);
+                }
             } else if values.insert(flag, value).is_some() {
                 return Err(invalid(format!("{flag} was given twice")));
             }
@@ -105,7 +150,9 @@ impl Options {
                 .remove(flag)
                 .ok_or_else(|| invalid(format!("{flag} is required\n{USAGE}")))
         };
-        let controller = required("--controller")?;
+        if controllers.is_empty() {
+            return Err(invalid(format!("--controller is required\n{USAGE}")));
+        }
         let name = required("--name")?;
         let root = PathBuf::from(required("--root")?);
         let ca = PathBuf::from(required("--ca")?);
@@ -132,11 +179,19 @@ impl Options {
                 "node token must contain 32..=1024 bytes without control characters".into(),
             ));
         }
-        let host = controller
-            .rsplit_once(':')
-            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
-            .ok_or_else(|| invalid("--controller must be host:port".into()))?;
-        let server_name = values.remove("--server-name").unwrap_or(host);
+        let explicit_server_name = values.remove("--server-name");
+        let mut controllers = controllers
+            .into_iter()
+            .map(|controller| -> io::Result<(String, String)> {
+                let host = controller
+                    .rsplit_once(':')
+                    .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
+                    .ok_or_else(|| invalid("--controller must be host:port".into()))?;
+                let server_name = explicit_server_name.clone().unwrap_or(host);
+                Ok((controller, server_name))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let (controller, server_name) = controllers.remove(0);
         let web = values
             .remove("--web")
             .map(|web| web.trim_end_matches('/').to_owned());
@@ -170,6 +225,7 @@ impl Options {
         Ok(Self {
             controller,
             server_name,
+            fallback_controllers: controllers,
             ca,
             name,
             token,
@@ -178,7 +234,20 @@ impl Options {
             allowed_programs,
             forwarding_secret,
             forwarding_secret_env,
+            local_templates: None,
+            any_program: false,
         })
+    }
+
+    /// Every controller address with its TLS name, the first one first.
+    pub fn controllers(&self) -> Vec<(&str, &str)> {
+        std::iter::once((self.controller.as_str(), self.server_name.as_str()))
+            .chain(
+                self.fallback_controllers
+                    .iter()
+                    .map(|(address, name)| (address.as_str(), name.as_str())),
+            )
+            .collect()
     }
 }
 
@@ -211,7 +280,13 @@ pub async fn run(options: Options) -> io::Result<()> {
         "node {} serving {} for controller {}",
         agent.options.name,
         agent.root.display(),
-        agent.options.controller
+        agent
+            .options
+            .controllers()
+            .iter()
+            .map(|(address, _)| *address)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let monitor = tokio::spawn(agent.clone().monitor());
     tokio::select! {
@@ -277,6 +352,12 @@ pub struct Agent {
     http: reqwest::Client,
     /// Unfinished [`Command::Upload`]s by id.
     uploads: StdMutex<HashMap<String, Upload>>,
+    /// The index in [`Options::controllers`] to try first.
+    next_controller: AtomicUsize,
+    /// The highest cluster term a leader fenced this agent with.
+    fence: super::fence::Fence,
+    /// Set on the embedded agent of a cluster peer ([`Agent::set_keep`]).
+    keep: StdMutex<Option<Keep>>,
 }
 
 struct Upload {
@@ -293,12 +374,19 @@ struct Process {
     child: Option<Child>,
     pid: Option<u32>,
     directory: PathBuf,
+    /// Started with `keep_running` by an embedded agent (see
+    /// [`Agent::set_keep`]): it outlives the agent, which adopts it again.
+    kept: bool,
 }
+
+/// Which servers an embedded agent starts with `keep_running`.
+pub type Keep = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Agent {
     pub fn new(options: Options) -> io::Result<Arc<Self>> {
         std::fs::create_dir_all(&options.root)?;
         let root = std::fs::canonicalize(&options.root)?;
+        let fence = super::fence::Fence::open(&root)?;
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
         let mut http = reqwest::Client::builder()
@@ -334,7 +422,28 @@ impl Agent {
             hashes: StdMutex::new(HashMap::new()),
             http,
             uploads: StdMutex::new(HashMap::new()),
+            next_controller: AtomicUsize::new(0),
+            fence,
+            keep: StdMutex::new(None),
         }))
+    }
+
+    /// On the embedded agent of a cluster peer: `keep` says which servers
+    /// have `keep_running` in the peer's configuration. Those start as
+    /// servers on the proxy's host with `keep_running` do (see
+    /// docs/kept-servers.md): they keep running when the peer's process
+    /// stops, and the next agent adopts them when the leader starts them
+    /// again. Every other server stops with the peer.
+    pub fn set_keep(&self, keep: Keep) {
+        *self.keep.lock().unwrap_or_else(|e| e.into_inner()) = Some(keep);
+    }
+
+    fn keeps(&self, server: &str) -> bool {
+        self.keep
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|keep| keep(server))
     }
 
     fn bump(&self) -> u64 {
@@ -355,11 +464,18 @@ impl Agent {
                         "node {} lost the controller connection: {error}; servers keep running",
                         self.options.name
                     );
+                    // Start with the next peer: this one probably went away.
+                    self.next_controller.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) => log_warn!(
                     "node {} cannot reach controller {}: {error}",
                     self.options.name,
-                    self.options.controller
+                    self.options
+                        .controllers()
+                        .iter()
+                        .map(|(address, _)| *address)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             }
             tokio::time::sleep(backoff).await;
@@ -367,12 +483,41 @@ impl Agent {
         }
     }
 
+    /// Connect to the first controller that accepts, starting with
+    /// [`Agent::next_controller`].
     async fn connect(&self, tls: quinn::ClientConfig) -> io::Result<quic::Client> {
-        let address: SocketAddr = tokio::net::lookup_host(&self.options.controller)
-            .await?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "controller has no address"))?;
-        quic::Client::connect(address, &self.options.server_name, tls, &self.options.token).await
+        let controllers = self.options.controllers();
+        let start = self.next_controller.load(Ordering::Relaxed);
+        let mut last = None;
+        for offset in 0..controllers.len() {
+            let index = (start + offset) % controllers.len();
+            let (controller, server_name) = controllers[index];
+            let result = async {
+                let address: SocketAddr = tokio::net::lookup_host(controller)
+                    .await?
+                    .next()
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "controller has no address")
+                    })?;
+                quic::Client::connect(address, server_name, tls.clone(), &self.options.token).await
+            }
+            .await;
+            match result {
+                Ok(client) => {
+                    self.next_controller.store(index, Ordering::Relaxed);
+                    return Ok(client);
+                }
+                Err(error) if controllers.len() > 1 => {
+                    log_warn!(
+                        "node {} cannot reach controller {controller}: {error}",
+                        self.options.name
+                    );
+                    last = Some(error);
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("no controller configured")))
     }
 
     /// Answer commands and publish state until the connection fails.
@@ -421,21 +566,7 @@ impl Agent {
                 };
                 let (agent, client) = (self.clone(), client.clone());
                 tokio::spawn(async move {
-                    let result = match serde_json::from_slice::<Command>(&message.payload) {
-                        Ok(command) => agent.handle(command).await,
-                        Err(error) => Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("invalid node command: {error}"),
-                        )),
-                    };
-                    let mut payload = protocol::reply(result).to_string();
-                    if payload.len() > protocol::MAX_MESSAGE {
-                        payload = protocol::reply(Err(io::Error::new(
-                            io::ErrorKind::FileTooLarge,
-                            "node reply exceeds the 1 MiB message limit",
-                        )))
-                        .to_string();
-                    }
+                    let payload = agent.answer(&message.payload).await;
                     let _ = client.publish(&reply, Bytes::from(payload)).await;
                 });
             }
@@ -444,6 +575,84 @@ impl Agent {
             error = publisher => error,
             error = receiver => error,
         }
+    }
+
+    /// The reply to one encoded command: its result, or why it failed.
+    async fn answer(&self, payload: &[u8]) -> String {
+        let result = match protocol::decode(payload) {
+            Ok((command, term)) => self.handle_tagged(command, term).await,
+            Err(error) => Err(error),
+        };
+        let reply = protocol::reply(result).to_string();
+        if reply.len() > protocol::MAX_MESSAGE {
+            return protocol::reply(Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "node reply exceeds the 1 MiB message limit",
+            )))
+            .to_string();
+        }
+        reply
+    }
+
+    /// Answer commands and publish state on `broker`, the bus of the cluster
+    /// peer this agent is embedded in, until the broker fails: the same
+    /// subjects, fencing, reconciliation and state reports as a `rift node`
+    /// agent connected over QUIC, without a login. The cluster routes
+    /// `rift.node.<peer>.cmd` to the peer and the state to the leader.
+    pub async fn serve_broker(self: Arc<Self>, broker: crate::messaging::Broker) -> io::Error {
+        let mut commands =
+            match broker.subscribe(&protocol::command_subject(&self.options.name), None) {
+                Ok(subscription) => subscription,
+                Err(error) => return io::Error::other(error),
+            };
+        let publisher = {
+            let agent = self.clone();
+            let broker = broker.clone();
+            async move {
+                loop {
+                    let state = agent.state().await;
+                    let payload = match serde_json::to_vec(&state) {
+                        Ok(payload) => payload,
+                        Err(error) => return io::Error::other(error),
+                    };
+                    if let Err(error) = broker.publish(
+                        &protocol::state_subject(&agent.options.name),
+                        Bytes::from(payload),
+                    ) {
+                        return io::Error::other(error);
+                    }
+                    let _ =
+                        tokio::time::timeout(protocol::STATE_INTERVAL, agent.changed.notified())
+                            .await;
+                }
+            }
+        };
+        let receiver = async {
+            loop {
+                let message = match commands.recv().await {
+                    Ok(message) => message,
+                    Err(error) => return io::Error::other(error),
+                };
+                let Some(reply) = message.reply.as_deref().map(str::to_owned) else {
+                    continue;
+                };
+                let (agent, broker) = (self.clone(), broker.clone());
+                tokio::spawn(async move {
+                    let payload = agent.answer(&message.payload).await;
+                    let _ = broker.publish(&reply, Bytes::from(payload));
+                });
+            }
+        };
+        tokio::select! {
+            error = publisher => error,
+            error = receiver => error,
+        }
+    }
+
+    /// Stop every server this agent runs: what happens to the servers of an
+    /// embedded agent when its peer's proxy stops.
+    pub async fn shutdown(&self) {
+        self.stop_all().await;
     }
 
     pub async fn state(&self) -> NodeState {
@@ -504,6 +713,15 @@ impl Agent {
                 let mut processes = self.processes.lock().await;
                 for (name, process) in processes.iter_mut() {
                     let Some(child) = process.child.as_mut() else {
+                        // An adopted kept server: only its record tells.
+                        if process.kept && crate::managed::kept_pid(&process.directory).is_none() {
+                            exited.push((
+                                name.clone(),
+                                "no longer running; an adopted process leaves no exit status"
+                                    .to_owned(),
+                                false,
+                            ));
+                        }
                         continue;
                     };
                     match child.try_wait() {
@@ -566,8 +784,10 @@ impl Agent {
 
     async fn stop_all(&self) {
         self.expire_uploads(Duration::ZERO);
+        // Kept servers keep running; dropping their handles leaves them be.
         let children: Vec<_> = std::mem::take(&mut *self.processes.lock().await)
             .into_values()
+            .filter(|process| !process.kept)
             .filter_map(|process| process.child)
             .collect();
         let stops = children
@@ -580,8 +800,24 @@ impl Agent {
         }
     }
 
+    /// Run `command`, which carries a cluster leader's `term` if a cluster
+    /// sent it: a control command of a lower term than this agent's fence
+    /// is refused (see [`super::fence`]); inspection commands come from any
+    /// peer and are never fenced.
+    pub async fn handle_tagged(&self, command: Command, term: Option<u64>) -> io::Result<Value> {
+        if !command.is_inspection() && !matches!(command, Command::Fence { .. }) {
+            self.fence.check(term)?;
+        }
+        self.handle(command).await
+    }
+
     pub async fn handle(&self, command: Command) -> io::Result<Value> {
         match command {
+            Command::Fence { term } => {
+                let term = self.fence.raise(term)?;
+                log_info!("node {} fenced by cluster term {term}", self.options.name);
+                Ok(json!({"term": term}))
+            }
             Command::Start(start) => self.start(start).await,
             Command::Stop { server, timeout_ms } => {
                 self.stop(&server, Duration::from_millis(timeout_ms)).await
@@ -763,6 +999,16 @@ impl Agent {
         let process = processes.get_mut(server).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "managed server is not running")
         })?;
+        if process.kept {
+            // A kept server reads its console from the FIFO in its directory.
+            let (directory, line) = (process.directory.clone(), line.to_owned());
+            drop(processes);
+            return tokio::task::spawn_blocking(move || {
+                crate::managed::write_kept_console(&directory, &line)
+            })
+            .await
+            .map_err(io::Error::other)?;
+        }
         crate::managed::write_console(&mut process.child, line).await
     }
 
@@ -916,7 +1162,7 @@ impl Agent {
             .command
             .first()
             .ok_or_else(|| invalid("managed server command is empty"))?;
-        if !self.options.allowed_programs.contains(program) {
+        if !self.options.any_program && !self.options.allowed_programs.contains(program) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
@@ -937,6 +1183,31 @@ impl Agent {
                 "adopted": true,
                 "agent": self.id,
                 "revision": self.revision.load(Ordering::Acquire),
+            }));
+        }
+        let kept = self.keeps(&start.server);
+        // A kept server an earlier agent of this peer started: adopt it.
+        if kept && let Some(pid) = crate::managed::kept_pid(&directory) {
+            processes.insert(
+                start.server.clone(),
+                Process {
+                    child: None,
+                    pid: Some(pid),
+                    directory: directory.clone(),
+                    kept: true,
+                },
+            );
+            drop(processes);
+            let revision = self.bump();
+            log_info!(
+                "node adopted {} (pid {pid}), which kept running",
+                start.server
+            );
+            return Ok(json!({
+                "pid": pid,
+                "adopted": true,
+                "agent": self.id,
+                "revision": revision,
             }));
         }
         if !directory.is_dir() {
@@ -974,13 +1245,18 @@ impl Agent {
             .memory_limit
             .map(crate::config::MemoryLimit::try_from)
             .transpose()?;
-        let child = crate::managed::spawn_process(
-            &start.command,
-            &directory,
-            &environment,
-            &isolation,
-            memory_limit.map(|limit| (start.server.as_str(), limit)),
-        )?;
+        let limit = memory_limit.map(|limit| (start.server.as_str(), limit));
+        let child = if kept {
+            crate::managed::spawn_kept(&start.command, &directory, &environment, &isolation, limit)?
+        } else {
+            crate::managed::spawn_process(
+                &start.command,
+                &directory,
+                &environment,
+                &isolation,
+                limit,
+            )?
+        };
         let pid = child.id();
         processes.insert(
             start.server.clone(),
@@ -988,6 +1264,7 @@ impl Agent {
                 child: Some(child),
                 pid,
                 directory: directory.clone(),
+                kept,
             },
         );
         self.exits
@@ -1003,8 +1280,8 @@ impl Agent {
     async fn stop(&self, server: &str, grace: Duration) -> io::Result<Value> {
         check_name(server)?;
         let process = self.processes.lock().await.remove(server);
-        let result = match process.and_then(|process| process.child) {
-            Some(child) => crate::managed::stop_child(child, grace).await,
+        let result = match process {
+            Some(process) => stop_process(process, grace).await,
             None => Ok(()),
         };
         let revision = self.bump();
@@ -1036,9 +1313,7 @@ impl Agent {
             self.bump();
             for (name, process) in stale {
                 log_info!("node stopping {name}: the controller no longer assigns it here");
-                if let Some(child) = process.child {
-                    let _ = crate::managed::stop_child(child, SERVER_STOP_GRACE).await;
-                }
+                let _ = stop_process(process, SERVER_STOP_GRACE).await;
             }
         }
         let running: BTreeSet<_> = self.processes.lock().await.keys().cloned().collect();
@@ -1298,6 +1573,26 @@ impl Agent {
     /// Mirror one template file or folder into the local cache, downloading
     /// only files whose SHA-256 differs, and return its cached path.
     async fn fetch(&self, relative: &str, transfer: &mut Transfer) -> io::Result<PathBuf> {
+        if let Some(storage) = &self.options.local_templates {
+            // An embedded agent's peer materializes the replicated
+            // templates itself; nothing to download.
+            let mut path = storage.clone();
+            for segment in crate::files::segments(relative)? {
+                path.push(segment);
+            }
+            let path = provisioning::checked_path(&path)?;
+            if !path.starts_with(provisioning::checked_path(storage)?) {
+                return Err(invalid("template path escapes the template storage"));
+            }
+            if !path.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("template file {relative} does not exist on this peer"),
+                ));
+            }
+            transfer.files += 1;
+            return Ok(path);
+        }
         let mut manifest_url = self.template_url(relative)?;
         manifest_url.set_query(Some("manifest"));
         let body = self
@@ -1398,6 +1693,35 @@ impl Agent {
         let hash = crate::files::file_hash(path).ok()?;
         hashes.insert(path.to_owned(), (metadata.len(), modified, hash.clone()));
         Some(hash)
+    }
+}
+
+/// Stop `process`: a kept one through its console and record (it may be
+/// adopted, without a handle), any other through its handle.
+async fn stop_process(process: Process, grace: Duration) -> io::Result<()> {
+    if process.kept {
+        let directory = process.directory.clone();
+        return match process.child {
+            // Started by this agent: `stop` on its console, then the handle
+            // waits for it and kills it after `grace`.
+            Some(child) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::managed::write_kept_console(&directory, "stop")
+                })
+                .await;
+                crate::managed::stop_child(child, grace).await
+            }
+            // Adopted: only its record identifies it.
+            None => {
+                tokio::task::spawn_blocking(move || crate::managed::stop_kept(&directory, grace))
+                    .await
+                    .map_err(io::Error::other)?
+            }
+        };
+    }
+    match process.child {
+        Some(child) => crate::managed::stop_child(child, grace).await,
+        None => Ok(()),
     }
 }
 
@@ -1644,4 +1968,98 @@ where
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(root: &Path) -> Options {
+        Options {
+            controller: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            fallback_controllers: Vec::new(),
+            ca: root.join("unused-ca.pem"),
+            name: "n1".into(),
+            token: "t".repeat(32),
+            root: root.to_owned(),
+            web: None,
+            allowed_programs: BTreeSet::from(["java".to_owned()]),
+            forwarding_secret: None,
+            forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
+            local_templates: None,
+            any_program: false,
+        }
+    }
+
+    fn reconcile() -> Command {
+        Command::Reconcile {
+            servers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fenced_agent_refuses_control_commands_of_a_deposed_leader() {
+        let root = std::env::temp_dir().join(format!("rift-agent-fence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = Agent::new(options(&root)).unwrap();
+        // Never fenced: a single Rift's commands carry no term.
+        agent.handle_tagged(reconcile(), None).await.unwrap();
+        let fenced = agent
+            .handle_tagged(Command::Fence { term: 5 }, Some(5))
+            .await
+            .unwrap();
+        assert_eq!(fenced["term"], 5);
+        for term in [Some(4), None] {
+            let refused = agent.handle_tagged(reconcile(), term).await.unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{term:?}");
+        }
+        let lower = agent
+            .handle_tagged(Command::Fence { term: 4 }, Some(4))
+            .await
+            .unwrap_err();
+        assert_eq!(lower.kind(), io::ErrorKind::PermissionDenied);
+        // Inspection is never fenced: any peer's web API may send it.
+        let logs = Command::Logs {
+            server: "lobby".into(),
+            directory: PathBuf::from("lobby"),
+            cursor: None,
+        };
+        let read = agent.handle_tagged(logs.clone(), Some(1)).await.unwrap();
+        assert_eq!(read["text"], "");
+        agent.handle_tagged(logs, None).await.unwrap();
+        // The leader of this term and later ones are obeyed.
+        agent.handle_tagged(reconcile(), Some(5)).await.unwrap();
+        agent.handle_tagged(reconcile(), Some(6)).await.unwrap();
+        // The fence survives a restart of the agent.
+        drop(agent);
+        let agent = Agent::new(options(&root)).unwrap();
+        let refused = agent.handle_tagged(reconcile(), Some(4)).await.unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn commands_carry_the_term_and_old_agents_still_read_them() {
+        let command = reconcile();
+        let plain = protocol::encode(&command, None).unwrap();
+        assert_eq!(plain, serde_json::to_vec(&command).unwrap());
+        assert_eq!(protocol::decode(&plain).unwrap(), (command.clone(), None));
+        let tagged = protocol::encode(&command, Some(7)).unwrap();
+        assert_eq!(
+            protocol::decode(&tagged).unwrap(),
+            (command.clone(), Some(7))
+        );
+        // An agent of an earlier release parses the command and ignores the term.
+        assert_eq!(serde_json::from_slice::<Command>(&tagged).unwrap(), command);
+        assert!(!command.is_inspection());
+        assert!(
+            Command::Tree {
+                server: "lobby".into(),
+                directory: PathBuf::from("lobby"),
+                offset: 0,
+            }
+            .is_inspection()
+        );
+    }
 }

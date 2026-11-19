@@ -22,6 +22,9 @@
     // Moves between nodes: the configured nodes, the server whose move form
     // is open, copy rates by server, and moves this tab asked to cancel.
     nodes: [], move: null, moveRates: new Map(), cancelledMoves: new Set(), moveTick: 0,
+    // GET /api/cluster on a cluster peer (null on a single Rift) and the
+    // leadership and drain buttons of its panel.
+    cluster: null, clusterButtons: [],
   };
   function permsState() {
     return { groups: [], tracks: [], group: "", groupDetail: null, user: "", userDetail: null, users: [], registered: [], events: [], expanded: new Set(),
@@ -80,6 +83,10 @@
     $("nodes-warm").disabled = state.busy || !allowed("servers") || Boolean(state.groups);
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("move-start").disabled = state.busy || !allowed("servers") || !$("move-node").value;
+    // Leadership transfers and drains need the cluster permission.
+    $("cluster-transfer").hidden = !allowed("cluster");
+    $("cluster-transfer").disabled = state.busy || !allowed("cluster") || !state.cluster || !state.cluster.leader;
+    for (const { button, unavailable } of state.clusterButtons) button.disabled = state.busy || unavailable || !allowed("cluster");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
     for (const id of ["server-list-save", "tab-list-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
@@ -224,9 +231,12 @@
   function renderServers() {
     const group = $("servers-group").value;
     const servers = state.managedServers.filter((server) => !group || server.group === group);
+    // Only a cluster peer lists each server's peer.
+    const clustered = state.managedServers.some((server) => "peer" in server);
+    $("servers-peer").hidden = !clustered;
     state.serverButtons = [];
     for (const name of state.moveRates.keys()) if (!state.managedServers.some((server) => server.name === name && server.move)) state.moveRates.delete(name);
-    table("managed-servers", servers, 10, (tr, server) => {
+    table("managed-servers", servers, clustered ? 11 : 10, (tr, server) => {
       cell(tr, server.name);
       const lifecycle = cell(tr, server.state, `state ${server.state}`);
       if (server.move) lifecycle.append(moveProgress(server.name, server.move));
@@ -236,6 +246,7 @@
       cell(tr, server.template || "Prepared directory");
       cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
       cell(tr, server.node || "local");
+      if (clustered) cell(tr, server.peer || "—").title = server.peer ? `Runs on ${server.peer}’s own node.` : "Runs on a rift node agent, which serves every peer.";
       cell(tr, server.last_error || "—");
       const actions = cell(tr, ""); actions.className = "action-group";
       for (const action of ["start", "stop"]) {
@@ -458,6 +469,154 @@
     state.remoteChanged = state.conflicted || (state.loaded && typeof status.revision === "string" && status.revision !== state.revision);
     controls();
   }
+  // The cluster panel: shown only on a peer of a cluster (GET /api/cluster).
+  const roleLabels = { voter: "Voter", learner: "Learner", witness: "Witness", pending: "Pending" };
+  const roleTitles = {
+    voter: "Votes in elections and on every commit; may lead.",
+    learner: "Receives the log but does not vote. rift admin cluster promote makes it a voter once it has caught up.",
+    witness: "Votes but stores no state and serves no players; never leads while another voter can.",
+    pending: "Added, but not part of the membership yet.",
+  };
+  // How far behind a peer may be before rift check --strict reports it.
+  const clusterLagLimit = 1000;
+  const ago = (ms) => number(ms) < 1000 ? "just now" : `${uptime(number(ms) / 1000)} ago`;
+  function peerLimits(labels) {
+    const entries = Object.entries(labels || {}), limits = Object.fromEntries(entries.filter(([key]) => key.startsWith("node.")));
+    const parts = entries.filter(([key]) => !key.startsWith("node.")).map(([key, value]) => value ? `${key}=${value}` : key);
+    if (limits["node.max_instances"] !== undefined) parts.push(`at most ${count(limits["node.max_instances"])} instances`);
+    if (limits["node.memory_mb"] !== undefined) parts.push(`${count(limits["node.memory_mb"])} MiB`);
+    if (limits["node.min_free_disk_mb"] !== undefined) parts.push(`keeps ${count(limits["node.min_free_disk_mb"])} MiB disk free`);
+    return parts.join(" · ") || "—";
+  }
+  function renderCluster() {
+    const cluster = state.cluster;
+    $("cluster-panel").hidden = !cluster;
+    state.clusterButtons = [];
+    if (!cluster) { $("cluster-peers").replaceChildren(); text("cluster-result", ""); return; }
+    const peers = cluster.peers || [], reports = (cluster.configuration || {}).peers || [];
+    const own = peers.find((peer) => peer.this_peer) || {};
+    text("cluster-count", `${peers.filter((peer) => peer.up && !peer.expired).length} of ${peers.length} peers reachable`);
+    const warnings = [];
+    if (cluster.joined === false) warnings.push(`${cluster.peer} has not joined the cluster yet: a member must add it with rift admin cluster add.`);
+    else if (!cluster.leader) warnings.push("There is no leader: nothing commits, so logins and changes wait until a majority of voters elects one.");
+    if (cluster.diverged) warnings.push(`The replica of ${cluster.peer} diverged from the leader’s. It admits no logins while it repairs itself from a copy of the leader’s state.`);
+    if (cluster.membership_changing) warnings.push("A membership change is still being committed.");
+    text("cluster-warning", warnings.join("\n"));
+    $("cluster-warning").classList.toggle("hidden", !warnings.length);
+    const deployment = (cluster.configuration || {}).deployment;
+    $("cluster-facts").replaceChildren();
+    for (const [label, value] of [
+      ["This peer", `${cluster.peer}${cluster.state ? ` · ${cluster.state}` : ""}${cluster.lease ? " · holds the lease" : ""}`],
+      ["Leader", cluster.leader ? `${cluster.leader} · term ${count(cluster.term)}` : `None · term ${count(cluster.term)}`],
+      ["Log", `committed ${count(cluster.commit_index)} · applied ${count(cluster.applied_index)}${cluster.snapshot_index ? ` · snapshot ${count(cluster.snapshot_index)}` : ""} · ${bytes(cluster.log_bytes)}`],
+      ["Configuration", deployment ? `revision ${String(deployment.revision || "").slice(0, 16)} · ${deployment.action || "deployed"} by ${deployment.actor || "unknown"} · ${time(deployment.timestamp_unix_ms)}` : "No deployment yet"],
+    ]) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = label; dd.textContent = value;
+      $("cluster-facts").append(dt, dd);
+    }
+    table("cluster-peers", peers, 11, (tr, peer) => {
+      const name = cell(tr, peer.name);
+      if (peer.this_peer) { const tag = document.createElement("span"); tag.className = "tag accent trailing"; tag.textContent = "This peer"; name.append(tag); }
+      const role = cell(tr, peer.leader ? "Leader" : roleLabels[peer.role] || peer.role);
+      role.title = peer.leader ? `Leads in term ${count(cluster.term)}. ${roleTitles[peer.role] || ""}` : roleTitles[peer.role] || "";
+      const reachable = peer.up && !peer.expired;
+      const heard = peer.this_peer ? "" : peer.last_heard_ms === null || peer.last_heard_ms === undefined ? " · never heard" : ` · heard ${ago(peer.last_heard_ms)}`;
+      cell(tr, `${peer.expired ? "Expired" : peer.up ? "Reachable" : "Unreachable"}${heard}`, `state ${reachable ? "running" : "failed"}`).title = peer.expired
+        ? "The leader expired this peer after peer_timeout: its players’ claims were released."
+        : peer.address ? `Raft address ${peer.address}${peer.public_address ? `, players reach it at ${peer.public_address}` : ""}` : "";
+      cell(tr, peer.incarnation ? String(peer.incarnation) : "—", "address");
+      const lag = cell(tr, peer.lag === null || peer.lag === undefined ? "—" : count(peer.lag), "metric-value");
+      if (peer.lag === null || peer.lag === undefined) lag.title = cluster.is_leader ? "Not replicating to this peer." : "Known on the leader only.";
+      else if (number(peer.lag) > clusterLagLimit) flag(lag, "Behind", `More than ${count(clusterLagLimit)} entries behind the leader. A learner this far behind cannot be promoted.`);
+      cell(tr, peer.players === undefined ? "—" : count(peer.players), "metric-value");
+      // A peer that is not a witness is a node of its own name.
+      const host = (state.nodes.find((node) => node.peer && node.name === peer.name) || {}).resources || {};
+      const known = (value) => value !== null && value !== undefined;
+      const load = cell(tr, known(host.load) ? `${number(host.load).toFixed(2)}${host.cpus ? ` on ${count(host.cpus)} CPUs` : ""}` : "—");
+      if (known(host.load) && host.cpus && number(host.load) > number(host.cpus)) flag(load, "Busy", "More runnable processes than CPUs over the last minute.");
+      const version = cell(tr, peer.version || "—", "address");
+      if (peer.version && own.version && peer.version !== own.version) {
+        const tag = document.createElement("span");
+        tag.className = "tag warning"; tag.textContent = "Mismatch";
+        tag.title = `${own.name || "This peer"} runs ${own.version}. New features wait until every peer runs the same release; finish the rolling upgrade.`;
+        version.append(" ", tag);
+      }
+      const report = reports.find((entry) => entry.peer === peer.name);
+      const differs = (report && report.shared_differs) || [];
+      const [label, kind] = !report || !report.reported ? ["Not reported", "stopped"]
+        : report.reload_error ? [`Reload failed: ${report.reload_error}`, "failed"]
+          : !report.in_sync ? ["Behind the last deployment", "starting"]
+            : differs.length ? [`${differs.length === 1 ? "Shared section differs" : "Shared sections differ"}: ${differs.join(", ")}`, "unknown"]
+              : ["In sync", "running"];
+      const configuration = cell(tr, label, `state ${kind}`);
+      if (report && report.shared_hash) configuration.title = `Shared configuration hash ${String(report.shared_hash).slice(0, 16)}${differs.length ? ". This peer evaluates these sections differently, usually because Lua modules or plugin files differ between the hosts." : ""}`;
+      if (report && report.reload_error) configuration.title = "The peer keeps its previous configuration until the next deployment or a manual reload.";
+      cell(tr, peerLimits(peer.labels));
+      const actions = cell(tr, ""); actions.className = "action-group";
+      if (!allowed("cluster") || peer.role === "pending") return;
+      const button = (label, aria, unavailable, title, click) => {
+        const element = document.createElement("button");
+        element.type = "button"; element.className = "button subtle"; element.textContent = label;
+        element.setAttribute("aria-label", aria); element.title = title;
+        state.clusterButtons.push({ button: element, unavailable });
+        element.addEventListener("click", () => { if (!element.disabled) click(); });
+        actions.append(element);
+      };
+      if (peer.role === "voter" && !peer.leader) {
+        button("Make leader", `Make ${peer.name} the leader`, !reachable || !cluster.leader,
+          !reachable ? `${peer.name} is not reachable.` : !cluster.leader ? "There is no leader to hand over from." : `Hand the leadership to ${peer.name}. Commits pause for a moment during the handover.`,
+          () => {
+            if (!window.confirm(`Hand the leadership to ${peer.name}? Logins and writes pause briefly while it takes over.`)) return;
+            clusterOperation("/api/cluster/transfer-leader", { peer: peer.name }, `Handing the leadership to ${peer.name}…`);
+          });
+      }
+      button("Drain…", `Drain ${peer.name} and take it out of the cluster`, !reachable || !cluster.leader,
+        !reachable ? `${peer.name} is not reachable.` : !cluster.leader ? "There is no leader to run the drain." : `${peer.name} stops taking players, hands its players to other peers and exits.`,
+        () => {
+          const players = number(peer.players);
+          if (!window.confirm(`Drain ${peer.name}? It stops taking players${peer.leader ? " and hands the leadership to another voter" : ""}, transfers ${players ? `its ${count(players)} ${players === 1 ? "player" : "players"}` : "its players"} to other peers (or disconnects those it cannot transfer), stops its own servers and exits. Start its process again to bring it back.${peer.this_peer ? " This dashboard is served by that peer and will lose its connection." : ""}`)) return;
+          clusterOperation(`/api/cluster/peers/${encodeURIComponent(peer.name)}/leave`, {}, `Draining ${peer.name}…`);
+        });
+    }, "No peers known yet.");
+  }
+  async function loadCluster() {
+    const session = state.session;
+    let cluster = null;
+    // An older server without the endpoint, or one that is not a peer, has no panel.
+    try { cluster = await request("/api/cluster"); } catch (_) { cluster = null; }
+    if (session !== state.session) return;
+    state.cluster = cluster && cluster.enabled === true ? cluster : null;
+    renderCluster(); controls();
+  }
+  function clusterOutcome(value) {
+    if (value.transferring_to) return `Handing the leadership to ${value.transferring_to}; the table shows the new leader within a few seconds.`;
+    if (value.leader) return `${value.leader} already leads.`;
+    if (value.leaving) {
+      const drain = value.draining === true ? `${value.leaving} is draining: it transfers its players to other peers, then exits.`
+        : value.draining === false ? `${value.leaving} could not start draining here.` : String(value.draining);
+      return typeof value.leadership === "object" && value.leadership && value.leadership.transferring_to
+        ? `${drain} The leadership moves to ${value.leadership.transferring_to}.` : drain;
+    }
+    return "Done.";
+  }
+  async function clusterOperation(path, body, pending) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    text("cluster-result", pending);
+    $("cluster-result").className = "operation-result";
+    try {
+      const value = await request(path, { method: "POST", body: JSON.stringify(body) });
+      const failed = typeof value.draining === "string";
+      text("cluster-result", clusterOutcome(value));
+      $("cluster-result").className = `operation-result ${failed ? "warning" : "success"}`;
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("cluster-result", error.message || "The cluster request failed.");
+      $("cluster-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+    await refreshStatus({ syncSource: false });
+  }
   async function loadSource({ discard = false } = {}) {
     if (state.fetchingSource) return false;
     const session = state.session, previous = $("source").value;
@@ -487,6 +646,7 @@
       const status = await request("/api/status");
       if (session !== state.session || mutation !== state.mutation) return;
       renderStatus(status); connection(true); notice("");
+      await loadCluster();
       if (syncSource && state.remoteChanged && !dirty() && !state.busy) await loadSource();
     } catch (error) {
       if (session !== state.session) return;
@@ -1690,7 +1850,8 @@
       cell(tr, plugin.status, `state ${plugin.status === "active" ? "running" : plugin.status}`);
       cell(tr, plugin.restartable ? count(plugin.restarts) : "—", "metric-value");
       cell(tr, plugin.restartable ? count(plugin.calls) : "—", "metric-value");
-      cell(tr, plugin.last_error || "—");
+      // In a cluster, plugins without a cluster declaration are flagged here.
+      cell(tr, [plugin.last_error, plugin.cluster_warning].filter(Boolean).join("; ") || "—");
       const actions = cell(tr, "");
       if (!plugin.restartable) return;
       const button = document.createElement("button");
@@ -2104,9 +2265,15 @@
     for (const id of ["server-list-result", "tab-list-result", "perm-groups-result", "perm-group-result", "perm-track-result", "perm-users-result", "perm-user-result",
       "perm-group-node-result", "perm-user-node-result", "perm-trace-result", "perm-holders-result", "perm-activity-result"]) text(id, "");
     for (const id of ["perm-group-panel", "perm-group-nodes-panel", "perm-user-panel", "perm-user-nodes-panel", "perm-compiled-panel"]) $(id).classList.toggle("hidden", true);
-    state.serverButtons = []; state.nodes = []; state.moveRates.clear(); state.cancelledMoves.clear(); closeMove(); return true;
+    state.serverButtons = []; state.nodes = []; state.moveRates.clear(); state.cancelledMoves.clear(); closeMove();
+    state.cluster = null; renderCluster(); return true;
   }
   $("refresh-status").addEventListener("click", () => refreshStatus());
+  $("cluster-transfer").addEventListener("click", () => {
+    if ($("cluster-transfer").disabled) return;
+    if (!window.confirm("Hand the leadership to the best caught-up voter? Logins and writes pause briefly while it takes over.")) return;
+    clusterOperation("/api/cluster/transfer-leader", {}, "Handing the leadership to another voter…");
+  });
   $("console-server").addEventListener("change", () => {
     state.logServer = $("console-server").value; state.logCursor = null;
     text("console-output", ""); text("console-result", ""); controls(); pollLogs({ reset: true });

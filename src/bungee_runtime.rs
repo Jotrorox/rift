@@ -1,8 +1,10 @@
-//! BungeeCord queries use local presence and configured destinations. Requests
+//! BungeeCord queries use network presence and configured destinations. Requests
 //! arrive only from the session's backend; transfers enter its bounded control
 //! queue and use the ordinary policy and world-transition machinery. Messages,
 //! kicks and forwarded plugin messages enter the target players' bounded action
-//! queues, which their own sessions drain; a full queue drops the request.
+//! queues, which their own sessions drain; a full queue drops the request. In a
+//! cluster, counts, lists and lookups cover every peer, and requests for a
+//! player on another peer go to that peer (see `rift::extensions::routing`).
 //! `RiftServers` and `RiftInGroup` are Rift's own additions to the channel;
 //! other proxies ignore them like any unknown subchannel.
 use crate::runtime::Snapshot;
@@ -201,10 +203,16 @@ pub fn handle(
             player,
             server: target,
         } => {
-            if let Some(target) = server(snapshot, &target) {
-                snapshot
+            if let Some(target) = server(snapshot, &target)
+                && !snapshot
                     .control
-                    .plugin_transfer(&player, target, snapshot.clone());
+                    .plugin_transfer(&player, target, snapshot.clone())
+            {
+                // Not connected here: maybe on another peer.
+                snapshot
+                    .extensions
+                    .players()
+                    .transfer_remote(&player, target);
             }
             return Ok(None);
         }
@@ -268,7 +276,13 @@ pub fn handle(
             let Some(player) = player(snapshot, &name) else {
                 return Ok(None);
             };
-            let Some(peer) = snapshot.control.player_peer(&player.name) else {
+            // This process's sessions know their address; another peer's
+            // player carries it in their attributes.
+            let Some(peer) = snapshot
+                .control
+                .player_peer(&player.name)
+                .or_else(|| player.address())
+            else {
                 return Ok(None);
             };
             let mut data = strings(&[
