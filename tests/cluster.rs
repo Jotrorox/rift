@@ -227,15 +227,23 @@ impl Fixture {
     /// with: [`Fixture::source`] with a named server on peer `a`'s own node
     /// (a peer-node), which neither starts by itself nor on a connection.
     fn first_source(&self) -> String {
+        self.source_with_server("first configuration")
+    }
+
+    /// [`Fixture::source`] with the named server. Deployments keep the
+    /// server: changing a managed server definition needs a restart.
+    /// The server sits on peer `a`'s node; in the cluster that peer `z`
+    /// restores from a backup, where `z` is the only peer, on `z`'s.
+    fn source_with_server(&self, marker: &str) -> String {
         let server = format!(
             "config.backends.spare = '127.0.0.1:{}'\n\
-             config.managed_servers = {{ spare = {{ node = 'a', directory = 'spare', \
+             config.managed_servers = {{ spare = {{ node = rift.peer == 'z' and 'z' or 'a', directory = 'spare', \
              command = {{ {:?}, '--version' }}, autostart = false, start_on_connect = false }} }}\n\
              return config\n",
             self.spare,
             env!("CARGO_BIN_EXE_rift")
         );
-        self.source("first configuration")
+        self.source(marker)
             .replacen("return {", "local config = {", 1)
             + &server
     }
@@ -826,7 +834,7 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
         .expect("GET /api/config on c")
         .body["revision"]
         .clone();
-    let deployed = fixture.source("deployed through c");
+    let deployed = fixture.source_with_server("deployed through c");
     let saved = fixture
         .http(
             "c",
@@ -969,7 +977,7 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
         String::from_utf8_lossy(&restored.stderr)
     );
     // The backup holds the deployment history: the new peer runs the last
-    // deployed revision, which names no peer-node.
+    // deployed revision.
     fs::copy(
         fixture.peer("a").directory.join("rift.lua"),
         fixture.peer("z").directory.join("rift.lua"),
