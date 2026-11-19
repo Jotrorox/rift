@@ -4,10 +4,11 @@
 > **Status: design draft, nothing is implemented.** This page is the plan for
 > the branch that adds inventory menus. It describes the plugin API first,
 > because that is the part to agree on, and then how the proxy would do it.
-> [Open decisions](#open-decisions) lists what the owner still has to choose,
-> and [to verify](#to-verify) lists the client and server behavior this design
-> relies on but that has not been checked against the game's code yet. The
-> page grows with the branch and becomes the user guide when it merges.
+> [Decisions](#decisions) records what the owner chose and the two questions
+> that choice opened, and [to verify](#to-verify) lists the client and server
+> behavior this design relies on but that has not been checked against the
+> game's code yet. The page grows with the branch and becomes the user guide
+> when it merges.
 
 An inventory menu is a chest-style screen whose slots hold items that act as
 buttons: a server selector, a shop page, a confirmation, a text prompt in an
@@ -47,7 +48,8 @@ slots, which the client draws below every menu.
 - **Other menu types** (furnace, beacon, merchant, crafting, loom and so on).
   The design does not exclude them; they are not planned.
 - **Clients older than 1.12.** Rift has no item or packet tables for them
-  (see [decision 3](#3-which-clients-get-menus)).
+  (see [decision 3](#3-which-clients-get-menus)). `menu` returns false for
+  them, so supporting them later changes no plugin.
 - **Remote plugins.** Like dialogs, menus are not offered to
   [bus responders](remote-decisions.md): their clicks need a plugin that
   holds state.
@@ -103,7 +105,7 @@ is decoration.
 | Mode | Open or redraw | Change a part | Close | Receive events |
 | --- | --- | --- | --- | --- |
 | `rift.lua`, persistent Lua | `rift.players.menu(player, menu)` | `rift.players.update_menu(player, id, patch)` | `rift.players.close_menu(player, id)` | `rift.on("menu", fn)` or `rift.menus.on(id, handlers)` |
-| WebAssembly | `players.menu(target, menu-json)` | `players.update-menu(target, id, patch-json)` | `players.close-menu(target, id)` | the `menu` hook of `menu-handler` ([contract](#the-contract)) |
+| WebAssembly | `players.menu(target, menu-json)` | `players.update-menu(target, id, patch-json)` | `players.close-menu(target, id)` | the `menu` hook ([contract](#the-contract)) |
 
 - `menu` is a table (Lua) or JSON text in the format below.
 - The calls are [queued actions](players-api.md#how-actions-are-delivered),
@@ -225,11 +227,16 @@ and in persistent Lua plugins.
 - A button reports the kinds in its `clicks`. By default that is the four
   mouse clicks, so pressing Q or a number over a button does nothing
   ([decision 5](#5-which-clicks-a-button-reports-by-default)).
-- **A click is reported only if the player saw what they clicked.** If a slot
-  changed after the content the click refers to, Rift drops the click. A
-  player who double-clicks "next page" never buys the item that appears under
-  the cursor. Clients before 1.17.1 do not say what they saw, so their clicks
-  are always reported.
+- **A click is reported only if the player saw what they clicked.** If what
+  a click on the slot does changed after the content the click refers to,
+  Rift drops the click. A player who double-clicks "next page" never buys the
+  item that appears under the cursor.
+  - What a click does is the button's `id`, `payload` and `close`. A slot
+    that only looks different (a new name, lore, count or item) still reports
+    its clicks, so a countdown that redraws every second swallows none.
+  - Clients before 1.17.1 do not say what they saw, so their clicks are
+    always reported. An action that costs the player something should ask
+    for confirmation on those clients.
 - A player with 32 unanswered menu events gets no more until the plugin
   catches up, as with dialog clicks.
 
@@ -369,6 +376,10 @@ A menu the client cannot decode disconnects the player, so Rift checks the
 definition first and fails the plugin's call instead. Unknown fields, unknown
 item names and layout lines of the wrong length are errors.
 
+A slot number outside the menu is an error that names the range, because a
+Lua loop that counts from 1 is the likeliest mistake:
+`slot 27: a chest with 3 rows has slots 0 to 26`.
+
 | Limit | Value |
 | --- | --- |
 | JSON per menu | 256 KiB |
@@ -380,10 +391,15 @@ item names and layout lines of the wrong length are errors.
 
 ### The contract
 
-The additions would become `rift:plugin@0.2.1`. A plugin that uses them sets
-`min_api = "0.2.1"`.
+The additions make `rift:plugin@0.3.0`
+([decision 2](#2-how-the-hook-reaches-webassembly-plugins)). The `menu` hook
+is a function of `handler`, like every other hook. A component must export
+exactly what `handler` lists, so a new hook is a breaking change and takes
+the next minor version of the contract.
 
 ```wit
+package rift:plugin@0.3.0;
+
 // interface types
 /// Something a player did in a menu this plugin showed with `players.menu`.
 record menu-event {
@@ -425,24 +441,45 @@ update-menu: func(target: string, menu: string, patch-json: string) -> result<bo
 /// Close the menu `menu` of this plugin, or with `none` any Rift menu.
 close-menu: func(target: string, menu: option<string>) -> result<bool, string>;
 
-/// The hook for menus, apart from `handler` so that components built
-/// against 0.2.0 keep loading. A component that calls `players.menu`
-/// exports it; every SDK does so with a default.
-interface menu-handler {
-    use types.{menu-event};
-    menu: func(event: menu-event);
-}
+// interface handler
+/// A player clicked, typed in or left a menu this plugin showed. Needs no
+/// entry in `registration.hooks`, like `dialog`.
+menu: func(event: menu-event);
 ```
 
-`kind`, `click` and `reason` are strings, not enums, because the contract
-may not add a case to an enum later. New functions in `players` are an
-addition that 0.2 allows. A new hook in `handler` is not, because exports are
-checked exactly; [decision 2](#2-how-the-hook-reaches-webassembly-plugins)
-is about that.
+`kind`, `click` and `reason` are strings, not enums. A later 0.3 release can
+then add a close reason or a click kind without another breaking version.
+Each SDK turns them into an enum of its own with a case for a value it does
+not know, so a plugin author never compares strings.
+
+#### Moving from 0.2
+
+0.3.0 is 0.2.0 plus the `menu` hook and the three functions. Nothing else
+changes, so the move needs no change in a plugin's source:
+
+| Plugin | What changes |
+| --- | --- |
+| `rift.lua` | Nothing |
+| Persistent Lua | `api = "0.3"` in `plugin.toml` |
+| WebAssembly | `api = "0.3"`, the 0.3.0 SDK and a rebuild. Every SDK gives `menu` a default, as it does for the other hooks |
+
+- A Rift with this contract loads only `api = "0.3"` plugins. It refuses a
+  0.2 manifest with a pointer to a "Moving from 0.2" section in
+  [plugins](plugins.md), as Rift does today for 0.1. See
+  [what 0.3.0 opens](#what-030-opens) for the alternative.
+- `min_api` starts again on the new track: a plugin that uses menus needs
+  none, because every 0.3 host has them.
+- The [stability policy](stability.md) keeps the contract compatible across
+  patch releases of Rift, so 0.3.0 ships in the next minor release of Rift.
+- Every WebAssembly plugin is rebuilt for 0.3.0 either way. Any other change
+  to the contract that needs a breaking version should be collected before
+  step 7 of the [plan](#plan), so that plugins are rebuilt once. This page
+  plans none.
 
 ### The SDKs
 
 Each SDK gets the raw calls and a typed builder that produces the same JSON.
+They are released as 0.3.0, after the contract.
 
 **Rust**
 
@@ -484,7 +521,7 @@ impl Plugin for Lobby {
 | `players.menu` | `players::show_menu(target, &Menu)`, or `players::menu` with JSON text | `rift.ShowMenu(target, rift.Menu{...})` | `rift_show_menu(&target, json)` |
 | `players.update-menu` | `players::update_menu(target, id, &MenuPatch)` | `rift.UpdateMenu(target, id, rift.MenuPatch{...})` | `rift_update_menu(&target, id, json)` |
 | `players.close-menu` | `players::close_menu(target, Some(id))` | `rift.CloseMenu(target, id)` | `rift_close_menu(&target, id)` |
-| `menu` hook | `Plugin::menu(MenuEvent)`; `event.kind()` is an enum with an `Other` case, `event.payload::<T>()` and `event.state::<T>()` decode the JSON | `rift.OnMenu(func(rift.MenuEvent))` | `exports_rift_plugin_menu_handler_menu(rift_menu_event_t *)`, with a weak default |
+| `menu` hook | `Plugin::menu(MenuEvent)`, a trait method with an empty default. `event.kind()` is an enum with an `Other` case; `event.payload::<T>()` and `event.state::<T>()` decode the JSON | `rift.OnMenu(func(rift.MenuEvent))`; `event.Kind` and `event.Click` are typed constants | `exports_rift_plugin_handler_menu(rift_menu_event_t *)`, with a weak default that ignores events; `rift_menu_kind(event)` and `rift_menu_click(event)` return enums |
 | menu definition | `Menu::chest(id)`, `::hopper`, `::dispenser`, `::anvil`; `.rows`, `.title`, `.layout`, `.key`, `.slot`, `.state`; `Button::new(item)` with one method per field | Plain structs: `rift.Menu`, `rift.Button` | JSON text |
 
 The builders check nothing themselves: the host validates, so all four
@@ -528,9 +565,9 @@ ID of the open Rift menu, or of the last one if the backend has not opened
 that ID since.
 
 **State IDs.** From 1.17.1 Rift counts its own state IDs for its container
-and remembers, per slot, the state in which the slot last changed. A click
-that names an older state than its slot's is the stale click that is
-[dropped](#click-kinds).
+and remembers, per slot, the state in which the slot's `id`, `payload` or
+`close` last changed. A click that names an older state than its slot's is
+the stale click that is [dropped](#click-kinds).
 
 **Opening over a backend screen.** If the backend has a container open when
 Rift opens a menu, the client replaces it without telling anyone. Rift sends
@@ -594,8 +631,8 @@ inventory. On Paper that fires an `InventoryClickEvent` with the action
 until its next inventory update. No item is ever at risk, because the
 backend's inventory never changed. Step 2 of the [plan](#plan) tests every
 server in `tests/servers.json` (vanilla, Paper, Spigot, Pumpkin) for this,
-and [decision 1](#1-how-the-inventory-rows-are-repaired) names the
-alternative.
+and [decision 1](#1-how-the-inventory-rows-are-repaired) says what follows
+from each result.
 
 ### The anvil
 
@@ -670,15 +707,16 @@ connection. It needs no second item encoder.
 | `crates/rift-translation` | A public way to convert one stack from the newest protocol to a client's; item and menu lookups by name; the window writers made public where they are not |
 | `src/session.rs` | The open menu and its owner, taking Rift's packets out of the client stream, undoing clicks, the inventory request, every ending |
 | `src/plugins/`, `src/lua/api.lua` | `menu`, `update_menu`, `close_menu` and the `menu` event for the script, persistent Lua and WebAssembly; `rift.menus.on` |
-| `wit/`, `sdk/rust`, `sdk/c`, `sdk/go` | Contract 0.2.1, bindings, builders, the `hello` examples |
-| `docs/` | This page as the guide; rows in [players API](players-api.md), [plugin events](plugin-events.md), the language guides and [network protocol](network-protocol.md) |
+| `wit/`, `sdk/rust`, `sdk/c`, `sdk/go` | Contract 0.3.0, bindings, builders, the `hello` examples |
+| `src/plugins/manifest.rs`, every `plugin.toml` in the repository | `api = "0.3"`; a 0.2 manifest is refused with a pointer to the guide |
+| `docs/` | This page as the guide; rows in [players API](players-api.md), [plugin events](plugin-events.md), the language guides and [network protocol](network-protocol.md); "Moving from 0.2" in [plugins](plugins.md); the contract row in [stability](stability.md) |
 
 ## Plan
 
 Each step is a commit series on the branch with its tests. The branch merges
 when all are done.
 
-1. **Design** (this page), and the owner's decisions.
+1. **Design** (this page), and the owner's [decisions](#decisions).
 2. **Check the ground.** Verify every item under [to verify](#to-verify)
    against the game's code for each protocol. Add the inventory request to
    the test harness and run it against every server in `tests/servers.json`.
@@ -694,71 +732,120 @@ when all are done.
 5. **Hopper and dispenser; redraw and patch.** Diffing, `update_menu`, state
    IDs and the stale-click rule.
 6. **Anvil.** Text tracking, result and cost, the experience bar, `typing`.
-7. **Contract 0.2.1.** The WIT, the host side, the Rust, C and Go SDKs with
-   builders, and the `hello` examples in four languages.
+7. **Contract 0.3.0.** The WIT with the `menu` hook in `handler`, the host
+   side, `api = "0.3"` in the manifest check and in every example, the Rust,
+   C and Go SDKs as 0.3.0 with builders, the `hello` examples in four
+   languages, and "Moving from 0.2" in [plugins](plugins.md) with the
+   changelog entry.
 8. **Real clients and the guide.** The real-client run on the oldest and
    newest clients for every menu type, the compatibility matrix, and this
    page rewritten as the user guide.
 
-## Open decisions
+## Decisions
 
-Each has a recommendation, and the rest of this page assumes it.
+The owner decided these on 2026-11-20. Each entry names what was chosen, what
+it costs and what was turned down.
 
 ### 1. How the inventory rows are repaired
 
-- **Ask the backend (recommended).** Described [above](#the-inventory-rows).
-  Exact, and Rift keeps no inventory. It depends on the backend answering
-  the way vanilla does, and plugins on the backend see a harmless click.
-- **Keep a copy.** Rift follows every inventory packet for every player and
-  re-sends the rows itself. This is independent of the backend and repairs at
-  once. But the client changes its inventory in many ways the server confirms
-  without a packet (accepted clicks in backend containers, placed blocks,
-  used items), so the copy drifts unless Rift simulates the game's inventory
-  rules. Every session would also pay for parsing its inventory packets,
-  whether it ever sees a menu or not.
-- **Both:** keep a copy and correct it by asking. The most code; worth it
-  only if the round trip turns out to be visible in practice.
+**Decided: ask the backend**, as described [above](#the-inventory-rows).
+
+- It is exact and Rift keeps no inventory. It needs nothing installed on the
+  backend: the request is a packet every server already understands.
+- It depends on the backend answering the way vanilla does, takes one round
+  trip, and plugins on the backend see a harmless click.
+- Turned down: **keeping a copy** of every player's inventory in Rift. The
+  client changes its inventory in many ways the server confirms without a
+  packet (accepted clicks in backend containers, placed blocks, used items),
+  so a copy drifts unless Rift simulates the game's inventory rules, and a
+  drifted copy shows the player items they do not have. Every session would
+  also pay for parsing its inventory packets, whether it ever sees a menu or
+  not.
+
+Step 2 of the [plan](#plan) settles what happens next:
+
+| Step 2 finds | Then |
+| --- | --- |
+| Vanilla, Paper, Spigot and Pumpkin all answer | Nothing else is built |
+| Only Pumpkin or a 1.17 backend does not answer | Those are documented: the inventory rows may stay wrong until the backend's next inventory update |
+| Vanilla or Paper does not answer, or the round trip is plainly visible in play | Rift also keeps a copy and corrects it by asking |
 
 ### 2. How the hook reaches WebAssembly plugins
 
-- **A new exported interface, `menu-handler`, in 0.2.1 (recommended).** The
-  host looks it up when it loads a component and accepts its absence, so
-  components built against 0.2.0 keep loading. `players.menu` fails for a
-  component without it. At the next breaking version the hook moves into
-  `handler`.
-- **A `menu` function in `handler`, as 0.3.0.** One interface, as 0.2 set
-  out to have, but every WebAssembly plugin must be rebuilt for one feature.
-- **Hold the WebAssembly side back** until 0.3 is due for other reasons, and
-  ship Lua first.
+**Decided: a `menu` function in `handler`, as `rift:plugin@0.3.0`.** See
+[the contract](#the-contract).
+
+- One interface holds every hook, in the WIT and in each SDK.
+- Every plugin moves to `api = "0.3"` and every WebAssembly component is
+  rebuilt, without a change to its source.
+- Turned down: **a separate optional interface in 0.2.1**, which would have
+  kept 0.2.0 components loading at the price of hooks in two interfaces and
+  one export the host looks up by hand. **Holding the WebAssembly side
+  back** until 0.3 was due for other reasons.
 
 ### 3. Which clients get menus
 
-- **1.12 to 26.3 (recommended):** the range `rift-translation` has item and
-  packet tables for. `menu` returns false for older clients, as `dialog` does
-  below 1.21.6.
-- **1.8.9 to 26.3:** needs hand-written packet IDs and an item table for
-  seven more protocols, for clients that are a small share of most networks.
+**Decided: 1.12 to 26.3**, the range `rift-translation` has item and packet
+tables for.
+
+- `menu` returns false for older clients, as `dialog` does below 1.21.6. A
+  plugin that serves them needs another way, such as chat.
+- Turned down for now: **1.8.9 to 1.11.2**, which needs hand-written packet
+  IDs and an item table for seven more protocols. Adding them later changes
+  no plugin.
 
 ### 4. How slots are numbered
 
-- **From 0, with layouts for most uses (recommended).** The same number in
-  Lua, Rust, Go, C, JSON and the protocol, and in every tutorial a plugin
-  author has read.
-- **From 1 in Lua**, as Lua counts. Then the same menu has different numbers
-  in two languages and in events.
+**Decided: from 0 in every language**, with layouts for most uses.
+
+- The same number in Lua, Rust, Go, C, JSON, events and the protocol, and in
+  every tutorial a plugin author has read.
+- It is not how Lua counts, so an out-of-range slot is an
+  [error that names the range](#what-rift-accepts).
+- Turned down: **from 1 in Lua.** The same menu would have different numbers
+  in two languages, and the Lua side would convert in definitions, patches
+  and events.
 
 ### 5. Which clicks a button reports by default
 
-- **The four mouse clicks (recommended).** A player who presses Q or a number
-  over a "buy" button buys nothing. Other kinds are one field away.
-- **Every kind.** Fewer fields, but every handler has to filter.
+**Decided: the four mouse clicks.**
+
+- A player who presses Q or a number over a "buy" button buys nothing. The
+  other kinds are one field away (`clicks`).
+- Turned down: **every kind**, which would make every handler filter.
 
 ### 6. Whether stale clicks are dropped
 
-- **Yes (recommended):** a click on a slot that changed after what the
-  player saw is not reported (1.17.1 and newer clients).
-- **No:** report every click and let plugins guard themselves with payloads.
-  Simpler to describe, but every shop then needs its own guard.
+**Decided: yes.** A click on a slot whose action changed after what the
+player saw is not reported (1.17.1 and newer clients).
+
+- A slot counts as changed when its `id`, `payload` or `close` changed, not
+  when it only looks different. See [click kinds](#click-kinds).
+- Turned down: **reporting every click** and leaving the guard to each
+  plugin.
+
+### What 0.3.0 opens
+
+Choosing 0.3.0 raises two questions the owner has not answered. Each has a
+recommendation, and the rest of this page assumes it.
+
+**Does Rift still load 0.2 plugins for a while?**
+
+- **No (recommended).** Rift loads only `api = "0.3"` and refuses a 0.2
+  manifest with a pointer to the guide, as it does for 0.1 today. The move
+  is one line in the manifest, and a rebuild for WebAssembly.
+- **For one minor release.** Rift links both contract versions and warns
+  about 0.2. The host then carries two sets of bindings for that release.
+  The [stability policy](stability.md) says an interface is marked deprecated
+  for one minor release before it is removed; whether a new contract version
+  is a removal in that sense is the owner's reading to make.
+
+**Do persistent Lua plugins have to change `api`?**
+
+- **Yes (recommended).** One rule for every engine, as in the move from 0.1.
+  Nothing else changes for them.
+- **No.** Rift accepts `api = "0.2"` for `engine = "lua"`, because the Lua
+  API only gained functions. Then `api` means different things per engine.
 
 ## To verify
 
