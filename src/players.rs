@@ -302,6 +302,10 @@ impl fmt::Debug for PlayerRegistry {
     }
 }
 
+/// A name claim on its way: the key, the name as typed, the holder and the
+/// future that resolves once the claim is decided.
+type PendingClaim = (String, String, Holder, ClaimFuture<Result<(), Refusal>>);
+
 impl PlayerRegistry {
     /// A registry whose claims `claims` decides.
     pub fn with_claims(claims: Arc<dyn Claims>) -> Self {
@@ -396,11 +400,7 @@ impl PlayerRegistry {
         }
     }
 
-    fn name_claim(
-        &self,
-        name: String,
-        connection: u64,
-    ) -> io::Result<(String, String, Holder, ClaimFuture<Result<(), Refusal>>)> {
+    fn name_claim(&self, name: String, connection: u64) -> io::Result<PendingClaim> {
         self.admit()?;
         let name = checked_name(name)?;
         let key = name.to_ascii_lowercase();

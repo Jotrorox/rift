@@ -858,7 +858,7 @@ impl Cluster {
                     link.and_then(|link| link.last_heard_ms)
                 },
                 lag: if this_peer {
-                    Some(0).filter(|_| leader == me)
+                    (leader == me).then_some(0)
                 } else {
                     lag
                 },
@@ -997,7 +997,7 @@ impl Cluster {
             task.abort();
         }
         let leader_tasks: Vec<JoinHandle<()>> =
-            self.inner.leader.lock().unwrap().tasks.drain(..).collect();
+            std::mem::take(&mut self.inner.leader.lock().unwrap().tasks);
         for task in leader_tasks {
             task.abort();
         }

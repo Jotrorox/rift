@@ -149,6 +149,9 @@ impl StreamKind {
 
 /// What this peer presents in every handshake.
 #[derive(Debug, Clone, Default)]
+/// One lock per peer and connection class, so two dials never race.
+type Dials = HashMap<(String, Class), Arc<tokio::sync::Mutex<()>>>;
+
 pub struct Identity {
     pub name: String,
     /// The address other peers dial (`advertise`).
@@ -302,7 +305,7 @@ struct Inner {
     handlers: RwLock<HashMap<u8, Handler>>,
     admission: RwLock<Option<Admission>>,
     events: broadcast::Sender<LinkEvent>,
-    dials: Mutex<HashMap<(String, Class), Arc<tokio::sync::Mutex<()>>>>,
+    dials: Mutex<Dials>,
     shutdown: watch::Sender<bool>,
     next_link: AtomicU64,
 }

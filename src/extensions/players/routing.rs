@@ -31,6 +31,9 @@ pub struct WireRequest {
 /// What a [`WireRequest`] asks for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// One short-lived value per routed request; boxing would only add an
+// allocation to each.
+#[allow(clippy::large_enum_variant)]
 pub enum WireBody {
     /// One action for one session. The UUID guards against a connection id
     /// that a session of another player holds.

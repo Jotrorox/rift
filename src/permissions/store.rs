@@ -514,7 +514,6 @@ pub(super) struct Effects {
     pub ops: Vec<Op>,
     pub users: BTreeSet<Uuid>,
     pub groups: BTreeSet<String>,
-    pub tracks: bool,
 }
 
 impl<'a> Work<'a> {
@@ -1096,7 +1095,6 @@ impl<'a> Work<'a> {
         // A group counts as changed only when one of its nodes or columns did.
         let mut groups = BTreeSet::new();
         let mut users = BTreeSet::new();
-        let mut tracks = false;
         for op in &self.ops {
             match op {
                 Op::Node {
@@ -1113,14 +1111,13 @@ impl<'a> Work<'a> {
                 | Op::PrimaryGroup { user: uuid, .. } => {
                     users.insert(*uuid);
                 }
-                Op::Track { .. } => tracks = true,
+                Op::Track { .. } => {}
             }
         }
         Ok(Effects {
             ops: self.ops,
             users,
             groups,
-            tracks,
         })
     }
 }

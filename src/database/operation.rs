@@ -264,7 +264,7 @@ pub(crate) fn intern(text: &str) -> &'static str {
     let mut interned = INTERNED.lock().unwrap_or_else(|error| error.into_inner());
     let set = interned.get_or_insert_with(HashSet::new);
     if let Some(known) = set.get(text) {
-        return *known;
+        return known;
     }
     if set.len() >= MAX_INTERNED {
         return "value";

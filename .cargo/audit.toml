@@ -1,0 +1,9 @@
+# cargo-audit reads this file; CI runs it with `--deny warnings`.
+[advisories]
+ignore = [
+    # chrono is unmaintained. openraft (docs/clustering.md) depends on it
+    # unconditionally, for timestamps in its metrics and for a date check in
+    # its macros; Rift passes it no untrusted input. Remove this entry when
+    # openraft drops or replaces chrono.
+    "RUSTSEC-2026-0543",
+]

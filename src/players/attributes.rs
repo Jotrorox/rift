@@ -113,6 +113,9 @@ impl Attributes {
 
 /// One change to the sending peer's players.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Nearly every change is an upsert, so boxing it would cost an allocation
+// per change to shrink the rare removal.
+#[allow(clippy::large_enum_variant)]
 pub enum AttributeChange {
     /// A player joined or changed.
     Upsert(Attributes),
