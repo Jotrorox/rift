@@ -1,0 +1,30 @@
+# cluster.toml of peer eu-2: copy it beside rift.lua (/var/lib/rift/cluster.toml).
+# It says how this peer reaches the cluster, so it is not replicated; see
+# docs/clustering.md#clustertoml. Relative paths are relative to rift.lua.
+peer = "eu-2"
+# Peer links: QUIC on UDP. Open this port between the peers only.
+listen = "0.0.0.0:7444"
+# Required with a wildcard listen: what the other peers dial. The certificate
+# must name this host (subjectAltName=IP:10.0.0.2).
+advertise = "10.0.0.2:7444"
+certificate = "/etc/rift/cluster/eu-2.pem"
+private_key = "/etc/rift/cluster/eu-2.key"
+ca = "/etc/rift/cluster/ca.pem"
+# The variable that holds the cluster token, the same on every peer.
+token_env = "RIFT_CLUSTER_TOKEN"
+seeds = ["10.0.0.1:7444", "10.0.0.3:7444"]
+# Where players reach this peer directly; a peer that drains sends its
+# 1.20.5+ players to another peer's public_address.
+public_address = "eu-2.play.example.com:25565"
+# Where bus clients and node agents reach this peer's messaging listener.
+# Without it: the host of advertise with messaging.listen's port, here
+# "10.0.0.2:7443".
+# bus_address = "10.0.0.2:7443"
+
+# This peer is also a node named eu-2, with the labels "region" and "eu".
+[labels]
+region = "eu"
+
+[node]
+memory_mb = 16384
+max_instances = 32

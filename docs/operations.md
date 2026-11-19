@@ -14,6 +14,7 @@ a backend kicks a player or fails. For other tasks, start here:
 | Stop, upgrade or roll back Rift | [Shutdown, upgrade and rollback](upgrading.md) |
 | Manage Rift from a browser | [Web dashboard](http.md) |
 | Let Rift start and stop Minecraft servers | [Managed servers](managed-servers.md) |
+| Run several proxies that all accept players | [Clustering](clustering.md) |
 
 The commands below use the [admin CLI](admin.md) and the paths of the
 [systemd setup](deployment.md#run-under-systemd).
@@ -224,3 +225,34 @@ The default connection cap is 1024; it is not a measured player-capacity
 claim. Monitor your own traffic before increasing limits. Packet buffers grow
 with packet sizes; memory, CPU, file descriptors and backend capacity all
 constrain safe player counts.
+
+## Operate a cluster
+
+In a [cluster](clustering.md) every command above works on any peer, with
+these differences:
+
+- **Reloads become deployments.** Reloading an edited `rift.lua` on one peer
+  (or saving in the dashboard) deploys it: every peer writes the new
+  revision to its own `rift.lua` and reloads. Edit one peer, not each host.
+  A reload that a peer cannot apply leaves it on its previous configuration;
+  `rift admin cluster` shows which peer and why.
+- **Leader work is forwarded.** Starts and stops of managed servers,
+  instance creation and removal, moves, backups, restores, warming and git
+  syncs run on the leader, whichever peer you ask. The answer comes back
+  through the peer you asked, and the audit log records it under your name.
+- **Transfers and kicks** reach players on every peer. `rift admin status`
+  shows each player's `peer`.
+- **Maintenance and drains from the admin CLI are per peer.**
+  `rift admin maintenance on` and `rift admin drain <backend> on` change only
+  the peer you run them on. For the whole network, set `maintenance` or
+  `draining` in `rift.lua` and reload: those settings are shared and reach
+  every peer as a deployment. A backend that asks to drain on
+  `rift.server.state` drains on every peer.
+
+To restart one peer without disconnecting its 1.20.5+ players, stop it
+normally (`systemctl stop rift`, or `rift admin cluster leave <peer>` from any
+peer). It hands its leadership away, sends those players to other peers with
+the Transfer packet and gives older clients a reconnect message; see
+[rolling restarts](clustering.md#rolling-restarts). Restart peers one at a
+time and wait until `rift admin cluster status --leader` shows the restarted
+peer up and not behind before the next.

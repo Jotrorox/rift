@@ -83,6 +83,11 @@ pub mod feature {
     /// Not a [`Start`] field: [`Command::Warm`](super::Command::Warm), for
     /// `rift admin warm`.
     pub const WARM: &str = "warm";
+    /// Not a [`Start`] field: [`Command::Fence`](super::Command::Fence) and
+    /// the `term` of every control command, for cluster leaders
+    /// (docs/clustering.md, "Leader exclusivity"). A cluster sends an agent
+    /// without it no control command.
+    pub const FENCE: &str = "fence";
 }
 
 /// Every feature this build's agent applies and its controller may need.
@@ -97,6 +102,7 @@ pub const FEATURES: &[&str] = &[
     feature::BACKUP,
     feature::MOVE_RESUME,
     feature::WARM,
+    feature::FENCE,
 ];
 
 /// A [`Start`] field that an agent without `feature` would silently drop.
@@ -222,6 +228,68 @@ pub enum Command {
         server: String,
         directory: PathBuf,
     },
+    /// A cluster leader of `term` takes over: the agent keeps the highest
+    /// term it was fenced with below its `--root` and refuses control
+    /// commands of a lower one from then on. Replies `{"term": term}`; a
+    /// lower term than the stored one is refused. Only agents that
+    /// advertise [`feature::FENCE`] get it.
+    Fence {
+        term: u64,
+    },
+}
+
+impl Command {
+    /// Whether this command only inspects or edits files of one server:
+    /// any cluster peer may send it (for the web API of any peer), so it is
+    /// never fenced. Every other command is a control command, which only
+    /// the cluster leader sends, tagged with its term.
+    pub fn is_inspection(&self) -> bool {
+        matches!(
+            self,
+            Self::Logs { .. }
+                | Self::Console { .. }
+                | Self::Files(_)
+                | Self::Upload(_)
+                | Self::Tree { .. }
+                | Self::Read { .. }
+        )
+    }
+}
+
+/// The field of a command message that carries a cluster leader's term.
+pub const TERM_FIELD: &str = "term";
+
+/// The JSON message of `command`, tagged with a cluster leader's `term`.
+/// Without a term the message is exactly what earlier releases sent, and
+/// agents of earlier releases ignore the field.
+pub fn encode(command: &Command, term: Option<u64>) -> io::Result<Vec<u8>> {
+    let Some(term) = term else {
+        return serde_json::to_vec(command).map_err(io::Error::other);
+    };
+    let mut value = serde_json::to_value(command).map_err(io::Error::other)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err(io::Error::other("a node command is a JSON object"));
+    };
+    object.insert(TERM_FIELD.to_owned(), json!(term));
+    serde_json::to_vec(&value).map_err(io::Error::other)
+}
+
+/// A command message: the command and the term it carries, if any.
+pub fn decode(payload: &[u8]) -> io::Result<(Command, Option<u64>)> {
+    #[derive(Deserialize)]
+    struct Tag {
+        #[serde(default)]
+        term: Option<u64>,
+    }
+    let invalid = |error: serde_json::Error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid node command: {error}"),
+        )
+    };
+    let command = serde_json::from_slice::<Command>(payload).map_err(invalid)?;
+    let tag = serde_json::from_slice::<Tag>(payload).map_err(invalid)?;
+    Ok((command, tag.term))
 }
 
 /// A [`Command::Backup`]. The agent copies `directory` into a snapshot folder

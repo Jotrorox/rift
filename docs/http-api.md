@@ -44,6 +44,9 @@ The [connection limits](http.md#limits) apply to every request.
 | `GET /api/access` | none | Current operator name, permissions (`null` for full access) and group scopes |
 | `GET /api/status` | `read` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, service groups, routes, fallbacks, limits, counters and enabled services |
 | `GET /api/metrics` | `read` | Counter values as JSON |
+| `GET /api/cluster` | `read` | `{"enabled": false}` without a [cluster](clustering.md); on a peer, `enabled: true` with `peer`, `cluster_id`, `raft_id`, `incarnation`, `joined`, `witness`, `state`, `term`, `leader`, `is_leader`, `lease`, `last_log_index`, `commit_index`, `applied_index`, `snapshot_index`, `log_bytes`, `diverged`, `membership_changing`, `peers` (each with `name`, `raft_id`, `incarnation`, `role`, `address`, `public_address`, `leader`, `this_peer`, `up`, `expired`, `last_heard_ms`, `lag`, `version`, `labels`, `players`) and `configuration` (the last deployment, each peer's report and the replicated templates); see [status](clustering.md#status) |
+| `POST /api/cluster/transfer-leader` | `cluster`, unrestricted | Hand the leadership to `{"peer": "eu-2"}` (a voter), or with `{}` to the best caught-up voter, as `rift admin cluster transfer-leader` does; a follower forwards it to the leader. Returns `200` with `{transferring_to}` (or `{leader}` when the peer already leads) |
+| `POST /api/cluster/peers/{name}/leave` | `cluster`, unrestricted | [Drain](clustering.md#rolling-restarts) a peer with `{}`, as `rift admin cluster leave <name>` does: it hands the leadership away, transfers its players to other peers and exits. Returns `200` with `{leaving, leadership, draining}`, where `draining` is `true` or why the peer was not asked to drain |
 | `GET /status` | none | Status JSON on the separate [status server](status-page.md), as `status.exposure` allows; `status.cors` origins may read it cross-origin |
 | `GET /badge.svg` | none | Player count and health badge on the status server |
 | `GET /metrics` | none | Prometheus text on the status server when enabled, or the standalone metrics server |
@@ -52,6 +55,11 @@ The [connection limits](http.md#limits) apply to every request.
 `service_groups` with the same objects as `/api/groups`, including the
 optional `scaling` policy. It lists backends hidden from the status site and
 counts every player.
+
+The cluster actions answer `404` on a Rift without `cluster.toml`, `400` for
+a body or peer name they do not accept, and `409` when the cluster refuses
+the change (no leader, an unknown peer, a peer that cannot lead); the
+message says why. Both are audited as `transfer_leader` and `leave_peer`.
 
 ## Managed servers
 
@@ -80,6 +88,7 @@ shutdown has completed. Poll `GET /api/servers` for these fields:
 | `storage` | `persistent`, `disposable` or `ephemeral`; static managed servers are `persistent` |
 | `group_suspended`, `group_mode`, `draining` | State of a [whole group](#start-or-stop-a-whole-group) |
 | `node`, `configured_node` | The node the server runs on (`local` for this host), and the one the configuration still names after a [move](nodes.md#move-a-named-server) of a named server |
+| `peer` | Only on a [cluster](clustering.md#servers-on-the-peers-own-hosts) peer: the peer whose own node runs the server, or `null` for a server on a `rift node` agent. Absent on a single Rift |
 | `move` | `null`, or the running [move](nodes.md#move-a-persistent-instance-to-another-node): `from`, `to`, `phase` (`stopping`, `copying` or `committing`), `cancelling`, `started_unix`, `files` and `bytes` copied so far (files an earlier attempt left included), `reused_files` and `reused_bytes` of those, and `total_files` and `total_bytes` of the folder, `null` with an older agent on the old node |
 
 Commands, arguments and working directories are omitted.
@@ -112,7 +121,7 @@ log for the result.
 
 | Method and path | Permission | What it does |
 | --- | --- | --- |
-| `GET /api/players` | `read` | `{players: [...]}`: online players as `rift.players.list` reports them (`connection_id`, `uuid`, `name`, `server`, `protocol`, `visible_to`, `locale`), hidden players included; group-scoped operators see the players on their servers |
+| `GET /api/players` | `read` | `{players: [...]}`: online players as `rift.players.list` reports them (`connection_id`, `uuid`, `name`, `server`, `protocol`, `visible_to`, `locale`, and on a [cluster](clustering.md) peer `peer`, the peer the player is connected to), hidden players included; group-scoped operators see the players on their servers |
 | `POST /api/players/{player}/message` | `console`, scoped | Send `{text}` to one player (a name, UUID or connection id). Returns `{online: true}`, or `404` when the player is not online |
 | `POST /api/players/{player}/kick` | `console`, scoped | Disconnect one player with `{reason}`. Same answers and scope as `message` |
 
@@ -133,7 +142,7 @@ operator, the player must be on one of their servers.
 | `POST /api/groups/{name}/stop` | `servers`, scoped | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
 | `PUT /api/groups/{name}/mode` | `servers`, scoped | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance, move, download or warm operation state and its completed result; the scope is the operation's group |
-| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), `schedule` (`active`, `cordoned`, `draining`), `drained`, address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, `min_free_disk_mb`, agent `version`, the start settings it applies (`features`), the controller's it lacks (`missing_features`), `version_mismatch`, `last_seen_ms` and the host `resources` its agent measured (`null` unless online; see [host resources](nodes.md#host-resources)) |
+| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), `schedule` (`active`, `cordoned`, `draining`), `drained`, address, labels, `peer` (true for a [cluster](clustering.md#servers-on-the-peers-own-hosts) peer's own node), `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, `min_free_disk_mb`, agent `version`, the start settings it applies (`features`), the controller's it lacks (`missing_features`), `version_mismatch`, `last_seen_ms` and the host `resources` its agent measured (`null` unless online; see [host resources](nodes.md#host-resources)) |
 | `POST /api/nodes/{name}/cordon`, `/drain`, `/uncordon` | `servers`, unrestricted operators only | [Take a node out of service](nodes.md#take-a-node-out-of-service) or return it, with `{}`; returns `200` with `{node, schedule, drained, instances}`, where each instance's `result` is `running`, `kept`, `retiring` or `draining` |
 | `GET /api/nodes/plan` | `servers`, unrestricted | [Suggested moves](nodes.md#even-out-the-nodes) that even out memory across nodes, optionally `?spread=<percent>` (1 to 100, default 20); returns `{balanced, max_spread_percent, spread_percent, planned_spread_percent, nodes, moves, notes}` and moves nothing |
 | `POST /api/nodes/warm` | `servers`, unrestricted | Have every node [cache its groups' templates](nodes.md#warm-the-node-caches) with `{}`, or one template's with `{"template": "bedwars"}`; returns `202` with an operation to poll. The result lists each node's templates with `files`, `downloaded`, `bytes` and `software`; the operation fails if any node or template failed |
@@ -236,7 +245,7 @@ Plugin routes are for unrestricted operators only.
 
 | Method and path | Permission | What it does |
 | --- | --- | --- |
-| `GET /api/plugins` | `read` | `{plugins: [...]}`: every [plugin](plugin-operations.md) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable` |
+| `GET /api/plugins` | `read` | `{plugins: [...]}`: every [plugin](plugin-operations.md) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities`, `restartable` and, in a [cluster](plugins.md#plugins-in-a-cluster), `cluster_warning` for a persistent plugin whose `plugin.toml` does not declare `cluster = true` (otherwise null) |
 | `GET /api/plugins/{name}` | `read` | One plugin's entry, or `404` |
 | `GET /api/plugins/{name}/logs` | `logs` | `{plugin, lines}`: the last 200 log lines of a persistent plugin as `{timestamp_unix_ms, level, message}` |
 | `POST /api/plugins/{name}/restart` | `plugins` | Stop a persistent plugin and start a fresh instance with `{}`; returns `202` when accepted. Poll `GET /api/plugins/{name}` for `status` and `restarts` |

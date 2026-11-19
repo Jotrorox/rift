@@ -159,10 +159,13 @@ pub fn instance_logins(config: &Config) -> Vec<String> {
             ));
         }
     }
-    let advertised = config
-        .messaging
-        .as_ref()
-        .is_some_and(|messaging| messaging.advertise.is_some());
+    // A cluster peer's instances are told its own bus address, which comes
+    // from its cluster.toml (`bus_address`, else its advertise host).
+    let advertised = rift::cluster::settings::local_peer().is_some()
+        || config
+            .messaging
+            .as_ref()
+            .is_some_and(|messaging| messaging.advertise.is_some());
     let loopback = config
         .messaging
         .as_ref()
@@ -279,6 +282,14 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
             ));
         }
     }
+    // A cluster.toml beside the configuration (which sets the peer name
+    // before the check) or a cluster section makes this a cluster peer.
+    let clustered = rift::cluster::settings::local_peer().is_some() || config.cluster.is_some();
+    for spec in &config.plugins {
+        if let Some(warning) = rift::plugins::cluster_warning(&spec.manifest, clustered) {
+            warnings.push(format!("plugin {}: {warning}", spec.name));
+        }
+    }
     if !config.plugins.is_empty() && !config.authentication.online_mode {
         warnings.push(
             "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode; a plugin that registers one fails to start".into(),
@@ -297,6 +308,207 @@ fn message_counts(messages: &rift::text::messages::Messages) -> String {
         messages.len(),
         messages.languages().count()
     )
+}
+
+/// A cluster peer's own settings (`cluster.toml` beside `path`): the token
+/// variable is set and long enough, and the certificate, key and CA load.
+/// Nothing to report on a Rift without `cluster.toml`.
+pub fn cluster(config: &Config, path: &Path, report: &mut Report) {
+    let settings = match rift::cluster::Settings::load_beside(path) {
+        Ok(Some(settings)) => settings,
+        Ok(None) => return,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return;
+        }
+    };
+    if config.database.is_some() {
+        report.errors.push(
+            "cluster.toml: a cluster replicates SQLite; database.backend = \"postgres\" or \"mariadb\" cannot be combined with it".into(),
+        );
+    }
+    match settings.token() {
+        Ok(_) => report
+            .notes
+            .push(format!("cluster: {} is set", settings.token_env)),
+        Err(error) => report.errors.push(error.to_string()),
+    }
+    if settings.public_address.is_none() && !settings.witness {
+        report.warnings.push(format!(
+            "{}: no public_address: a peer that drains cannot send 1.20.5+ players to {}, and when no peer has one they get a reconnect message instead",
+            rift::cluster::Settings::path_beside(path).display(),
+            settings.peer
+        ));
+    }
+    match rift::cluster::quic::check(&settings) {
+        Ok(()) => report.notes.push(format!(
+            "cluster: peer {} loads {}, {} and {}",
+            settings.peer,
+            settings.certificate.display(),
+            settings.private_key.display(),
+            settings.ca.display()
+        )),
+        Err(error) => report.errors.push(error.to_string()),
+    }
+    // Shared sections as every member evaluates them, against the last
+    // deployment and the peers' reports in this peer's replica.
+    match std::fs::read_to_string(path) {
+        Ok(source) => {
+            let found = rift::cluster::files::check(
+                path,
+                &source,
+                &config.instance_database,
+                &settings.peer,
+            );
+            report.notes.extend(found.notes);
+            report.warnings.extend(found.warnings);
+            report.errors.extend(found.errors);
+        }
+        Err(error) => report.errors.push(format!("{}: {error}", path.display())),
+    }
+}
+
+/// Strict checks of a cluster peer against the running cluster
+/// (docs/clustering.md, "Getting there from one Rift"): a key-value store
+/// in a file of its own, and, through the running peer's admin listener,
+/// peers that are unreachable or refused (another cluster token, other
+/// shared secrets or an older version than the cluster requires), behind
+/// the leader, on another version, or with node agents that cannot be
+/// fenced.
+pub async fn cluster_peers(config: &Config, path: &Path, report: &mut Report) {
+    if !matches!(rift::cluster::Settings::load_beside(path), Ok(Some(_))) {
+        return;
+    }
+    if let Some(store) = rift::cluster::attach::file_store(config) {
+        report.errors.push(format!(
+            "extensions.storage.path ({}): a cluster cannot replicate a store in a file of its own; set extensions.storage.database = true (`rift cluster init` copies its entries into the instance database)",
+            store.display()
+        ));
+    }
+    let skipped = |reason: &str| format!("cluster peers were not checked: {reason}");
+    if !report.running {
+        report.notes.push(skipped("Rift is not running"));
+        return;
+    }
+    let Some(admin) = &config.admin else {
+        report
+            .notes
+            .push(skipped("admin is not configured; see GET /api/cluster"));
+        return;
+    };
+    let secret = match crate::admin::token(admin) {
+        Ok(secret) => secret,
+        Err(error) => {
+            report.notes.push(skipped(&error.to_string()));
+            return;
+        }
+    };
+    let listen = admin.listen;
+    let ask = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let secret = secret.clone();
+        async move {
+            crate::admin::query(listen, &secret, &args, std::time::Duration::from_secs(5)).await
+        }
+    };
+    let status = match ask(&["cluster"]).await {
+        Ok(status) => status,
+        Err(error) => {
+            report.notes.push(skipped(&format!("admin: {error}")));
+            return;
+        }
+    };
+    let own = env!("CARGO_PKG_VERSION");
+    if status["joined"] != true {
+        report.errors.push(format!(
+            "cluster: peer {} is not in a cluster yet; add it on a member with rift admin cluster add",
+            status["peer"].as_str().unwrap_or("?")
+        ));
+    }
+    if status["diverged"] == true {
+        report
+            .errors
+            .push("cluster: this peer's replica diverged; it reinstalls a snapshot".into());
+    }
+    if status["leader"].is_null() {
+        report
+            .errors
+            .push("cluster: there is no leader: no logins, writes or scaling".into());
+    }
+    // Replication lag is known on the leader only: a follower asks it.
+    let leader_view = if status["is_leader"] == true {
+        Some(status.clone())
+    } else if status["leader"].is_null() {
+        None
+    } else {
+        ask(&["cluster", "status", "--leader"]).await.ok()
+    };
+    let lags: std::collections::BTreeMap<String, u64> = leader_view
+        .iter()
+        .flat_map(|view| view["peers"].as_array().into_iter().flatten())
+        .filter_map(|peer| {
+            let name = peer["name"].as_str()?.to_owned();
+            Some((name, peer["lag"].as_u64()?))
+        })
+        .collect();
+    if leader_view.is_none() && !status["leader"].is_null() {
+        report.notes.push(
+            "cluster: the leader's status was not available; how far peers are behind was not checked".into(),
+        );
+    }
+    for peer in status["peers"].as_array().into_iter().flatten() {
+        let name = peer["name"].as_str().unwrap_or("?");
+        let lag = lags.get(name).copied().filter(|lag| *lag > 1000);
+        if peer["this_peer"] == true {
+            if let Some(lag) = lag {
+                report.warnings.push(format!(
+                    "cluster: this peer ({name}) is {lag} entries behind the leader"
+                ));
+            }
+            continue;
+        }
+        if peer["expired"] == true {
+            report.warnings.push(format!(
+                "cluster: peer {name} is expired; it rejoins when it runs again, or remove it with rift admin cluster remove {name}"
+            ));
+            continue;
+        }
+        if peer["up"] != true {
+            report.errors.push(format!(
+                "cluster: peer {name} is unreachable or refused this peer (another cluster token, other forwarding secret or node tokens, or another cluster); see its log"
+            ));
+            continue;
+        }
+        if let Some(version) = peer["version"].as_str()
+            && !version.is_empty()
+            && version != own
+        {
+            report.warnings.push(format!(
+                "cluster: peer {name} runs rift {version}, this one {own}; finish the rolling upgrade"
+            ));
+        }
+        if let Some(lag) = lag {
+            report.warnings.push(format!(
+                "cluster: peer {name} is {lag} entries behind the leader"
+            ));
+        }
+    }
+    // The leader sends node agents control commands only once fenced.
+    if let Ok(data) = ask(&["nodes"]).await {
+        for node in data["nodes"].as_array().into_iter().flatten() {
+            let fenced = node["features"].as_array().is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature == rift::node::protocol::feature::FENCE)
+            });
+            if node["version"].is_string() && !fenced {
+                report.errors.push(format!(
+                    "node {}: its agent cannot be fenced, so the cluster sends it no control commands; upgrade rift on that node to {own}",
+                    node["name"].as_str().unwrap_or("?")
+                ));
+            }
+        }
+    }
 }
 
 /// Run every strict check and collect the results. Nothing is created or

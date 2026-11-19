@@ -1,0 +1,7 @@
+[env]
+# The bundled SQLite gets the session extension, whose changesets replicate the
+# instance database (src/database/changeset.rs). rusqlite's `session` feature
+# would need bindgen and libclang; these flags only change how libsqlite3-sys
+# compiles sqlite3.c. A LIBSQLITE3_FLAGS set in the environment takes precedence
+# and must keep both.
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK"

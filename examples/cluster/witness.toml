@@ -1,0 +1,20 @@
+# cluster.toml of a witness, w-1: a voter that takes no players and runs no
+# servers. Two proxies and a witness survive the loss of any one host; see
+# docs/clustering.md#voters-learners-and-witnesses.
+#
+# On the witness host, with this file as /var/lib/rift/cluster.toml and
+# RIFT_CLUSTER_TOKEN set (rift-witness.service does both):
+#   rift witness --config /var/lib/rift/rift.lua
+# rift.lua is optional there: a witness takes the shared rift.config.cluster
+# settings from it when it exists. Then, on any member:
+#   rift admin cluster add w-1 10.0.0.9:7444 --witness
+#   rift admin cluster promote w-1
+peer = "w-1"
+listen = "0.0.0.0:7444"
+advertise = "10.0.0.9:7444"
+certificate = "/etc/rift/cluster/w-1.pem"
+private_key = "/etc/rift/cluster/w-1.key"
+ca = "/etc/rift/cluster/ca.pem"
+seeds = ["10.0.0.1:7444", "10.0.0.2:7444"]
+# rift witness sets this itself; it is stated for clarity.
+witness = true

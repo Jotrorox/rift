@@ -1291,6 +1291,33 @@ async fn initial_backend_write_failure_retries_with_the_cached_login_start() {
     assert!(session.can_switch());
 }
 
+/// The transfer intent reaches backends as it arrived on a single Rift, and
+/// as a login on a cluster peer, where it may be a player another peer
+/// handed over (`set_transfers_as_logins`).
+#[tokio::test]
+async fn the_transfer_intent_reaches_backends_unless_a_cluster_peer_rewrites_it() {
+    for (peer, expected) in [(false, NextState::Transfer), (true, NextState::Login)] {
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: 774,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Transfer,
+        };
+        Codec::default()
+            .write(&mut client, &handshake.packet())
+            .await
+            .unwrap();
+        let mut session = Session::accept(input).await.unwrap();
+        session.set_transfers_as_logins(peer);
+        let (server, mut backend) = tokio::io::duplex(65536);
+        session.connect_backend(server).await.unwrap();
+        let sent = Handshake::decode(&receive(&mut backend, Codec::default()).await).unwrap();
+        assert_eq!(sent.next_state, expected, "cluster peer: {peer}");
+        assert_eq!(sent.address, "play.test");
+    }
+}
+
 #[tokio::test]
 async fn ordinary_relay_forwards_opaque_join_but_does_not_make_it_transfer_ready() {
     let (mut session, mut client, mut backend) = session().await;

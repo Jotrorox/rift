@@ -43,6 +43,55 @@ pub(crate) fn kept_running(directory: &Path) -> bool {
     kept::recorded(directory).is_some()
 }
 
+/// The pid of the server Rift started with `keep_running` in `directory`,
+/// if that process still runs there.
+pub(crate) fn kept_pid(directory: &Path) -> Option<u32> {
+    kept::recorded(directory).map(|process| process.pid())
+}
+
+/// Start `command` in `directory` as a server with `keep_running` (see
+/// [`kept`]): it outlives this process, reads its console from a FIFO in
+/// its directory and is recorded there, so a later process adopts it. The
+/// launch is otherwise [`spawn_process`]'s. Used by a cluster peer's
+/// embedded node agent; local servers start through their worker.
+pub(crate) fn spawn_kept(
+    command: &[String],
+    directory: &Path,
+    environment: &crate::config::ProcessEnvironment,
+    isolation: &crate::config::Isolation,
+    memory_limit: Option<(&str, crate::config::MemoryLimit)>,
+) -> io::Result<tokio::process::Child> {
+    if !kept::SUPPORTED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "keep_running requires Linux or macOS",
+        ));
+    }
+    let console = kept::console(directory)?;
+    let mut child = backend::spawn_with(
+        command,
+        directory,
+        environment,
+        isolation,
+        memory_limit,
+        Some(console),
+    )?;
+    // Without its record the next process could not adopt it.
+    if let Some(pid) = child.id()
+        && let Err(error) = kept::record(directory, pid)
+    {
+        let _ = child.start_kill();
+        kept::forget(directory);
+        return Err(error);
+    }
+    Ok(child)
+}
+
+/// Send `line` to the console of the kept server in `directory`.
+pub(crate) fn write_kept_console(directory: &Path, line: &str) -> io::Result<()> {
+    kept::write_console(directory, line)
+}
+
 /// Stop such a server outside a supervisor: `stop` on its console, then a
 /// kill after `grace`. Does nothing without a recorded running process.
 pub(crate) fn stop_kept(directory: &Path, grace: Duration) -> io::Result<()> {
@@ -79,6 +128,19 @@ impl Phase {
             Self::Unknown => "unknown",
         }
     }
+
+    /// The phase [`Phase::as_str`] names.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "stopped" => Self::Stopped,
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "stopping" => Self::Stopping,
+            "failed" => Self::Failed,
+            "unknown" => Self::Unknown,
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for Phase {
@@ -91,6 +153,67 @@ impl PartialEq<&str> for Phase {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
     }
+}
+
+/// An operator or player request that a cluster follower hands to the
+/// leader, whose workers alone start and stop servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Forward {
+    /// An administrator start ([`ManagedServers::start`]).
+    Start,
+    /// An administrator stop ([`ManagedServers::stop`]).
+    Stop,
+    /// Start on connect ([`ManagedServers::ensure_running`]).
+    Demand,
+    /// Capacity that does not override an administrator stop
+    /// ([`ManagedServers::request_scale_start`]).
+    ScaleStart,
+}
+
+/// A future a [`Coordinator`] returns.
+pub type CoordinatorFuture<T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// What the workers of a cluster peer consult (docs/clustering.md, "Work
+/// that runs once: the leader"). Only the leader's workers start, stop,
+/// adopt, recover and idle-stop servers; the other peers mirror the state
+/// the leader records and hand requests to it. A single Rift sets none and
+/// behaves as before.
+pub trait Coordinator: Send + Sync + fmt::Debug {
+    /// The term this peer leads in while its lease holds; `None` otherwise.
+    fn acting_term(&self) -> Option<u64>;
+    /// The state the leader recorded for `name`, as of this peer's replica.
+    fn recorded(&self, name: &str) -> Option<crate::instance_store::ServerState>;
+    /// On the leader: record `name`'s state for every peer, decided in
+    /// `term`. Must not block; the latest state of a server wins.
+    fn record(&self, name: &str, state: crate::instance_store::ServerState, term: u64);
+    /// On a follower: run `request` for `name` on the leader, waiting at
+    /// most `wait`; a demand returns once this peer sees the server running.
+    fn forward(
+        &self,
+        name: &str,
+        request: Forward,
+        wait: Duration,
+    ) -> CoordinatorFuture<io::Result<()>>;
+    /// On the leader, before stopping `name` for being idle: whether every
+    /// live peer agreed (none has a player on its way there, none was
+    /// unreachable) and no expired peer's players may still be on it.
+    fn may_stop(&self, name: &str) -> CoordinatorFuture<bool>;
+}
+
+/// The [`Coordinator`] every worker of one [`ManagedServers`] reads.
+type CoordinatorSlot = Arc<std::sync::RwLock<Option<Arc<dyn Coordinator>>>>;
+
+/// What a worker remembers of its part in a cluster.
+#[derive(Debug, Default)]
+struct ClusterView {
+    /// The worker acted (as the leader's) at its last look.
+    acting: bool,
+    /// What it recorded last, or found recorded when it took over.
+    recorded: Option<crate::instance_store::ServerState>,
+    /// After taking over, a stopped server is not recorded until its agent
+    /// reported (or this passed): it may well be running there.
+    settle_until: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +260,8 @@ struct Inner {
     logins: LoginSlot,
     /// What servers report about themselves; forgotten when they start.
     states: crate::service_state::ServiceStates,
+    /// Set on a cluster peer ([`ManagedServers::set_coordinator`]).
+    coordinator: CoordinatorSlot,
 }
 
 /// The instance logins every worker reads when it starts a process, set
@@ -164,6 +289,9 @@ struct Server {
     wake: Notify,
     /// Shared with [`Inner::states`]; a new run starts without a report.
     states: crate::service_state::ServiceStates,
+    /// Shared with [`Inner::coordinator`].
+    coordinator: CoordinatorSlot,
+    cluster: Mutex<ClusterView>,
 }
 
 #[derive(Debug)]
@@ -181,6 +309,9 @@ struct State {
     startup: Option<Arc<Startup>>,
     /// Parked for a move to another node (see [`ManagedServers::park`]).
     moving: bool,
+    /// Holds of [`ManagedServers::quiesce`]: while any is held, no new
+    /// player is routed here.
+    quiesced: usize,
 }
 
 /// One worker-owned result, retained for every caller even if a later start
@@ -310,6 +441,28 @@ impl Drop for Parked {
     }
 }
 
+/// A server that takes no new players while this is held: the hold of
+/// [`ManagedServers::quiesce`]. Dropping it lifts the hold.
+#[derive(Debug)]
+pub struct Quiesced {
+    server: Arc<Server>,
+}
+
+impl Quiesced {
+    /// Whether players are still on their way to the server: reservations
+    /// taken before the hold. A leader asking this peer to stop the server
+    /// takes that as a veto.
+    pub fn has_inbound(&self) -> bool {
+        lock(&self.server.state).reservations > 0
+    }
+}
+
+impl Drop for Quiesced {
+    fn drop(&mut self) {
+        lock(&self.server.state).quiesced -= 1;
+    }
+}
+
 /// Register `config`'s secret variables so no child inherits them. Called
 /// wherever a configuration reaches the supervisor, before any spawn.
 pub fn protect_secrets(config: &Config) {
@@ -333,6 +486,7 @@ impl ManagedServers {
     pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
         protect_secrets(config);
         let states = crate::service_state::ServiceStates::default();
+        let coordinator = CoordinatorSlot::default();
         // Restored ephemeral instances learn their markers in `with_persistence`.
         let shared = config
             .instances
@@ -350,7 +504,14 @@ impl ManagedServers {
                 let fresh = shared
                     .as_ref()
                     .and_then(|config| Fresh::new(config, name, false));
-                let server = new_server(name, definition.clone(), endpoint, &states, fresh);
+                let server = new_server(
+                    name,
+                    definition.clone(),
+                    endpoint,
+                    &states,
+                    &coordinator,
+                    fresh,
+                );
                 (name.clone(), server)
             })
             .collect();
@@ -364,6 +525,7 @@ impl ManagedServers {
             nodes,
             logins: LoginSlot::default(),
             states,
+            coordinator,
         }))
     }
 
@@ -553,7 +715,14 @@ impl ManagedServers {
         {
             fresh.set_marker(&plan)?;
         }
-        let server = new_server(name, definition.clone(), endpoint, &self.0.states, fresh);
+        let server = new_server(
+            name,
+            definition.clone(),
+            endpoint,
+            &self.0.states,
+            &self.0.coordinator,
+            fresh,
+        );
         lock(&server.state).automatic = automatic;
         launch_worker(
             &runtime,
@@ -597,13 +766,16 @@ impl ManagedServers {
                     "managed server is already retiring",
                 ));
             }
-            if state.reservations > 0 || self.0.players.count_on_server(name) > 0 {
+            // A cluster follower retires what the leader already removed:
+            // the leader checked, and its worker owns the process.
+            let passive = self.passive().is_some();
+            if !passive && (state.reservations > 0 || self.0.players.count_on_server(name) > 0) {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
                     "managed server has connected players or pending connections",
                 ));
             }
-            if state.moving != moved {
+            if !passive && state.moving != moved {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
                     if moved {
@@ -613,7 +785,10 @@ impl ManagedServers {
                     },
                 ));
             }
-            if !moved && let Some(store) = lock(&self.0.instance_store).as_ref() {
+            if !moved
+                && !passive
+                && let Some(store) = lock(&self.0.instance_store).as_ref()
+            {
                 store.begin_removal(name)?;
             }
             state.automatic = false;
@@ -730,6 +905,85 @@ impl ManagedServers {
         Ok(parked)
     }
 
+    /// Whether players are on their way to `name` from this process: a
+    /// pending connection or a transfer holds a reservation until the
+    /// player's presence is committed. A cluster leader that wants to stop
+    /// `name` (idle or scale-down) asks every peer this, and a `true` is a
+    /// veto. Players already on the server are counted from presence.
+    pub fn has_reservation_or_inbound(&self, name: &str) -> bool {
+        lock(&self.0.servers)
+            .get(name)
+            .is_some_and(|server| lock(&server.state).reservations > 0)
+    }
+
+    /// Pending connections and transfers per server, for the servers that
+    /// have any: what a cluster peer reports to the leader every second.
+    pub fn reservations(&self) -> BTreeMap<String, usize> {
+        lock(&self.0.servers)
+            .iter()
+            .filter_map(|(name, server)| {
+                let reservations = lock(&server.state).reservations;
+                (reservations > 0).then(|| (name.clone(), reservations))
+            })
+            .collect()
+    }
+
+    /// Make this peer's workers follow `coordinator`: they act only while
+    /// it leads, and mirror the leader's records otherwise. Set once, on a
+    /// cluster peer, before the first request.
+    pub fn set_coordinator(&self, coordinator: Arc<dyn Coordinator>) {
+        *self
+            .0
+            .coordinator
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(coordinator);
+        for server in lock(&self.0.servers).values() {
+            server.wake.notify_one();
+        }
+    }
+
+    /// Stop following a coordinator, when the cluster stops: the workers
+    /// act on their own again.
+    pub fn clear_coordinator(&self) {
+        *self
+            .0
+            .coordinator
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// The coordinator, while this peer does not lead: requests then go to
+    /// the leader.
+    fn passive(&self) -> Option<Arc<dyn Coordinator>> {
+        coordinator(&self.0.coordinator).filter(|coordinator| coordinator.acting_term().is_none())
+    }
+
+    /// The longest a request for `name` handed to the leader may take.
+    fn forward_wait(&self, name: &str) -> io::Result<Duration> {
+        let servers = lock(&self.0.servers);
+        let server = servers
+            .get(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?;
+        Ok(server
+            .config
+            .start_timeout
+            .max(server.config.stop_timeout)
+            .saturating_add(Duration::from_secs(15)))
+    }
+
+    /// Stop routing new players to `name` until the returned hold is
+    /// dropped: new reservations fail and the server is not reachable for
+    /// routing, while players already there or on their way stay. A
+    /// cluster leader takes the hold on every peer before it stops a server,
+    /// and the peers drop it once the server stopped or the stop was
+    /// abandoned. `None` for a server that is not managed here. Nothing
+    /// else changes: a single Rift never takes a hold.
+    pub fn quiesce(&self, name: &str) -> Option<Quiesced> {
+        let server = lock(&self.0.servers).get(name)?.clone();
+        lock(&server.state).quiesced += 1;
+        Some(Quiesced { server })
+    }
+
     /// Whether `name` is held by [`park`](Self::park).
     pub fn is_moving(&self, name: &str) -> bool {
         lock(&self.0.servers)
@@ -777,6 +1031,31 @@ impl ManagedServers {
     }
 
     pub async fn ensure_running(&self, name: &str) -> io::Result<()> {
+        // A cluster follower asks the leader and waits until the server
+        // runs as the leader records it.
+        if let Some(coordinator) = self.passive() {
+            let running = {
+                let servers = lock(&self.0.servers);
+                match servers.get(name) {
+                    Some(server) => {
+                        self.check_running()?;
+                        let state = lock(&server.state);
+                        connect_allowed(server, &state)?;
+                        Some(state.phase == Phase::Running)
+                    }
+                    None => None,
+                }
+            };
+            match running {
+                Some(true) => return Ok(()),
+                Some(false) => {
+                    let wait = self.forward_wait(name)?;
+                    return coordinator.forward(name, Forward::Demand, wait).await;
+                }
+                // Unknown here: answered below as on a single Rift.
+                None => {}
+            }
+        }
         let (startup, server) = {
             let servers = lock(&self.0.servers);
             let Some(server) = servers.get(name) else {
@@ -922,6 +1201,29 @@ impl ManagedServers {
         reply: Option<oneshot::Sender<io::Result<()>>>,
     ) -> io::Result<()> {
         self.check_running()?;
+        // A cluster follower's workers never act: the leader's do.
+        if let Some(request) = forward_of(&action)
+            && let Some(coordinator) = self.passive()
+        {
+            let wait = self.forward_wait(name)?;
+            let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+            let future = coordinator.forward(name, request, wait);
+            let name = name.to_owned();
+            runtime.spawn(async move {
+                let result = future.await;
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(result);
+                    }
+                    None => {
+                        if let Err(error) = result {
+                            log_warn!("{name}: the cluster leader refused {request:?}: {error}");
+                        }
+                    }
+                }
+            });
+            return Ok(());
+        }
         let servers = lock(&self.0.servers);
         // Recheck under the same registry lock used by shutdown and removal.
         self.check_running()?;
@@ -1092,6 +1394,7 @@ fn new_server(
     config: ManagedServer,
     endpoint: Option<String>,
     states: &crate::service_state::ServiceStates,
+    coordinator: &CoordinatorSlot,
     fresh: Option<Fresh>,
 ) -> Arc<Server> {
     let (sender, receiver) = mpsc::channel(64);
@@ -1099,6 +1402,8 @@ fn new_server(
         name: name.to_owned(),
         fresh: fresh.map(Arc::new),
         states: states.clone(),
+        coordinator: coordinator.clone(),
+        cluster: Mutex::new(ClusterView::default()),
         address: endpoint
             .as_deref()
             .and_then(|endpoint| endpoint.parse().ok()),
@@ -1123,6 +1428,7 @@ fn new_server(
             last_activity: Instant::now(),
             startup: None,
             moving: false,
+            quiesced: 0,
         }),
     })
 }
@@ -1276,6 +1582,152 @@ fn moving() -> io::Error {
     unavailable("managed server is moving to another node")
 }
 
+/// The coordinator in `slot`, if any.
+fn coordinator(slot: &CoordinatorSlot) -> Option<Arc<dyn Coordinator>> {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// What a cluster follower asks the leader for instead of `action`; `None`
+/// for console commands, which reach the server's agent from any peer.
+fn forward_of(action: &Action) -> Option<Forward> {
+    match action {
+        Action::Start {
+            mode: StartMode::Manual,
+        } => Some(Forward::Start),
+        Action::Start {
+            mode: StartMode::Scale,
+        } => Some(Forward::ScaleStart),
+        Action::Start { .. } | Action::Demand(_) => Some(Forward::Demand),
+        Action::Stop => Some(Forward::Stop),
+        Action::Console(_) => None,
+    }
+}
+
+/// The state the leader records for `server` (see [`Coordinator::record`]).
+fn recordable(server: &Server) -> crate::instance_store::ServerState {
+    let state = lock(&server.state);
+    let phase = if state.pending_stop {
+        Phase::Stopping
+    } else {
+        state.phase
+    };
+    crate::instance_store::ServerState {
+        phase: phase.as_str().to_owned(),
+        last_error: state.last_error.clone(),
+        automatic: state.automatic,
+        restart_attempts: u32::try_from(state.restart_attempts).unwrap_or(u32::MAX),
+    }
+}
+
+/// Mirror what the leader recorded for `server` on a follower, whose
+/// worker never acts: routing on this peer then sees the leader's view.
+fn mirror(server: &Server, recorded: Option<&crate::instance_store::ServerState>) {
+    let mut state = lock(&server.state);
+    match recorded {
+        Some(recorded) => {
+            state.phase = Phase::parse(&recorded.phase).unwrap_or(Phase::Unknown);
+            state.last_error = recorded.last_error.clone();
+            state.automatic = recorded.automatic;
+            state.restart_attempts = recorded.restart_attempts as usize;
+        }
+        None => {
+            state.phase = Phase::Stopped;
+            state.last_error = None;
+        }
+    }
+    state.recover = state.phase == Phase::Failed;
+    state.pid = None;
+    state.retry_at = None;
+    state.pending_stop = false;
+}
+
+/// This peer started to lead: take over `server` from the state the
+/// previous leader recorded. A process is adopted from what its agent
+/// reports, never from what this worker owned before another peer led.
+fn take_over<B: ProcessBackend>(
+    server: &Server,
+    backend: &mut B,
+    recorded: Option<&crate::instance_store::ServerState>,
+) {
+    backend.forget();
+    let mut state = lock(&server.state);
+    if let Some(recorded) = recorded {
+        state.automatic = recorded.automatic;
+        state.restart_attempts = recorded.restart_attempts as usize;
+        state.last_error = recorded.last_error.clone();
+    }
+    state.pid = None;
+    state.pending_stop = false;
+    state.retry_at = None;
+    if state.phase == Phase::Failed {
+        // Recovery continues where the previous leader left it.
+        state.recover = true;
+    } else {
+        state.phase = Phase::Stopped;
+        state.recover = false;
+    }
+    state.last_activity = Instant::now();
+}
+
+/// The cluster part of one worker tick: whether the worker acts. A
+/// follower's worker mirrors the leader's record and does nothing else; a
+/// worker whose peer just started to lead takes the server over.
+fn follow_cluster<B: ProcessBackend>(server: &Server, backend: &mut B) -> bool {
+    let Some(coordinator) = coordinator(&server.coordinator) else {
+        return true;
+    };
+    let recorded = coordinator.recorded(&server.name);
+    let mut view = lock(&server.cluster);
+    if coordinator.acting_term().is_none() {
+        view.acting = false;
+        view.recorded = None;
+        view.settle_until = None;
+        drop(view);
+        mirror(server, recorded.as_ref());
+        return false;
+    }
+    if !view.acting {
+        view.acting = true;
+        view.settle_until = Some(Instant::now() + crate::node::protocol::UNREACHABLE_AFTER);
+        drop(view);
+        take_over(server, backend, recorded.as_ref());
+        lock(&server.cluster).recorded = recorded;
+    }
+    true
+}
+
+/// On the leader: record `server`'s state for every peer when it changed.
+fn announce(server: &Server) {
+    let Some(coordinator) = coordinator(&server.coordinator) else {
+        return;
+    };
+    let Some(term) = coordinator.acting_term() else {
+        return;
+    };
+    let current = recordable(server);
+    let mut view = lock(&server.cluster);
+    if !view.acting {
+        return;
+    }
+    if let Some(until) = view.settle_until {
+        if current.phase == Phase::Stopped.as_str() && Instant::now() < until {
+            return;
+        }
+        view.settle_until = None;
+    }
+    if view.recorded.as_ref() != Some(&current) {
+        coordinator.record(&server.name, current.clone(), term);
+        view.recorded = Some(current);
+    }
+}
+
+/// Whether this worker may act now: always without a cluster.
+fn acting(server: &Server) -> bool {
+    coordinator(&server.coordinator).is_none_or(|coordinator| coordinator.acting_term().is_some())
+}
+
 fn send_request(server: &Server, request: Request) -> io::Result<()> {
     server
         .sender
@@ -1292,6 +1744,11 @@ fn send_request(server: &Server, request: Request) -> io::Result<()> {
 fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
     if state.moving {
         return Err(moving());
+    }
+    if state.quiesced > 0 {
+        return Err(unavailable(
+            "managed server is being stopped and takes no new players",
+        ));
     }
     if server.shutdown.load(Ordering::Acquire)
         || state.pending_stop
@@ -1377,7 +1834,10 @@ async fn worker<B: ProcessBackend>(
     // A remote server autostarts once its node is reachable, which may be
     // after the controller itself started.
     let mut autostart = server.config.autostart && lock(&server.state).automatic;
-    if autostart && backend.available().is_ok() {
+    // In a cluster only the leader's worker starts anything; a follower's
+    // mirrors the leader's record from the start.
+    let acts = follow_cluster(&server, &mut backend);
+    if autostart && acts && backend.available().is_ok() {
         autostart = false;
         let _ = start_process(&server, &mut backend, StartMode::Scale).await;
     }
@@ -1392,15 +1852,24 @@ async fn worker<B: ProcessBackend>(
             _ = server.wake.notified() => {}
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                // Queued before this peer stopped leading: the leader decides now.
+                if !matches!(request.action, Action::Console(_)) && !acting(&server) {
+                    refuse(&server, request, "this peer no longer leads the cluster; retry");
+                    continue;
+                }
                 if matches!(request.action, Action::Start { .. } | Action::Stop) {
                     autostart = false;
                 }
                 let result = perform(&server, &mut backend, request.action).await;
+                announce(&server);
                 if let Some(reply) = request.reply {
                     let _ = reply.send(result);
                 }
             }
             _ = tick.tick() => {
+                if !follow_cluster(&server, &mut backend) {
+                    continue;
+                }
                 if autostart && backend.available().is_ok() {
                     autostart = false;
                     if lock(&server.state).automatic {
@@ -1408,6 +1877,7 @@ async fn worker<B: ProcessBackend>(
                     }
                 }
                 supervise(&server, &players, &mut backend).await;
+                announce(&server);
                 // A node agent rotates the logs of the servers it runs.
                 if server.config.node.is_none() && log_checked.elapsed() >= LOG_CHECK_INTERVAL {
                     log_checked = Instant::now();
@@ -1423,16 +1893,17 @@ async fn worker<B: ProcessBackend>(
     // Reject queued callers promptly instead of executing stale operations.
     requests.close();
     while let Some(request) = requests.recv().await {
-        if let Action::Demand(startup) = request.action {
-            finish_startup(
-                &server,
-                &startup,
-                Err(unavailable("managed servers are shutting down")),
-            );
-        }
-        if let Some(reply) = request.reply {
-            let _ = reply.send(Err(unavailable("managed servers are shutting down")));
-        }
+        refuse(&server, request, "managed servers are shutting down");
+    }
+}
+
+/// Answer `request` with `message` without performing it.
+fn refuse(server: &Server, request: Request, message: &str) {
+    if let Action::Demand(startup) = request.action {
+        finish_startup(server, &startup, Err(unavailable(message)));
+    }
+    if let Some(reply) = request.reply {
+        let _ = reply.send(Err(unavailable(message)));
     }
 }
 
@@ -1481,6 +1952,10 @@ async fn supervise<B: ProcessBackend>(server: &Server, players: &PlayerRegistry,
     if should_recover {
         let _ = start_process(server, backend, StartMode::Recovery).await;
     }
+    if let Some(coordinator) = coordinator(&server.coordinator) {
+        idle_stop_in_cluster(server, players, backend, coordinator).await;
+        return;
+    }
     let should_stop = {
         let mut state = lock(&server.state);
         if state.reservations > 0 || players.count_on_server(&server.name) > 0 {
@@ -1494,6 +1969,53 @@ async fn supervise<B: ProcessBackend>(server: &Server, players: &PlayerRegistry,
         {
             // This lock also guards new reservations, closing the race
             // between idle detection and the first stop await.
+            state.phase = Phase::Stopping;
+            state.recover = false;
+            state.retry_at = None;
+            true
+        } else {
+            false
+        }
+    };
+    if should_stop {
+        let _ = stop_process(server, backend).await;
+    }
+}
+
+/// The idle stop of a cluster leader: the players of every peer count
+/// (presence), and before stopping, every live peer is asked whether a
+/// player is on its way there; any veto, unreachable peer or stop hold after
+/// a peer expiry keeps the server running for another idle period.
+async fn idle_stop_in_cluster<B: ProcessBackend>(
+    server: &Server,
+    players: &PlayerRegistry,
+    backend: &mut B,
+    coordinator: Arc<dyn Coordinator>,
+) {
+    let idle = |state: &mut State| {
+        if state.reservations > 0 || players.count_on_server(&server.name) > 0 {
+            state.last_activity = Instant::now();
+            false
+        } else {
+            state.phase == Phase::Running
+                && !state.pending_stop
+                && server
+                    .config
+                    .idle_timeout
+                    .is_some_and(|timeout| state.last_activity.elapsed() >= timeout)
+        }
+    };
+    if !idle(&mut lock(&server.state)) {
+        return;
+    }
+    let agreed = coordinator.may_stop(&server.name).await;
+    let should_stop = {
+        let mut state = lock(&server.state);
+        if !agreed || coordinator.acting_term().is_none() {
+            // Asked again only after another idle period.
+            state.last_activity = Instant::now();
+            false
+        } else if idle(&mut state) {
             state.phase = Phase::Stopping;
             state.recover = false;
             state.retry_at = None;
@@ -1716,6 +2238,7 @@ async fn start_process_inner<B: ProcessBackend>(
         // The previous run's label, properties and drain end with it.
         server.states.clear(&server.name);
     }
+    announce(server);
     let result = spawn_ready(server, backend).await;
     settle(server, backend, result).await
 }
@@ -1825,6 +2348,7 @@ async fn exited_during_startup<B: ProcessBackend>(
 
 async fn stop_process<B: ProcessBackend>(server: &Server, backend: &mut B) -> io::Result<()> {
     lock(&server.state).phase = Phase::Stopping;
+    announce(server);
     let result = if backend.owns() {
         backend.stop(server, server.config.stop_timeout).await
     } else {

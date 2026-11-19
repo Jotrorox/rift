@@ -271,6 +271,9 @@ as a backend's ban screen.
 | `login.version` | – | This server does not accept your Minecraft version. |
 | `login.no_version` | – | No server on this network supports your Minecraft version. |
 | `decision.unavailable` | – | Unable to check your access, please try again later. |
+| `cluster.max_players` | – | The network is full. Please try again later. |
+| `cluster.partition_message` | – | This proxy lost contact with the rest of the network. Please reconnect. |
+| `cluster.leaving` | – | This proxy is restarting. Please reconnect. |
 | `connection.lost_no_fallback` | – | The server connection was lost and no fallback was available. |
 | `connection.lost` | – | The server connection was lost. Please reconnect. |
 | `connection.failed` | – | The server connection failed. Please reconnect. |

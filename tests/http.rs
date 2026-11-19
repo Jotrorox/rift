@@ -1971,6 +1971,116 @@ fn player_endpoints_use_read_and_console_scopes_and_are_audited() {
 }
 
 #[test]
+fn cluster_actions_need_the_cluster_permission_and_are_audited() {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        &format!("token = '{TOKEN}', operators = {{ observer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','audit'}} }} }},"),
+        "",
+    );
+    let _process = fixture.start(&source);
+    let observer = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let admin = fixture.client().authenticated();
+    // Reading the status needs `read`; a single Rift has no cluster.
+    assert_eq!(
+        observer.get("/api/cluster").expect(200).value(),
+        json!({"enabled": false})
+    );
+    let discovery = admin.get("/api").expect(200).value();
+    for endpoint in [
+        "POST /api/cluster/transfer-leader",
+        "POST /api/cluster/peers/{name}/leave",
+    ] {
+        assert!(
+            discovery["endpoints"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(endpoint)),
+            "{endpoint}"
+        );
+    }
+    fixture
+        .client()
+        .json("POST", "/api/cluster/transfer-leader", json!({}))
+        .expect(401);
+    observer
+        .json("POST", "/api/cluster/transfer-leader", json!({}))
+        .expect(403);
+    observer
+        .json("POST", "/api/cluster/peers/eu-2/leave", json!({}))
+        .expect(403);
+    // The permission passes, but without cluster.toml there is nothing to
+    // change.
+    admin
+        .json("POST", "/api/cluster/transfer-leader", json!({}))
+        .expect(404);
+    admin
+        .json(
+            "POST",
+            "/api/cluster/transfer-leader",
+            json!({"peer": "eu-2"}),
+        )
+        .expect(404);
+    admin
+        .json("POST", "/api/cluster/peers/eu-2/leave", json!({}))
+        .expect(404);
+    for body in [
+        json!({"peer": 5}),
+        json!({"peer": "--witness"}),
+        json!({"peer": "EU"}),
+        json!({"extra": 1}),
+    ] {
+        let response = admin.json("POST", "/api/cluster/transfer-leader", body.clone());
+        assert_eq!(response.status, 400, "{body}");
+    }
+    admin
+        .json("POST", "/api/cluster/peers/--force/leave", json!({}))
+        .expect(400);
+    admin
+        .json(
+            "POST",
+            "/api/cluster/peers/eu-2/leave",
+            json!({"force": true}),
+        )
+        .expect(400);
+    let audit = admin.get("/api/audit").expect(200).value();
+    let records = audit["records"].as_array().unwrap();
+    assert!(
+        records.iter().any(|record| {
+            record["actor"] == "admin"
+                && record["action"] == "POST leave_peer"
+                && record["target"] == "eu-2"
+        }),
+        "{audit}"
+    );
+    assert!(
+        records.iter().any(|record| {
+            record["actor"] == "observer"
+                && record["action"] == "POST transfer_leader"
+                && record["outcome"] == "denied"
+        }),
+        "{audit}"
+    );
+    // A cluster change concerns every peer, so group-scoped operators
+    // cannot hold the permission.
+    let scoped = fixture.source(
+        &format!("token = '{TOKEN}', operators = {{ staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','cluster'}}, groups = {{'lobby'}} }} }},"),
+        "",
+    );
+    let rejected = admin
+        .json("POST", "/api/config/validate", json!({"source": scoped}))
+        .value();
+    assert!(
+        rejected
+            .to_string()
+            .contains("cluster, config, deploy, extensions, plugins and perms require unrestricted group access"),
+        "{rejected}"
+    );
+}
+
+#[test]
 fn loopback_without_credentials_requires_the_generated_token_and_denials_are_summarised() {
     let fixture = Fixture::new();
     let source = fixture.source("", "");

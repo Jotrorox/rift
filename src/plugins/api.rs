@@ -84,6 +84,10 @@ pub struct PlayerInfo {
     /// plugin set, else the client's locale.
     #[serde(default)]
     pub language: Option<String>,
+    /// The cluster peer the player is connected to; absent without a
+    /// cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
 }
 
 /// One signed property of a player's profile, such as `textures`.

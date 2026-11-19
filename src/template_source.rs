@@ -238,8 +238,24 @@ async fn git(repository: &Path, arguments: &[&str]) -> io::Result<String> {
 }
 
 /// Fetch the configured commit and replace the checkout with its files.
-/// Returns the new [`status`].
+/// Returns the new [`status`]. In a cluster the leader runs the sync (it
+/// is forwarded there) and publishes the folder's manifest, from which every
+/// peer's `template_storage` is written (docs/clustering.md, "Templates and
+/// other files").
 pub async fn sync(
+    storage: &Path,
+    cache: &Path,
+    name: &str,
+    source: &TemplateSource,
+) -> io::Result<Value> {
+    match crate::cluster::files::active() {
+        Some(files) => files.sync_template_source(name, source, false).await,
+        None => sync_local(storage, cache, name, source).await,
+    }
+}
+
+/// [`sync`] on this host's own folders, whatever the cluster.
+pub(crate) async fn sync_local(
     storage: &Path,
     cache: &Path,
     name: &str,
@@ -347,16 +363,33 @@ pub async fn sync(
 /// Sync a source that has no checkout yet, or whose definition changed since
 /// its checkout was made. An existing checkout of a branch is left alone:
 /// instances never change because someone pushed.
+/// In a cluster the leader decides and publishes, as for [`sync`].
 pub async fn ensure(
     storage: &Path,
     cache: &Path,
     name: &str,
     source: &TemplateSource,
 ) -> io::Result<()> {
-    if current(storage, cache, name, source) {
-        return Ok(());
+    match crate::cluster::files::active() {
+        Some(files) => files
+            .sync_template_source(name, source, true)
+            .await
+            .map(drop),
+        None => ensure_local(storage, cache, name, source).await.map(drop),
     }
-    sync(storage, cache, name, source).await.map(drop)
+}
+
+/// [`ensure`] on this host's own folders; returns whether it synced.
+pub(crate) async fn ensure_local(
+    storage: &Path,
+    cache: &Path,
+    name: &str,
+    source: &TemplateSource,
+) -> io::Result<bool> {
+    if current(storage, cache, name, source) {
+        return Ok(false);
+    }
+    sync_local(storage, cache, name, source).await.map(|_| true)
 }
 
 #[cfg(test)]

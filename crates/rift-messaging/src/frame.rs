@@ -33,6 +33,13 @@ pub const DELIVERY: u8 = 14;
 pub const ACK: u8 = 15;
 pub const CONSUMER_DELETE: u8 = 16;
 
+/// The optional last field of SUBSCRIBE: the subscription's
+/// [`SubscriptionScope`](crate::SubscriptionScope). Absent means
+/// [`SCOPE_CLUSTER`]; clients send it only for [`SCOPE_LOCAL`], so servers
+/// from before scopes keep accepting their other subscriptions.
+pub const SCOPE_CLUSTER: u8 = 0;
+pub const SCOPE_LOCAL: u8 = 1;
+
 /// Reads length-prefixed frames from one stream. Reads are cancellation safe:
 /// a partial frame stays buffered for the next call.
 #[derive(Default)]

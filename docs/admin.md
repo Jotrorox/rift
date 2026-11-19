@@ -52,9 +52,11 @@ on distinct ports.
 ## Permissions
 
 `permissions` lists what the endpoint allows: `status`, `servers`,
-`maintenance`, `drain`, `transfer`, `reload`, `shutdown`, `plugins`, `logs`
-and `perms`. Remove the operations a credential must not perform, or use
-`{ "status" }` for a read-only endpoint.
+`maintenance`, `drain`, `transfer`, `reload`, `shutdown`, `plugins`, `logs`,
+`perms` and `cluster`. Remove the operations a credential must not perform,
+or use `{ "status" }` for a read-only endpoint. `cluster` allows membership
+changes, leadership transfers and backups of a [cluster](clustering.md);
+reading the cluster's status needs only `status`.
 
 ## Commands
 
@@ -95,6 +97,13 @@ Prefix each command with `rift admin`.
 | `plugins restart <name>` | `plugins` | Stops a persistent plugin and starts a fresh instance with its current configuration; recorded in the operator audit log with the plugin name |
 | `plugins run <command> [arguments]` | `plugins` | Runs a persistent plugin's [command](plugin-events.md#commands) that is registered with `console`, and prints its message |
 | `perms <command>` | `perms` | Runs the [`/perms` grammar](permissions-commands.md) with console rights, plus `log`, `compiled`, `doctor` and `backends` |
+| `cluster`, `cluster status [--leader]` | `status` | Shows this [cluster](clustering.md#operating-a-cluster) peer's view of members, roles, leader, term, indexes, lag and each peer's players; `--leader` fetches the leader's view, which knows every peer's lag |
+| `cluster add <name> <host:port> [--witness]` | `cluster` | Adds a peer as a learner; see [membership commands](clustering.md#rift-admin-cluster) |
+| `cluster promote <name>`, `cluster demote <name> [--force]` | `cluster` | Makes a caught-up learner a voter, or a voter a learner |
+| `cluster remove <name> [--force]`, `cluster replace <name> [--force]` | `cluster` | Removes a peer, or re-adds one that lost its Raft file under a new id |
+| `cluster leave <name>` | `cluster` | [Drains a peer](clustering.md#rolling-restarts): it hands leadership away, sends its players to other peers and exits |
+| `cluster transfer-leader [<name>]` | `cluster` | Moves leadership to another voter |
+| `cluster backup <file>` | `cluster` | Writes a [backup](clustering.md#backup-and-recovery) of the cluster's state on the proxy host |
 
 - `start`, `stop` and `plugins restart` return once Rift accepts the request.
   Poll `servers` to verify completion; a failed start appears in the server's
@@ -102,4 +111,7 @@ Prefix each command with `rift admin`.
 - The server commands never accept arbitrary process commands and never modify
   ordinary unmanaged backends.
 - For `perms`, import and export paths are resolved where the CLI runs, and
-  the proxy reads or writes the file.
+  the proxy reads or writes the file. The same holds for `cluster backup`.
+- On a cluster follower, `move`, `backup`, `backups forget`, `restore` and
+  `warm` run on the leader for you, as do starts, stops, `create` and
+  `remove`; `maintenance` and `drain` change only the peer you ask.

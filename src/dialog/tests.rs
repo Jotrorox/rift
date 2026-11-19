@@ -415,3 +415,29 @@ fn lua_tables_become_json_lists_and_objects() {
         .unwrap();
     assert!(from_lua(deep).unwrap_err().contains("levels"));
 }
+
+#[test]
+fn dialogs_and_owners_survive_the_trip_to_another_peer() {
+    let dialog = parse(json!({
+        "type": "multi_action",
+        "title": "Pick",
+        "actions": [
+            {"label": "Cancel", "action": {"type": "custom", "id": "cancel", "payload": [1, 2]}},
+        ],
+    }));
+    let copy: Dialog = serde_json::from_str(&serde_json::to_string(&dialog).unwrap()).unwrap();
+    assert_eq!(copy, dialog);
+    let id = click_id(&dialog, 0);
+    assert_eq!(copy.resolve(&id, None), dialog.resolve(&id, None));
+    assert_eq!(
+        copy.resolve(&id, None).unwrap().0.payload,
+        Some(json!([1, 2]))
+    );
+    let owner = Owner::Remote {
+        peer: 2,
+        incarnation: 7,
+        plugin: Some("menu".into()),
+    };
+    let text = serde_json::to_string(&owner).unwrap();
+    assert_eq!(serde_json::from_str::<Owner>(&text).unwrap(), owner);
+}

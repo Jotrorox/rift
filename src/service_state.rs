@@ -7,7 +7,14 @@
 //! restarted game server comes back unlabelled and accepting players.
 //! Removing an instance forgets it too. Unmanaged backends keep their report
 //! until they change it or the proxy restarts.
-use serde::Serialize;
+//!
+//! In a cluster a backend reports to whichever peer its bus client uses.
+//! That peer sends every change through a [`ReportSync`] to the other peers,
+//! which apply it with [`ServiceStates::apply_remote`]; a peer that starts
+//! asks one of them for [`ServiceStates::full_copy`] and installs it with
+//! [`ServiceStates::install_copy`], so it never routes players into an
+//! `INGAME` or draining server. A single Rift has no sync.
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
@@ -37,7 +44,7 @@ const RESERVED_STATES: [&str; 7] = [
 ];
 
 /// One server's current report.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
     /// The reported label, as sent.
     pub state: Option<String>,
@@ -161,14 +168,38 @@ pub struct Change {
     pub report: Report,
 }
 
+/// One server's report as it travels between the peers of a cluster: the
+/// whole report, so applying it twice or out of a burst's order converges.
+/// An empty report forgets the server's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateUpdate {
+    pub server: String,
+    pub report: Report,
+}
+
+/// Where a peer sends the reports its backends make. `send` is called after
+/// the change is visible here and must not block.
+pub trait ReportSync: Send + Sync + 'static {
+    fn send(&self, update: StateUpdate);
+}
+
 /// Every server's report, shared by all configuration generations.
 #[derive(Debug, Clone)]
 pub struct ServiceStates(Arc<Inner>);
 
-#[derive(Debug)]
 struct Inner {
     reports: RwLock<BTreeMap<String, Report>>,
     changes: broadcast::Sender<Change>,
+    sync: RwLock<Option<Arc<dyn ReportSync>>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServiceStates")
+            .field("reports", &self.reports)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ServiceStates {
@@ -176,6 +207,7 @@ impl Default for ServiceStates {
         Self(Arc::new(Inner {
             reports: RwLock::default(),
             changes: broadcast::channel(256).0,
+            sync: RwLock::default(),
         }))
     }
 }
@@ -244,7 +276,98 @@ impl ServiceStates {
             report
         };
         self.announce(server, report.clone());
+        self.share(server, &report);
         Ok(report)
+    }
+
+    /// Send every change of this peer's reports to `sync`; `None` stops.
+    pub fn set_sync(&self, sync: Option<Arc<dyn ReportSync>>) {
+        *self.0.sync.write().unwrap_or_else(PoisonError::into_inner) = sync;
+    }
+
+    /// Tell the other peers about a change made here.
+    fn share(&self, server: &str, report: &Report) {
+        let sync = self
+            .0
+            .sync
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(sync) = sync {
+            sync.send(StateUpdate {
+                server: server.to_owned(),
+                report: report.clone(),
+            });
+        }
+    }
+
+    /// Apply a report another peer shared. It is announced here like a
+    /// local one, but not shared again.
+    pub fn apply_remote(&self, update: StateUpdate) {
+        let changed = {
+            let mut reports = self
+                .0
+                .reports
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if update.report.is_empty() {
+                reports.remove(&update.server).is_some()
+            } else if reports.get(&update.server) == Some(&update.report) {
+                false
+            } else {
+                reports.insert(update.server.clone(), update.report.clone());
+                true
+            }
+        };
+        if changed {
+            self.announce(&update.server, update.report);
+        }
+    }
+
+    /// Every report, for a peer that starts.
+    pub fn full_copy(&self) -> Vec<StateUpdate> {
+        self.0
+            .reports
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(server, report)| StateUpdate {
+                server: server.clone(),
+                report: report.clone(),
+            })
+            .collect()
+    }
+
+    /// Replace every report with another peer's [`ServiceStates::full_copy`],
+    /// announcing each difference.
+    pub fn install_copy(&self, copy: Vec<StateUpdate>) {
+        let copy: BTreeMap<String, Report> = copy
+            .into_iter()
+            .filter(|update| !update.report.is_empty())
+            .map(|update| (update.server, update.report))
+            .collect();
+        let changed: Vec<(String, Report)> = {
+            let mut reports = self
+                .0
+                .reports
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut changed: Vec<(String, Report)> = reports
+                .keys()
+                .filter(|server| !copy.contains_key(*server))
+                .map(|server| (server.clone(), Report::default()))
+                .collect();
+            changed.extend(
+                copy.iter()
+                    .filter(|(server, report)| reports.get(*server) != Some(*report))
+                    .map(|(server, report)| (server.clone(), report.clone())),
+            );
+            *reports = copy;
+            changed
+        };
+        for (server, report) in changed {
+            self.announce(&server, report);
+        }
     }
 
     /// Withdraw only the server's own drain, as an operator's `drain`
@@ -272,6 +395,7 @@ impl ServiceStates {
             .is_some();
         if removed {
             self.announce(server, Report::default());
+            self.share(server, &Report::default());
         }
     }
 
@@ -289,6 +413,7 @@ impl ServiceStates {
         };
         for server in removed {
             self.announce(&server, Report::default());
+            self.share(&server, &Report::default());
         }
     }
 
@@ -395,6 +520,55 @@ mod tests {
         // Clearing nothing announces nothing.
         states.clear("game-1");
         assert!(changes.try_recv().is_err());
+    }
+
+    #[test]
+    fn reports_travel_between_peers_without_echo() {
+        #[derive(Default)]
+        struct Outbox(std::sync::Mutex<Vec<StateUpdate>>);
+        impl ReportSync for Outbox {
+            fn send(&self, update: StateUpdate) {
+                self.0.lock().unwrap().push(update);
+            }
+        }
+        let (here, there) = (ServiceStates::default(), ServiceStates::default());
+        let (outbox, echo) = (Arc::new(Outbox::default()), Arc::new(Outbox::default()));
+        here.set_sync(Some(outbox.clone()));
+        there.set_sync(Some(echo.clone()));
+        let mut changes = there.subscribe();
+        here.apply(
+            "game-1",
+            Update::decode(br#"{"state":"INGAME","draining":true}"#).unwrap(),
+        )
+        .unwrap();
+        here.apply("game-2", Update::decode(br#"{"state":"LOBBY"}"#).unwrap())
+            .unwrap();
+        for update in outbox.0.lock().unwrap().drain(..) {
+            there.apply_remote(update.clone());
+            // Applying the same report again changes nothing.
+            there.apply_remote(update);
+        }
+        assert!(there.draining("game-1"));
+        assert_eq!(there.get("game-2").state.as_deref(), Some("LOBBY"));
+        assert_eq!(changes.try_recv().unwrap().server, "game-1");
+        assert_eq!(changes.try_recv().unwrap().server, "game-2");
+        assert!(changes.try_recv().is_err());
+        assert!(echo.0.lock().unwrap().is_empty());
+        // Forgetting travels as an empty report.
+        here.clear("game-2");
+        for update in outbox.0.lock().unwrap().drain(..) {
+            there.apply_remote(update);
+        }
+        assert_eq!(there.get("game-2"), Report::default());
+        // A starting peer installs a full copy.
+        let fresh = ServiceStates::default();
+        fresh
+            .apply("stale", Update::decode(br#"{"state":"OLD"}"#).unwrap())
+            .unwrap();
+        fresh.install_copy(here.full_copy());
+        assert_eq!(fresh.full_copy(), here.full_copy());
+        assert_eq!(fresh.get("stale"), Report::default());
+        assert!(fresh.draining("game-1"));
     }
 
     #[test]

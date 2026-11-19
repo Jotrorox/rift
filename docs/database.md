@@ -20,13 +20,17 @@ backend behaves the same: the same features, the same limits, the same
 | Setup | None | A database and a role | A database and a user |
 | Where the data lives | A file on the controller's disk | A database server, reachable from any host | A database server, reachable from any host |
 | Backups | Copy the file while Rift is stopped | `pg_dump` while Rift runs, or the server's own backups and replicas | `mariadb-dump --single-transaction` while Rift runs, or the server's own backups and replicas |
-| A second controller | Not possible | A [standby](#standby-controllers) that takes over when the first stops | The same |
+| A second controller | Not possible alone; a [cluster](clustering.md) replicates SQLite to several active proxies | A [standby](#standby-controllers) that takes over when the first stops | The same |
 | Inspect or report on the data | `sqlite3 rift.sqlite3` | Any PostgreSQL client or BI tool, from anywhere | Any MariaDB or MySQL client or BI tool, from anywhere |
 
 Choose a server when you run [several hosts](nodes.md) and want the
 controller's state off its own disk, want a standby controller, or already
 run one with backups and replication. Pick whichever of the two you already
 operate; Rift works the same on both.
+
+A [cluster](clustering.md) of several active proxies keeps SQLite instead: it
+replicates the instance database to every peer with Raft and needs no
+database server. It cannot use PostgreSQL or MariaDB.
 
 ## Use PostgreSQL
 
@@ -202,7 +206,9 @@ the server ends its session and the standby takes the lock and starts: it
 restores the registered instances, and [node agents](nodes.md) keep their
 servers running and are adopted again once they reach the new controller.
 
-A standby is a cold spare, not a second active proxy. Plan for these:
+A standby is a cold spare, not a second active proxy. For proxies that all
+accept players, and lose only their own players when one fails, run a
+[cluster](clustering.md#cluster-or-standby) instead. Plan for these:
 
 - **One address.** Players, node agents (`--controller`, `--web`) and
   backends connect to one controller. Move a floating IP or DNS name to the

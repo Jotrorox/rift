@@ -14,7 +14,7 @@ use crate::plugins::{
     },
     services::Services,
 };
-use crate::text::Text;
+use crate::{cluster::queues::jobs::Scope, messaging::SubscriptionScope, text::Text};
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -321,6 +321,10 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
         properties.raw_push(entry)?;
     }
     player.raw_set("properties", properties)?;
+    // The cluster peer the player is on; absent without a cluster.
+    if let Some(peer) = &info.peer {
+        player.raw_set("peer", peer.as_str())?;
+    }
     Ok(player)
 }
 
@@ -389,6 +393,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
     rift.raw_set("servers", servers(lua, state)?)?;
     rift.raw_set("timers", timers(lua, state)?)?;
     rift.raw_set("background", background(lua, state)?)?;
+    rift.raw_set("cluster", cluster(lua, state)?)?;
     messaging(lua, &rift, state)?;
     super::http::install(lua, &rift, state, spec.manifest.capabilities.network)?;
 
@@ -560,11 +565,34 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(
             lua,
             state,
-            move |_, (name, every_ms, callback): (Value, Value, Value)| {
-                let (Value::String(name), Value::Function(callback)) = (name, callback) else {
+            move |_, (name, every_ms, options, callback): (Value, Value, Value, Value)| {
+                // `rift.every(name, ms, fn)` or `rift.every(name, ms, { scope = ... }, fn)`.
+                let (options, callback) = match (options, callback) {
+                    (Value::Function(callback), Value::Nil) => (None, callback),
+                    (Value::Table(options), Value::Function(callback)) => (Some(options), callback),
+                    _ => {
+                        return Err(runtime(
+                            "rift.every expects a job name, an interval in milliseconds, optional options and a function",
+                        ));
+                    }
+                };
+                let Value::String(name) = name else {
                     return Err(runtime(
                         "rift.every expects a job name, an interval in milliseconds and a function",
                     ));
+                };
+                let scope = match options {
+                    None => Scope::default(),
+                    Some(options) => {
+                        for pair in options.pairs::<Value, Value>() {
+                            let (key, _) = pair?;
+                            if !matches!(&key, Value::String(key) if key.as_bytes().as_ref() == b"scope") {
+                                return Err(runtime("rift.every options take scope only"));
+                            }
+                        }
+                        let scope: Option<String> = options.get("scope")?;
+                        Scope::parse(scope.as_deref()).map_err(runtime)?
+                    }
                 };
                 let name = name.to_str()?.to_owned();
                 if !crate::extensions::token(&name) {
@@ -589,7 +617,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
                     )));
                 }
                 jobs.insert(name.clone());
-                let handle = every.services.timers().every(ms);
+                let handle = every.services.timers().every_scoped(ms, scope);
                 every.timers.borrow_mut().insert(
                     handle,
                     Timer {
@@ -608,21 +636,41 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(lua, state, move |_, args: MultiValue| {
             let mut args = args.into_iter();
             let subject = args.next().unwrap_or(Value::Nil);
-            let (queue, callback) = match (
+            // The second argument is a queue group or `{ queue = ..., scope = ... }`.
+            let options = |table: &Table| -> mlua::Result<(Option<String>, Option<String>)> {
+                Ok((table.get("queue")?, table.get("scope")?))
+            };
+            let (queue, scope, callback) = match (
                 args.next().unwrap_or(Value::Nil),
                 args.next().unwrap_or(Value::Nil),
             ) {
-                (Value::Function(callback), Value::Nil) => (None, Some(callback)),
+                (Value::Function(callback), Value::Nil) => (None, None, Some(callback)),
                 (Value::String(queue), Value::Function(callback)) => {
-                    (Some(queue.to_str()?.to_owned()), Some(callback))
+                    (Some(queue.to_str()?.to_owned()), None, Some(callback))
                 }
-                (Value::String(queue), Value::Nil) => (Some(queue.to_str()?.to_owned()), None),
-                (Value::Nil, Value::Nil) => (None, None),
+                (Value::String(queue), Value::Nil) => {
+                    (Some(queue.to_str()?.to_owned()), None, None)
+                }
+                (Value::Table(table), Value::Function(callback)) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, Some(callback))
+                }
+                (Value::Table(table), Value::Nil) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, None)
+                }
+                (Value::Nil, Value::Nil) => (None, None, None),
                 _ => {
                     return Err(runtime(
-                        "rift.subscribe expects a subject, an optional queue group and an optional function",
+                        "rift.subscribe expects a subject, an optional queue group or options table and an optional function",
                     ));
                 }
+            };
+            let scope = match scope {
+                None => SubscriptionScope::Cluster,
+                Some(scope) => scope
+                    .parse::<SubscriptionScope>()
+                    .map_err(|error| runtime(format!("rift.subscribe: {error}")))?,
             };
             let Value::String(subject) = subject else {
                 return Err(runtime("rift.subscribe expects a subject"));
@@ -632,7 +680,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
             let handle = subscribe
                 .services
                 .bus()
-                .subscribe(&subject, queue.as_deref())
+                .subscribe_scoped(&subject, queue.as_deref(), scope)
                 .map_err(runtime)?;
             subscribe
                 .subscriptions
@@ -1334,6 +1382,68 @@ fn timers(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             }
             Ok(timers.services.timers().cancel(handle))
         })?,
+    )?;
+    Ok(api)
+}
+
+/// `rift.cluster`: `lease(name, ttl_ms)` returns a fencing token or nil while
+/// another peer holds the lease, `renew(name, token, ttl_ms)` and
+/// `release(name, token)` return whether they took effect, `is_leader()`
+/// (advisory) and `peer()` (nil without a cluster). The lease calls wait for
+/// the cluster's answer.
+fn cluster(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
+    fn ttl(ttl_ms: i64) -> mlua::Result<u64> {
+        u64::try_from(ttl_ms)
+            .map_err(|_| runtime("lease ttl must be a positive number of milliseconds"))
+    }
+    let api = lua.create_table()?;
+    let services = state.services.clone();
+    api.raw_set(
+        "lease",
+        function(lua, state, move |_, (name, ttl_ms): (String, i64)| {
+            services
+                .cluster()
+                .lease(&name, ttl(ttl_ms)?)
+                .map(|token| token.map(|token| i64::try_from(token).unwrap_or(i64::MAX)))
+                .map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "renew",
+        function(
+            lua,
+            state,
+            move |_, (name, token, ttl_ms): (String, i64, i64)| {
+                let Ok(token) = u64::try_from(token) else {
+                    return Ok(false);
+                };
+                services
+                    .cluster()
+                    .renew(&name, token, ttl(ttl_ms)?)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "release",
+        function(lua, state, move |_, (name, token): (String, i64)| {
+            let Ok(token) = u64::try_from(token) else {
+                return Ok(false);
+            };
+            services.cluster().release(&name, token).map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "is_leader",
+        function(lua, state, move |_, ()| Ok(services.cluster().is_leader()))?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "peer",
+        function(lua, state, move |_, ()| Ok(services.cluster().peer()))?,
     )?;
     Ok(api)
 }

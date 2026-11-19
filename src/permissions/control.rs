@@ -176,6 +176,8 @@ pub struct Bus {
     commands: RwLock<Vec<(String, String)>>,
     /// The newest revision published on the bus.
     published: Mutex<u64>,
+    /// In a cluster: where context reports for players of other peers go.
+    players: OnceLock<crate::extensions::Players>,
 }
 
 impl Bus {
@@ -232,7 +234,15 @@ impl Bus {
             changes: OnceLock::new(),
             commands: RwLock::default(),
             published,
+            players: OnceLock::new(),
         }
+    }
+
+    /// In a cluster: send context reports for players another peer holds
+    /// to that peer through `players` (`crate::cluster::players::attach`).
+    /// Set once.
+    pub fn route_through(&self, players: crate::extensions::Players) {
+        let _ = self.players.set(players);
     }
 
     pub fn authority(&self) -> &Arc<Authority> {
@@ -688,11 +698,22 @@ impl Bus {
             None => self
                 .authority
                 .server_of(report.uuid)
+                .or_else(|| self.players.get()?.remote_server(report.uuid.as_bytes()))
                 .ok_or_else(|| refuse(ErrorCode::NotFound, "player is offline"))?,
         };
-        let accepted = self
+        let routed = contexts.clone();
+        let mut accepted = self
             .authority
             .report_contexts(report.uuid, &server, contexts)?;
+        // In a cluster the player may be held by another peer than the one
+        // this backend's bus client is connected to.
+        if !accepted
+            && let Some(players) = self.players.get()
+            && let Some(answer) =
+                players.route_contexts_blocking(*report.uuid.as_bytes(), &server, &routed)
+        {
+            accepted = answer.map_err(|message| refuse(ErrorCode::Internal, message))?;
+        }
         if !accepted {
             return Err(refuse(
                 ErrorCode::Forbidden,

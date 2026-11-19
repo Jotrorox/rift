@@ -195,6 +195,120 @@ async function testWebAssets(appSource, statusSource) {
     await h.advance(1000);
     assert(h.element("nodes-result").textContent.includes("node2 is unreachable") && h.element("nodes-result").className.includes("error"), "Warm failure not shown");
   });
+  const clusterStatus = () => ({
+    enabled: true, peer: "eu-1", cluster_id: "c1", raft_id: 1, incarnation: 7, joined: true, witness: false, state: "leader", term: 4, leader: "eu-1", is_leader: true, lease: true,
+    last_log_index: 120, commit_index: 120, applied_index: 119, snapshot_index: 0, log_bytes: 2048, diverged: false, membership_changing: false,
+    peers: [
+      { name: "eu-1", raft_id: 1, incarnation: 7, role: "voter", address: "10.0.0.1:7444", public_address: "eu1.example.com:25565", leader: true, this_peer: true, up: true, expired: false, last_heard_ms: 0, lag: 0, version: "1.0",
+        labels: { region: "eu", "node.max_instances": "40", "node.memory_mb": "32768" }, players: 3 },
+      { name: "eu-2", raft_id: 2, incarnation: 9, role: "voter", address: "10.0.0.2:7444", public_address: null, leader: false, this_peer: false, up: true, expired: false, last_heard_ms: 120, lag: 5, version: "1.1", labels: {}, players: 1 },
+      { name: "eu-3", raft_id: 3, incarnation: 4, role: "learner", address: "10.0.0.3:7444", public_address: null, leader: false, this_peer: false, up: true, expired: false, last_heard_ms: 5000, lag: 2000, version: "1.0", labels: {}, players: 0 },
+      { name: "w-1", raft_id: 4, incarnation: 2, role: "witness", address: "10.0.0.4:7444", public_address: null, leader: false, this_peer: false, up: false, expired: true, last_heard_ms: null, lag: null, version: "1.0", labels: {}, players: 0 },
+    ],
+    configuration: {
+      deployment: { id: 3, revision: "abcdef0123456789tail", actor: "admin", action: "configuration", timestamp_unix_ms: 1, shared_hash: "h" },
+      peers: [
+        { peer: "eu-1", reported: true, deployment: 3, in_sync: true, shared_hash: "h", shared_differs: [], reload_error: null },
+        { peer: "eu-2", reported: true, deployment: 3, in_sync: true, shared_hash: "h2", shared_differs: ["messaging"], reload_error: null },
+        { peer: "eu-3", reported: true, deployment: 2, in_sync: false, shared_hash: "h", shared_differs: [], reload_error: "rift.lua:3: syntax error" },
+        { peer: "w-1", reported: false },
+      ],
+      templates: { folders: 1, files: 2, bytes: 3 },
+    },
+  });
+  await test("the cluster panel and the peer column appear only on a cluster peer", async () => {
+    const h = fixture(appSource);
+    let cluster = { enabled: false };
+    h.model.intercept = (path) => path === "/api/cluster" ? h.response(cluster) : null;
+    h.model.status.managed_servers = [{ name: "lobby-1", state: "running", players: 0, reservations: 0, automatic_start: true, node: "local" }];
+    await flush();
+    assert(h.element("cluster-panel").hidden, "Cluster panel shown without a cluster");
+    assert(h.element("servers-peer").hidden && h.element("managed-servers").children[0].children.length === 10, "Peer column shown without a cluster");
+    cluster = clusterStatus();
+    h.model.status.nodes = [{ name: "eu-1", peer: true, state: "online", address: "10.0.0.1", labels: ["eu"], instances: 0, max_instances: 40, memory_mb: 32768, allocated_memory_mb: 0, resources: { load: 0.5, cpus: 4 } }];
+    h.model.status.managed_servers = [
+      { name: "lobby-1", state: "running", players: 0, reservations: 0, automatic_start: true, node: "eu-1", peer: "eu-1" },
+      { name: "games-1", state: "running", players: 0, reservations: 0, automatic_start: true, node: "node1", peer: null },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(!h.element("cluster-panel").hidden, "Cluster panel hidden on a peer");
+    assert(h.element("cluster-count").textContent === "3 of 4 peers reachable", h.element("cluster-count").textContent);
+    assert(h.element("cluster-warning").className.includes("hidden"), "A healthy cluster shows a warning");
+    const facts = h.element("cluster-facts").children.map((child) => child.textContent);
+    assert(facts[3] === "eu-1 · term 4" && facts[5].startsWith("committed 120 · applied 119") && facts[7].startsWith("revision abcdef0123456789 · configuration by admin"), `Cluster facts wrong: ${facts}`);
+    const rows = h.element("cluster-peers").children, tag = (td) => td.children.find((child) => typeof child === "object" && child.className.includes("tag"));
+    assert(rows[0].children[0].textContent === "eu-1" && tag(rows[0].children[0]).textContent === "This peer", "This peer not marked");
+    assert(rows[0].children[1].textContent === "Leader" && rows[1].children[1].textContent === "Voter" && rows[2].children[1].textContent === "Learner" && rows[3].children[1].textContent === "Witness", "Roles wrong");
+    assert(rows[0].children[2].textContent === "Reachable" && rows[0].children[2].className === "state running", "This peer's reachability wrong");
+    assert(rows[1].children[2].textContent === "Reachable · heard just now" && rows[2].children[2].textContent === "Reachable · heard 5s ago", "Last heard missing");
+    assert(rows[3].children[2].textContent === "Expired · never heard" && rows[3].children[2].className === "state failed", "Expired peer not flagged");
+    assert(rows[1].children[3].textContent === "9", "Incarnation missing");
+    assert(rows[1].children[4].textContent === "5" && !tag(rows[1].children[4]), "Small lag flagged");
+    assert(["2,000", "2000"].includes(rows[2].children[4].textContent) && tag(rows[2].children[4]).textContent === "Behind", "Large lag not flagged");
+    assert(rows[3].children[4].textContent === "—" && rows[3].children[4].title.includes("Not replicating"), "Unknown lag not explained");
+    assert(rows[0].children[5].textContent === "3" && rows[1].children[5].textContent === "1", "Players per peer missing");
+    assert(rows[0].children[6].textContent === "0.50 on 4 CPUs" && rows[1].children[6].textContent === "—", "Peer load wrong");
+    assert(!tag(rows[0].children[7]) && tag(rows[1].children[7]).textContent === "Mismatch" && tag(rows[1].children[7]).title.includes("1.0"), "Version mismatch not flagged");
+    assert(rows[0].children[8].textContent === "In sync" && rows[0].children[8].className === "state running", "In-sync configuration wrong");
+    assert(rows[1].children[8].textContent === "Shared section differs: messaging", `Shared mismatch wrong: ${rows[1].children[8].textContent}`);
+    assert(rows[2].children[8].textContent === "Reload failed: rift.lua:3: syntax error" && rows[2].children[8].className === "state failed", "Reload failure not shown");
+    assert(rows[3].children[8].textContent === "Not reported", "Unreported peer wrong");
+    assert(rows[0].children[9].textContent.startsWith("region=eu · at most 40 instances · ") && rows[0].children[9].textContent.endsWith("MiB") && rows[1].children[9].textContent === "—", `Labels and limits wrong: ${rows[0].children[9].textContent}`);
+    // Servers name the peer whose own node runs them.
+    assert(!h.element("servers-peer").hidden, "Peer column hidden in a cluster");
+    const servers = h.element("managed-servers").children;
+    assert(servers[0].children[8].textContent === "eu-1" && servers[1].children[8].textContent === "—" && servers[0].children[10].className === "action-group", "Server peer column wrong");
+    cluster = { ...clusterStatus(), leader: null, is_leader: false, diverged: true };
+    await h.element("refresh-status").emit("click"); await flush();
+    const warning = h.element("cluster-warning");
+    assert(!warning.className.includes("hidden") && warning.textContent.includes("no leader") && warning.textContent.includes("diverged"), `Warnings missing: ${warning.textContent}`);
+    assert(h.element("cluster-transfer").disabled, "Leadership transfer offered without a leader");
+    cluster = { enabled: false };
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("cluster-panel").hidden, "Cluster panel kept after the cluster went away");
+  });
+  await test("cluster actions confirm, call the cluster endpoints and need the cluster permission", async () => {
+    const h = fixture(appSource);
+    const confirms = [];
+    let answer = true;
+    h.window.confirm = (message) => { confirms.push(message); return answer; };
+    h.model.intercept = (path) => {
+      if (path === "/api/cluster") return h.response(clusterStatus());
+      if (path === "/api/cluster/transfer-leader") return h.response({ transferring_to: "eu-2" });
+      if (path === "/api/cluster/peers/eu-3/leave") return h.response({ leaving: "eu-3", leadership: "elsewhere already", draining: true });
+      if (path === "/api/cluster/peers/eu-2/leave") return h.response({ error: "there is no leader right now; retry once one is elected" }, 409);
+      return null;
+    };
+    await flush();
+    const actions = (row) => h.element("cluster-peers").children[row].children[10].children;
+    assert(actions(0).map((button) => button.textContent).join() === "Drain…", "The leader must offer only a drain");
+    assert(actions(1).map((button) => button.textContent).join() === "Make leader,Drain…", "A voter must offer leadership and a drain");
+    assert(actions(2).map((button) => button.textContent).join() === "Drain…", "A learner cannot lead");
+    assert(actions(3)[0].disabled, "An unreachable peer can be drained");
+    assert(!h.element("cluster-transfer").hidden && !h.element("cluster-transfer").disabled, "Leadership transfer unavailable");
+    await actions(1)[0].emit("click"); await flush();
+    const transfer = h.calls.find(({ path }) => path === "/api/cluster/transfer-leader");
+    assert(transfer && transfer.options.method === "POST" && transfer.options.body === JSON.stringify({ peer: "eu-2" }), "Transfer request incorrect");
+    assert(confirms[0].includes("eu-2") && h.element("cluster-result").textContent.includes("Handing the leadership to eu-2"), h.element("cluster-result").textContent);
+    await h.element("cluster-transfer").emit("click"); await flush();
+    assert(h.calls.filter(({ path }) => path === "/api/cluster/transfer-leader").pop().options.body === "{}", "Transfer without a target must send {}");
+    await actions(2)[0].emit("click"); await flush();
+    const leave = h.calls.find(({ path }) => path === "/api/cluster/peers/eu-3/leave");
+    assert(leave && leave.options.body === "{}" && confirms[confirms.length - 1].includes("Drain eu-3"), "Drain request incorrect");
+    assert(h.element("cluster-result").textContent.includes("eu-3 is draining") && h.element("cluster-result").className.includes("success"), h.element("cluster-result").textContent);
+    await actions(1)[1].emit("click"); await flush();
+    assert(h.element("cluster-result").textContent.includes("no leader") && h.element("cluster-result").className.includes("error"), "Drain failure not shown");
+    assert(h.element("conflict").className.includes("hidden"), "A refused cluster change marked the source stale");
+    answer = false;
+    const before = h.calls.length;
+    await actions(2)[0].emit("click"); await flush();
+    assert(!h.calls.slice(before).some(({ path }) => path.includes("/leave")), "A declined drain was sent");
+    // Without the cluster permission the panel only reads.
+    h.model.access = { name: "observer", permissions: ["read"], groups: null };
+    h.element("token").value = "observer-token"; await h.element("auth-form").emit("submit"); await flush();
+    assert(!h.element("cluster-panel").hidden && h.element("cluster-transfer").hidden, "Read-only operators see the transfer button");
+    assert([0, 1, 2, 3].every((row) => !actions(row).length), "Read-only operators see cluster actions");
+  });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];

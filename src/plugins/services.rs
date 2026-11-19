@@ -13,8 +13,12 @@ use super::{
     worker::{Queue, Shared},
 };
 use crate::{
+    cluster::queues::{
+        jobs::{self, Scope},
+        leases,
+    },
     extensions::{PlayerAction, Players, storage::Store},
-    messaging::{Broker, Error as BusError, Stream},
+    messaging::{Broker, Error as BusError, Stream, SubscribeOptions, SubscriptionScope},
     permissions::Authority,
     text::{Text, Unrendered},
 };
@@ -207,6 +211,10 @@ impl Services {
         label: &str,
     ) -> Result<String, String> {
         crate::text::convert(text, Some(self.0.spec.name.as_str()), language, form, label)
+    }
+
+    pub fn cluster(&self) -> ClusterApi<'_> {
+        ClusterApi(&self.0)
     }
 
     /// `log.log`: Rift's log stream, prefixed with the plugin name. Control
@@ -869,6 +877,16 @@ impl BusApi<'_> {
 
     /// Messages arrive as [`Event::Message`] with the returned handle.
     pub fn subscribe(&self, subject: &str, queue_group: Option<&str>) -> Result<u64, String> {
+        self.subscribe_scoped(subject, queue_group, SubscriptionScope::Cluster)
+    }
+
+    /// [`BusApi::subscribe`] hearing the peers `scope` names in a cluster.
+    pub fn subscribe_scoped(
+        &self,
+        subject: &str,
+        queue_group: Option<&str>,
+        scope: SubscriptionScope,
+    ) -> Result<u64, String> {
         if self.0.closed.load(Ordering::Acquire) {
             return Err("plugin is stopping".into());
         }
@@ -881,8 +899,12 @@ impl BusApi<'_> {
             ));
         }
         let broker = self.0.base.broker.clone();
+        let options = SubscribeOptions {
+            scope,
+            client: false,
+        };
         let mut subscription = broker
-            .subscribe(subject, queue_group)
+            .subscribe_with(subject, queue_group, options)
             .map_err(|error| error.to_string())?;
         let id = self.0.handle();
         let inner = Arc::downgrade(self.0);
@@ -892,7 +914,7 @@ impl BusApi<'_> {
                 let message = match subscription.recv().await {
                     Ok(message) => message,
                     Err(BusError::SlowConsumer) => {
-                        match broker.subscribe(&subject, queue_group.as_deref()) {
+                        match broker.subscribe_with(&subject, queue_group.as_deref(), options) {
                             Ok(next) => {
                                 subscription = next;
                                 continue;
@@ -1030,7 +1052,7 @@ impl ServersApi<'_> {
 pub struct TimersApi<'a>(&'a Arc<Inner>);
 
 impl TimersApi<'_> {
-    fn start(&self, ms: u32, repeat: bool) -> u64 {
+    fn start(&self, ms: u32, repeat: bool, scope: Scope) -> u64 {
         let id = self.0.handle();
         if self.0.worker {
             self.0
@@ -1052,6 +1074,10 @@ impl TimersApi<'_> {
         let task = self.0.handle.spawn(async move {
             loop {
                 tokio::time::sleep(period).await;
+                // A `cluster` job ticks on the cluster's leader only.
+                if !jobs::due(scope) {
+                    continue;
+                }
                 let Some(inner) = inner.upgrade() else { break };
                 inner.deliver(Event::Timer(id));
                 if !repeat {
@@ -1069,13 +1095,20 @@ impl TimersApi<'_> {
         id
     }
 
-    /// Repeats every `ms` milliseconds (at least 10).
+    /// Repeats every `ms` milliseconds (at least 10), on every cluster peer.
     pub fn every(&self, ms: u32) -> u64 {
-        self.start(ms.max(MIN_TIMER_MS), true)
+        self.start(ms.max(MIN_TIMER_MS), true, Scope::Peer)
+    }
+
+    /// [`TimersApi::every`] for a job of `scope`: with [`Scope::Cluster`]
+    /// its ticks fire on the cluster's leader only (see
+    /// [`crate::cluster::queues::jobs`]).
+    pub fn every_scoped(&self, ms: u32, scope: Scope) -> u64 {
+        self.start(ms.max(MIN_TIMER_MS), true, scope)
     }
 
     pub fn after(&self, ms: u32) -> u64 {
-        self.start(ms, false)
+        self.start(ms, false, Scope::Peer)
     }
 
     pub fn cancel(&self, handle: u64) -> bool {
@@ -1135,6 +1168,43 @@ impl MetaApi<'_> {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64)
+    }
+}
+
+/// `rift.cluster`: named leases with fencing tokens, the advisory leader
+/// flag and this peer's name (see [`crate::cluster::queues::leases`]). A
+/// plugin's leases are its own; without a cluster a lease is always granted.
+/// The lease calls wait for the cluster, so they block the plugin's thread.
+pub struct ClusterApi<'a>(&'a Arc<Inner>);
+
+impl ClusterApi<'_> {
+    fn owner(&self) -> String {
+        leases::plugin_owner(&self.0.spec.name)
+    }
+
+    /// The lease's fencing token, or `None` while another peer holds it.
+    pub fn lease(&self, name: &str, ttl_ms: u64) -> Result<Option<u64>, String> {
+        leases::lease_blocking(&self.0.handle, None, &self.owner(), name, ttl_ms)
+    }
+
+    /// Extend the lease held with `token`; false once this peer lost it.
+    pub fn renew(&self, name: &str, token: u64, ttl_ms: u64) -> Result<bool, String> {
+        leases::renew_blocking(&self.0.handle, None, &self.owner(), name, token, ttl_ms)
+    }
+
+    /// Give up the lease held with `token`.
+    pub fn release(&self, name: &str, token: u64) -> Result<bool, String> {
+        leases::release_blocking(&self.0.handle, None, &self.owner(), name, token)
+    }
+
+    /// Whether this peer leads the cluster right now (always without one).
+    pub fn is_leader(&self) -> bool {
+        leases::is_leader()
+    }
+
+    /// This peer's name; `None` without a cluster.
+    pub fn peer(&self) -> Option<&'static str> {
+        leases::peer()
     }
 }
 

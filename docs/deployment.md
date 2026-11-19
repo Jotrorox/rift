@@ -98,6 +98,54 @@ Do not add these to the unit:
 | `ProtectKernelTunables=true`, `ProtectControlGroups=true` | Both make the unit's cgroup read-only, which disables [memory limits](server-limits.md#memory-limits) |
 | `SystemCallFilter=` | Managed servers are arbitrary programs, and [isolation](server-limits.md#isolation) needs Landlock's system calls |
 
+## Run a cluster
+
+A [cluster](clustering.md) runs one Rift per host, each a peer with its own
+`cluster.toml`. [examples/cluster](../examples/cluster/rift.lua) has the
+configuration, a `cluster.toml` per peer, a witness and two units:
+[rift-cluster.service](../examples/cluster/rift-cluster.service) for a peer
+and [rift-witness.service](../examples/cluster/rift-witness.service) for a
+witness.
+
+A peer writes its own `rift.lua` when a deployment arrives, and keeps its
+Raft log, snapshots and template contents beside it, so the configuration
+lives in the state directory rather than in a read-only `/etc/rift`:
+
+```sh
+sudo install -d -o root -g rift -m 0750 /etc/rift/cluster
+sudo install -o root -g rift -m 0640 ca.pem eu-2.pem eu-2.key /etc/rift/cluster/
+sudo install -o root -g root -m 0600 cluster.env /etc/rift/cluster.env   # RIFT_CLUSTER_TOKEN=..., other secrets
+sudo install -d -o rift -g rift -m 0700 /var/lib/rift
+sudo install -o rift -g rift -m 0600 eu-2.toml /var/lib/rift/cluster.toml
+sudo install -m 0644 examples/cluster/rift-cluster.service /etc/systemd/system/rift.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now rift
+```
+
+- **First peer.** Put the existing `rift.lua` in `/var/lib/rift` too, and run
+  `sudo -u rift rift cluster init --peer eu-1 --config /var/lib/rift/rift.lua`
+  before the first start.
+- **Other peers** start without a `rift.lua`. Add them from a member with
+  `rift admin cluster add` and `promote`; they then receive the deployed
+  configuration. The unit therefore runs no `rift check` before starting.
+- **Stopping** a peer drains it: its 1.20.5+ players move to another peer,
+  so `TimeoutStopSec` must exceed the five-second transfer wait plus
+  `shutdown_timeout_ms`.
+- **Players** reach the peers through DNS round robin, an SRV record
+  (`_minecraft._tcp`) per peer, or a TCP load balancer. Behind a load
+  balancer, enable the [PROXY protocol](hardening.md#run-behind-a-load-balancer)
+  on every peer and make each peer's `public_address` reach that peer alone.
+- **Firewall.** Open the UDP port of `listen` in `cluster.toml` between the
+  peers only; the UDP port of `messaging.listen` to bus clients and node
+  agents; and the game port (TCP) to players or the load balancer.
+- **Secrets** go into `/etc/rift/cluster.env` on every peer, with the same
+  values everywhere: `RIFT_CLUSTER_TOKEN`, the web token, the forwarding
+  secret and the node tokens. `RIFT_ADMIN_TOKEN` may differ per host.
+
+A cluster does not run in the Compose setup below as it stands: every peer
+needs its own host (or at least its own state directory and addresses) and
+its `cluster.toml`.
+
 ## Run in a container
 
 Each release publishes a multi-platform image (`linux/amd64` and

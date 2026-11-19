@@ -38,6 +38,10 @@ import java.util.function.Consumer;
  * {@link ConnectionListener#connected()}. Publications and requests fail fast while disconnected
  * and are never retried automatically: a failed publication may still have reached the broker.
  *
+ * <p>Give every peer of a Rift cluster with {@link Builder#addAddress(String, int)}: the client
+ * connects to the first that accepts, and after losing a connection it moves on to the next address
+ * at once, pausing with growing delays only after every address failed once.
+ *
  * <pre>{@code
  * MessagingClient bus = MessagingClient.builder()
  *         .address("127.0.0.1", 4222).serverName("localhost")
@@ -53,10 +57,11 @@ public final class MessagingClient implements AutoCloseable {
     /** How long to wait before re-establishing a subscription the server ended. */
     private static final Duration RESUBSCRIBE_DELAY = Duration.ofSeconds(1);
 
+    /** One address of the bus and the name its certificate is verified for. */
+    record Address(String host, int port, String serverName) {}
+
     record Settings(
-            String host,
-            int port,
-            String serverName,
+            List<Address> addresses,
             KeyStore trust,
             String token,
             Duration connectTimeout,
@@ -154,7 +159,22 @@ public final class MessagingClient implements AutoCloseable {
      * @return completes once the server first accepted the subscription; fails when it refuses it
      */
     public CompletableFuture<Subscription> subscribe(String pattern, String queue, Consumer<Message> handler) {
-        Managed managed = new Managed(pattern, queue, handler);
+        return subscribe(pattern, queue, SubscriptionScope.CLUSTER, handler);
+    }
+
+    /**
+     * {@link #subscribe(String, String, Consumer)} with a scope. A server from before scopes refuses
+     * {@link SubscriptionScope#LOCAL}.
+     *
+     * @param pattern the subject pattern
+     * @param queue a queue group whose members share messages, or null
+     * @param scope which peers of a cluster the subscription hears
+     * @param handler called for every message
+     * @return completes once the server first accepted the subscription; fails when it refuses it
+     */
+    public CompletableFuture<Subscription> subscribe(
+            String pattern, String queue, SubscriptionScope scope, Consumer<Message> handler) {
+        Managed managed = new Managed(pattern, queue, Objects.requireNonNull(scope, "scope"), handler);
         subscriptions.add(managed);
         Session current = session;
         if (current != null) {
@@ -312,11 +332,14 @@ public final class MessagingClient implements AutoCloseable {
     }
 
     private void run() {
+        List<Address> addresses = settings.addresses();
         long delay = settings.minBackoff().toMillis();
+        int index = 0;
+        int failures = 0;
         while (!closed) {
             Session opened = null;
             try {
-                opened = Session.open(settings, readers, timers);
+                opened = Session.open(settings, addresses.get(index), readers, timers);
                 for (Managed managed : subscriptions) {
                     managed.establish(opened);
                 }
@@ -328,13 +351,19 @@ public final class MessagingClient implements AutoCloseable {
                     return;
                 }
                 notify(listener -> listener.connectFailed(e));
-                if (!sleep(delay)) {
-                    return;
+                index = (index + 1) % addresses.size();
+                failures++;
+                // Try every address once before pausing.
+                if (failures % addresses.size() == 0) {
+                    if (!sleep(delay)) {
+                        return;
+                    }
+                    delay = Math.min(delay * 2, settings.maxBackoff().toMillis());
                 }
-                delay = Math.min(delay * 2, settings.maxBackoff().toMillis());
                 continue;
             }
             delay = settings.minBackoff().toMillis();
+            failures = 0;
             session = opened;
             connected.complete(null);
             notify(ConnectionListener::connected);
@@ -354,7 +383,10 @@ public final class MessagingClient implements AutoCloseable {
             }
             Throwable reason = cause;
             notify(listener -> listener.disconnected(reason));
-            if (!sleep(delay)) {
+            if (addresses.size() > 1) {
+                // Another peer is probably up: move on at once.
+                index = (index + 1) % addresses.size();
+            } else if (!sleep(delay)) {
                 return;
             }
         }
@@ -400,15 +432,17 @@ public final class MessagingClient implements AutoCloseable {
     private final class Managed implements Subscription {
         private final String pattern;
         private final String queue;
+        private final SubscriptionScope scope;
         private final Consumer<Message> handler;
         private final CompletableFuture<Subscription> first = new CompletableFuture<>();
         private Session establishedOn;
         private Session.Active active;
         private boolean closedByUser;
 
-        Managed(String pattern, String queue, Consumer<Message> handler) {
+        Managed(String pattern, String queue, SubscriptionScope scope, Consumer<Message> handler) {
             this.pattern = Objects.requireNonNull(pattern, "pattern");
             this.queue = queue;
+            this.scope = scope;
             this.handler = Objects.requireNonNull(handler, "handler");
         }
 
@@ -426,7 +460,7 @@ public final class MessagingClient implements AutoCloseable {
                 return;
             }
             try {
-                active = on.subscribe(pattern, queue, handler, cause -> ended(on));
+                active = on.subscribe(pattern, queue, scope, handler, cause -> ended(on));
                 establishedOn = on;
                 first.complete(this);
             } catch (MessagingException e) {
@@ -469,8 +503,10 @@ public final class MessagingClient implements AutoCloseable {
 
     /** Configures a {@link MessagingClient}. */
     public static final class Builder {
-        private String host;
-        private int port;
+        /** An address whose server name may still default. */
+        private record Target(String host, int port, String serverName) {}
+
+        private final List<Target> targets = new ArrayList<>();
         private String serverName;
         private final List<X509Certificate> certificates = new ArrayList<>();
         private Path certificateFile;
@@ -482,18 +518,47 @@ public final class MessagingClient implements AutoCloseable {
         private Builder() {}
 
         /**
+         * Connect to this address only, replacing any given before.
+         *
          * @param host the address to send packets to: a host name or IP address
          * @param port the messaging listener's UDP port
          * @return this builder
          */
         public Builder address(String host, int port) {
-            this.host = Objects.requireNonNull(host, "host");
-            this.port = port;
+            targets.clear();
+            return addAddress(host, port);
+        }
+
+        /**
+         * Add an address to try after the ones given before, such as another peer of a Rift cluster.
+         * Its certificate is verified against {@link #serverName(String)}, else its host.
+         *
+         * @param host the address to send packets to: a host name or IP address
+         * @param port the messaging listener's UDP port
+         * @return this builder
+         */
+        public Builder addAddress(String host, int port) {
+            targets.add(new Target(Objects.requireNonNull(host, "host"), port, null));
             return this;
         }
 
         /**
-         * @param serverName the DNS name the certificate is verified against; defaults to the host
+         * Add an address whose certificate names {@code serverName}.
+         *
+         * @param host the address to send packets to: a host name or IP address
+         * @param port the messaging listener's UDP port
+         * @param serverName the DNS name this address's certificate is verified against
+         * @return this builder
+         */
+        public Builder addAddress(String host, int port, String serverName) {
+            targets.add(new Target(Objects.requireNonNull(host, "host"), port,
+                    Objects.requireNonNull(serverName, "serverName")));
+            return this;
+        }
+
+        /**
+         * @param serverName the DNS name certificates are verified against, for addresses without
+         *     their own; defaults to each address's host
          * @return this builder
          */
         public Builder serverName(String serverName) {
@@ -532,7 +597,9 @@ public final class MessagingClient implements AutoCloseable {
          * Everything from the variables Rift sets for a managed server with a bus login, so one
          * configuration serves every instance of a group: {@code RIFT_BUS_ADDRESS} ({@code
          * host:port}), {@code RIFT_BUS_SERVER_NAME}, {@code RIFT_BUS_CERT} (the certificate to trust)
-         * and {@code RIFT_BUS_TOKEN}.
+         * and {@code RIFT_BUS_TOKEN}. In a cluster, {@code RIFT_BUS_ADDRESSES} lists every peer
+         * ({@code host:port} entries separated by commas) and takes the place of {@code
+         * RIFT_BUS_ADDRESS}.
          *
          * @return this builder
          * @throws IllegalStateException when a variable is missing, naming it
@@ -556,13 +623,26 @@ public final class MessagingClient implements AutoCloseable {
                 }
                 return value;
             };
-            String address = required.apply("RIFT_BUS_ADDRESS");
-            int colon = address.lastIndexOf(':');
-            if (colon <= 0) {
-                throw new IllegalStateException("RIFT_BUS_ADDRESS must be host:port, got \"" + address + "\"");
+            String list = variables.apply("RIFT_BUS_ADDRESSES");
+            String variable = list == null || list.isEmpty() ? "RIFT_BUS_ADDRESS" : "RIFT_BUS_ADDRESSES";
+            String addresses = list == null || list.isEmpty() ? required.apply("RIFT_BUS_ADDRESS") : list;
+            targets.clear();
+            for (String address : addresses.split(",")) {
+                address = address.strip();
+                int colon = address.lastIndexOf(':');
+                int port;
+                try {
+                    port = colon <= 0 ? -1 : Integer.parseInt(address.substring(colon + 1));
+                } catch (NumberFormatException e) {
+                    port = -1;
+                }
+                if (port < 0 || port > 65535) {
+                    throw new IllegalStateException(variable + " must be host:port"
+                            + (variable.equals("RIFT_BUS_ADDRESSES") ? " entries separated by commas" : "")
+                            + ", got \"" + addresses + "\"");
+                }
+                addAddress(address.substring(0, colon).replace("[", "").replace("]", ""), port);
             }
-            address(address.substring(0, colon).replace("[", "").replace("]", ""),
-                    Integer.parseInt(address.substring(colon + 1)));
             String serverName = variables.apply("RIFT_BUS_SERVER_NAME");
             if (serverName != null && !serverName.isEmpty()) {
                 serverName(serverName);
@@ -602,7 +682,7 @@ public final class MessagingClient implements AutoCloseable {
          * @throws IllegalStateException when the address, token or trust is missing
          */
         public MessagingClient build() throws IOException {
-            if (host == null || token == null) {
+            if (targets.isEmpty() || token == null) {
                 throw new IllegalStateException("address and token are required");
             }
             if (token.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > Frames.MAX_STRING) {
@@ -615,8 +695,14 @@ public final class MessagingClient implements AutoCloseable {
             if (trusted.isEmpty()) {
                 throw new IllegalStateException("trust at least one certificate; the bus has no unverified mode");
             }
-            Settings settings = new Settings(host, port, serverName == null ? host : serverName, keyStore(trusted),
-                    token, connectTimeout, minBackoff, maxBackoff);
+            List<Address> addresses = new ArrayList<>();
+            for (Target target : targets) {
+                String name = target.serverName() != null ? target.serverName()
+                        : serverName != null ? serverName : target.host();
+                addresses.add(new Address(target.host(), target.port(), name));
+            }
+            Settings settings = new Settings(List.copyOf(addresses), keyStore(trusted), token, connectTimeout,
+                    minBackoff, maxBackoff);
             MessagingClient client = new MessagingClient(settings);
             client.connector.start();
             return client;

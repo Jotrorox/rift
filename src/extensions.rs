@@ -11,11 +11,13 @@ use crate::{
 };
 use mlua::{Function, Table, Value};
 use rift_permissions::{Actor, ChangeEvent, ContextSet, Group, Node, SubjectRef, Tristate, Uuid};
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::sync::Semaphore;
 
@@ -23,9 +25,10 @@ pub(crate) mod decisions;
 mod groups;
 mod integrations;
 pub(crate) mod players;
+pub mod queue;
 mod scheduler;
 pub(crate) mod storage;
-pub use players::{PlayerAction, PlayerHandle, Players, Profile};
+pub use players::{HandOff, PlayerAction, PlayerHandle, Players, Profile, routing};
 pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[
@@ -49,7 +52,7 @@ pub struct ExtensionScript {
     source: script::ScriptSource,
     storage: Option<storage::StorageConfig>,
     integrations: integrations::Integrations,
-    jobs: BTreeMap<String, Duration>,
+    jobs: BTreeMap<String, scheduler::Job>,
     hooks: BTreeSet<String>,
     commands: BTreeMap<String, Command>,
     /// `extensions.groups`, mirrored as `source = 'config'` group nodes.
@@ -542,6 +545,12 @@ impl ExtensionScript {
             integrations::install(&lua, &api, &self.integrations, deadline)?;
             let actor = Actor::Lua(actor.to_owned());
             permissions::lua::install(&lua, &api, &runtime.permissions, actor, deadline)?;
+            crate::cluster::queues::leases::install_lua(
+                &lua,
+                &api,
+                crate::cluster::queues::leases::CONFIG_OWNER,
+                deadline,
+            )?;
         }
         let Value::Table(root) = root else {
             return Err(mlua::Error::runtime("configuration must return a table"));
@@ -873,9 +882,7 @@ const MEMBERSHIPS: &str = "rift.groups";
 ///
 /// A store in the instance database (`database = true`) is not read: Rift
 /// versions that wrote `rift.groups` predate both the permission store and
-/// that target, so such a store never holds memberships. Reading it here
-/// would also deadlock, because [`Authority::migrate_once`] calls this while
-/// it holds the instance database's connection.
+/// that target, so such a store never holds memberships.
 pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
     let Some(script) = &config.extensions else {
         return Ok(Vec::new());
@@ -924,8 +931,12 @@ pub fn prepare_database_storage(
 #[derive(Default)]
 struct HostState {
     leases: BTreeMap<u64, BTreeSet<String>>,
-    /// Tickets by destination: priority descending, then arrival.
+    /// This process's tickets by destination: priority descending, then
+    /// arrival.
     queues: BTreeMap<String, VecDeque<Ticket>>,
+    /// The network-wide queues while this process is a cluster peer
+    /// (`crate::cluster::queues`); `None` on a single Rift.
+    network: Option<Network>,
 }
 /// A session's place in a queue. The priority is the one the player had when
 /// the ticket was created.
@@ -933,6 +944,250 @@ struct Ticket {
     id: u64,
     entered: Instant,
     priority: i64,
+    /// The arrival a cluster leader stamped on the ticket, which it keeps
+    /// when it is submitted to the next leader; `None` until a leader saw it
+    /// and always on a single Rift.
+    arrival: Option<u64>,
+}
+/// A cluster peer's link to the queue service and what it last heard.
+struct Network {
+    link: Arc<dyn queue::QueueLink>,
+    /// The leader's last view and when it arrived.
+    view: Option<(Instant, queue::NetworkView)>,
+}
+
+impl HostState {
+    /// Tell the cluster that tickets or leases changed.
+    fn changed(&self) {
+        if let Some(network) = &self.network {
+            network.link.changed();
+        }
+    }
+
+    /// The leader's last view, however old.
+    fn view(&self) -> Option<&queue::NetworkView> {
+        self.network.as_ref()?.view.as_ref().map(|(_, view)| view)
+    }
+
+    /// The leader's last view while it is recent enough to admit by.
+    fn fresh_view(&self) -> Option<&queue::NetworkView> {
+        let (at, view) = self.network.as_ref()?.view.as_ref()?;
+        (at.elapsed() < queue::VIEW_LIFETIME).then_some(view)
+    }
+
+    fn peer(&self) -> Option<&str> {
+        self.network.as_ref().map(|network| network.link.peer())
+    }
+
+    /// Slots of `destination` that sessions hold: this process's leases, and
+    /// in a cluster also those of the other peers (as the leader last told)
+    /// or the players the replicated registry puts there, whichever is more.
+    fn used(
+        &self,
+        destination: &str,
+        members: Option<&BTreeSet<String>>,
+        registry: Option<&BTreeMap<String, usize>>,
+    ) -> usize {
+        let local = self
+            .leases
+            .values()
+            .filter(|servers| queue::contains_destination(servers, destination, members))
+            .count();
+        if self.network.is_none() {
+            return local;
+        }
+        let others = self
+            .view()
+            .and_then(|view| view.destinations.get(destination))
+            .map_or(0, |view| view.others_used);
+        let leased = local + others;
+        registry.map_or(leased, |counts| {
+            leased.max(queue::destination_count(counts, destination, members))
+        })
+    }
+
+    /// Whether a ticket other than session `id`'s is first in line for
+    /// `destination`: the network's head while the leader's view is fresh,
+    /// otherwise the head of this process's own tickets.
+    fn someone_else_first(&self, destination: &str, id: u64) -> bool {
+        if let Some(head) = self
+            .fresh_view()
+            .and_then(|view| view.destinations.get(destination))
+            .and_then(|view| view.head.as_ref())
+        {
+            return !(Some(head.peer.as_str()) == self.peer() && head.id == id);
+        }
+        self.queues
+            .get(destination)
+            .and_then(|queue| queue.front())
+            .is_some_and(|ticket| ticket.id != id)
+    }
+
+    /// Tickets waiting for `destination`: network-wide in a cluster (what
+    /// the leader knows plus this process's tickets it has not seen yet).
+    fn waiting(&self, destination: &str) -> usize {
+        let local = self.queues.get(destination);
+        let Some(view) = self
+            .view()
+            .and_then(|view| view.destinations.get(destination))
+        else {
+            return local.map_or(0, VecDeque::len);
+        };
+        let unseen = local.map_or(0, |queue| {
+            queue
+                .iter()
+                .filter(|ticket| !view.mine.contains_key(&ticket.id))
+                .count()
+        });
+        view.priorities.len() + unseen
+    }
+
+    /// The network-wide position of session `id`'s ticket for
+    /// `destination` with `priority`; `None` on a single Rift. A ticket the
+    /// leader has not seen yet goes behind every ticket it knows with the
+    /// same or a higher priority, and behind this process's other unseen
+    /// tickets with one.
+    fn network_position(&self, destination: &str, id: u64, priority: i64) -> Option<usize> {
+        let network = self.network.as_ref()?;
+        let view = network
+            .view
+            .as_ref()
+            .and_then(|(_, view)| view.destinations.get(destination));
+        if let Some(position) = view.and_then(|view| view.mine.get(&id)) {
+            return Some(*position);
+        }
+        let known = view.map_or(0, |view| {
+            view.priorities
+                .iter()
+                .filter(|ahead| **ahead >= priority)
+                .count()
+        });
+        let unseen = self.queues.get(destination).map_or(0, |queue| {
+            queue
+                .iter()
+                .filter(|ticket| {
+                    ticket.id != id
+                        && ticket.priority >= priority
+                        && !view.is_some_and(|view| view.mine.contains_key(&ticket.id))
+                })
+                .count()
+        });
+        Some(known + unseen + 1)
+    }
+}
+
+/// The queue state of a process, shared by every reload generation, for
+/// the cluster's queue service (`crate::cluster::queues`): what this peer
+/// reports to the leader and where the leader's answers go.
+#[derive(Clone)]
+pub struct QueueHost {
+    host: Arc<Mutex<HostState>>,
+    groups: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
+    /// Queue capacities by destination, fixed until a restart.
+    capacities: BTreeMap<String, usize>,
+    players: Players,
+}
+
+impl QueueHost {
+    /// Decide from the network-wide queues `link` delivers from now on.
+    pub fn attach(&self, link: Arc<dyn queue::QueueLink>) {
+        self.host.lock().unwrap().network = Some(Network { link, view: None });
+    }
+
+    /// Decide alone again, as a single Rift.
+    pub fn detach(&self) {
+        self.host.lock().unwrap().network = None;
+    }
+
+    /// The slots of every queued destination.
+    pub fn slots(&self) -> BTreeMap<String, usize> {
+        let groups = self.groups.lock().unwrap();
+        self.capacities
+            .iter()
+            .map(|(destination, capacity)| {
+                (
+                    destination.clone(),
+                    queue::slots(*capacity, groups.get(destination)),
+                )
+            })
+            .collect()
+    }
+
+    /// Players the (replicated) registry puts on each queued destination.
+    pub fn registry(&self) -> BTreeMap<String, usize> {
+        let counts = self.players.roster().server_counts();
+        let groups = self.groups.lock().unwrap();
+        self.capacities
+            .keys()
+            .map(|destination| {
+                (
+                    destination.clone(),
+                    queue::destination_count(&counts, destination, groups.get(destination)),
+                )
+            })
+            .collect()
+    }
+
+    /// This process's live tickets and the slots its sessions hold.
+    pub fn report(&self) -> queue::LocalReport {
+        let host = self.host.lock().unwrap();
+        let groups = self.groups.lock().unwrap();
+        let tickets = host
+            .queues
+            .iter()
+            .flat_map(|(destination, queue)| {
+                queue
+                    .iter()
+                    .filter(|ticket| ticket.entered.elapsed() < queue::TICKET_LIFETIME)
+                    .map(move |ticket| queue::LocalTicket {
+                        id: ticket.id,
+                        destination: destination.clone(),
+                        priority: ticket.priority,
+                        arrival: ticket.arrival,
+                    })
+            })
+            .collect();
+        let used = self
+            .capacities
+            .keys()
+            .filter_map(|destination| {
+                let members = groups.get(destination);
+                let count = host
+                    .leases
+                    .values()
+                    .filter(|servers| queue::contains_destination(servers, destination, members))
+                    .count();
+                (count > 0).then(|| (destination.clone(), count))
+            })
+            .collect();
+        queue::LocalReport { tickets, used }
+    }
+
+    /// What the leader answered: the arrivals it stamped on this process's
+    /// tickets (by connection id) and, unless it is still collecting the
+    /// tickets of every peer after a leader change, its view.
+    pub fn apply(&self, view: Option<queue::NetworkView>, arrivals: &[(u64, u64)]) {
+        let mut host = self.host.lock().unwrap();
+        if !arrivals.is_empty() {
+            let arrivals: BTreeMap<u64, u64> = arrivals.iter().copied().collect();
+            for queue in host.queues.values_mut() {
+                for ticket in queue.iter_mut() {
+                    if let Some(arrival) = arrivals.get(&ticket.id) {
+                        ticket.arrival = Some(*arrival);
+                    }
+                }
+            }
+        }
+        if let (Some(view), Some(network)) = (view, host.network.as_mut()) {
+            network.view = Some((Instant::now(), view));
+        }
+    }
+
+    /// The leader's last view, for tests.
+    #[cfg(test)]
+    pub(crate) fn view(&self) -> Option<queue::NetworkView> {
+        self.host.lock().unwrap().view().cloned()
+    }
 }
 #[derive(Clone)]
 pub struct Extensions {
@@ -962,19 +1217,56 @@ pub struct Extensions {
 impl Extensions {
     /// Live queue pressure, excluding expired tickets even while their session
     /// is busy elsewhere. Scaling must not keep capacity for stale demand.
+    /// On a cluster's leader, the whole network's tickets (the scaler runs
+    /// there); on other peers, the network as the leader last told them.
     pub fn queue_lengths(&self) -> BTreeMap<String, usize> {
+        let link = self
+            .host
+            .lock()
+            .unwrap()
+            .network
+            .as_ref()
+            .map(|network| network.link.clone());
+        // Asked without holding the host: the service reads it itself.
+        if let Some(lengths) = link.and_then(|link| link.leader_lengths()) {
+            return lengths;
+        }
         let host = self.host.lock().unwrap();
         let now = Instant::now();
-        host.queues
+        let live = |ticket: &&Ticket| now.duration_since(ticket.entered) < queue::TICKET_LIFETIME;
+        let mut lengths: BTreeMap<String, usize> = host
+            .queues
             .iter()
-            .map(|(name, queue)| {
-                let live = queue
-                    .iter()
-                    .filter(|ticket| now.duration_since(ticket.entered) < Duration::from_secs(300))
-                    .count();
-                (name.clone(), live)
-            })
-            .collect()
+            .map(|(name, queue)| (name.clone(), queue.iter().filter(live).count()))
+            .collect();
+        if let Some(view) = host.view() {
+            for (name, destination) in &view.destinations {
+                let unseen = host.queues.get(name).map_or(0, |queue| {
+                    queue
+                        .iter()
+                        .filter(|ticket| live(ticket) && !destination.mine.contains_key(&ticket.id))
+                        .count()
+                });
+                lengths.insert(name.clone(), destination.priorities.len() + unseen);
+            }
+        }
+        lengths
+    }
+
+    /// The queue state the cluster's queue service attaches to.
+    pub fn queue_host(&self) -> QueueHost {
+        QueueHost {
+            host: self.host.clone(),
+            groups: self.groups.clone(),
+            capacities: self.queues().clone(),
+            players: self.players.clone(),
+        }
+    }
+
+    /// Queue capacities by destination; none without extensions.
+    fn queues(&self) -> &BTreeMap<String, usize> {
+        static NONE: BTreeMap<String, usize> = BTreeMap::new();
+        self.script.as_ref().map_or(&NONE, |script| &script.queues)
     }
 
     /// A generation for `config`. The first one gets a private in-memory
@@ -1183,6 +1475,15 @@ impl Extensions {
         self.permissions.configure(&self.permissions_config);
         self.players.set_record_ip(self.record_ip);
         self.players.set_tab_format(self.tab_format.as_deref());
+        // A write derived from the configuration: in a cluster the leader
+        // makes it, when it gains leadership and after each reload.
+        if crate::cluster::leader::runs_here() {
+            self.mirror_permission_groups();
+        }
+    }
+
+    /// Mirror `extensions.groups` into the permission store.
+    pub fn mirror_permission_groups(&self) {
         let empty = BTreeMap::new();
         let groups = self.script.as_ref().map_or(&empty, |script| &script.groups);
         if let Err(error) = self.permissions.mirror_config(groups) {
@@ -1243,6 +1544,16 @@ impl Extensions {
                 self.call("dialog", &input, jobs).await?;
             }
             crate::dialog::Owner::Plugin(name) => self.plugins.dialog(&name, input),
+            // Shown from another peer of the cluster: the click goes back.
+            crate::dialog::Owner::Remote {
+                peer,
+                incarnation,
+                plugin,
+            } => {
+                self.players
+                    .route_dialog_click(peer, incarnation, plugin, input)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -1656,8 +1967,16 @@ impl ExtensionSession {
         self.pending = Some(input);
         Ok(())
     }
+    /// Players the replicated registry puts on each server, in a cluster;
+    /// `None` on a single Rift. Read before the host is locked.
+    fn registry_counts(&self) -> Option<BTreeMap<String, usize>> {
+        self.runtime.host.lock().unwrap().network.as_ref()?;
+        Some(self.runtime.players.roster().server_counts())
+    }
+
     /// Reserve before any backend connection, including non-queued routes.
     pub fn reserve(&self, target: &str) -> io::Result<()> {
+        let registry = self.registry_counts();
         let mut host = self.runtime.host.lock().unwrap();
         let groups = self.runtime.groups.lock().unwrap();
         for (destination, capacity) in self.queues() {
@@ -1665,28 +1984,21 @@ impl ExtensionSession {
             if destination != target && !members.is_some_and(|members| members.contains(target)) {
                 continue;
             }
-            let capacity = capacity * members.map_or(1, BTreeSet::len);
+            let capacity = queue::slots(*capacity, members);
             // Moving between instances does not consume another group slot.
             if members.is_some()
-                && host
-                    .leases
-                    .get(&self.context.id)
-                    .is_some_and(|servers| contains_destination(servers, destination, members))
+                && host.leases.get(&self.context.id).is_some_and(|servers| {
+                    queue::contains_destination(servers, destination, members)
+                })
             {
                 continue;
             }
-            let used = host
-                .leases
-                .values()
-                .filter(|servers| contains_destination(servers, destination, members))
-                .count();
-            let head = host
-                .queues
-                .get(destination)
-                .and_then(|q| q.front())
-                .map(|ticket| ticket.id);
-            if (used >= capacity || head.is_some_and(|id| id != self.context.id))
-                && !self.bypasses(destination)
+            let used = host.used(destination, members, registry.as_ref());
+            if queue::must_wait(
+                used,
+                capacity,
+                host.someone_else_first(destination, self.context.id),
+            ) && !self.bypasses(destination)
             {
                 return Err(crate::text::notice_error(
                     io::ErrorKind::WouldBlock,
@@ -1698,6 +2010,7 @@ impl ExtensionSession {
             .entry(self.context.id)
             .or_default()
             .insert(target.into());
+        host.changed();
         Ok(())
     }
     pub fn release(&self, target: &str) {
@@ -1705,6 +2018,7 @@ impl ExtensionSession {
         if let Some(leases) = host.leases.get_mut(&self.context.id) {
             leases.remove(target);
         }
+        host.changed();
     }
     pub async fn transfer_failed(&mut self) {
         if let Some(mut input) = self.pending.take() {
@@ -1714,12 +2028,12 @@ impl ExtensionSession {
         }
     }
     pub async fn ready(&mut self, server: &str) {
-        self.runtime
-            .host
-            .lock()
-            .unwrap()
-            .leases
-            .insert(self.context.id, BTreeSet::from([server.into()]));
+        {
+            let mut host = self.runtime.host.lock().unwrap();
+            host.leases
+                .insert(self.context.id, BTreeSet::from([server.into()]));
+            host.changed();
+        }
         self.context.server = Some(server.into());
         self.provide_contexts().await;
         if let Some(mut input) = self.pending.take() {
@@ -1777,63 +2091,93 @@ impl ExtensionSession {
             return Err(notice(Notice::QueueAlreadyOn));
         }
         let priority = self.queue_priority(target);
+        let id = self.context.id;
         let mut host = self.runtime.host.lock().unwrap();
         if let Some(queue) = host.queues.get(target)
-            && let Some(position) = queue.iter().position(|ticket| ticket.id == self.context.id)
+            && let Some((position, ticket)) =
+                queue.iter().enumerate().find(|(_, ticket)| ticket.id == id)
         {
-            return Ok(position + 1);
+            return Ok(host
+                .network_position(target, id, ticket.priority)
+                .unwrap_or(position + 1));
         }
-        if host.queues.get(target).is_some_and(|q| q.len() >= 1024) {
+        if host.waiting(target) >= queue::MAX_TICKETS {
             return Err(notice(Notice::QueueFull));
         }
         for queue in host.queues.values_mut() {
-            queue.retain(|ticket| ticket.id != self.context.id);
+            queue.retain(|ticket| ticket.id != id);
         }
-        let queue = host.queues.entry(target.into()).or_default();
+        let line = host.queues.entry(target.into()).or_default();
         // Behind every ticket of the same or a higher priority.
-        let position = queue.partition_point(|ticket| ticket.priority >= priority);
-        queue.insert(
+        let position = queue::insertion_point(line, priority, &(), |ticket| (ticket.priority, &()));
+        line.insert(
             position,
             Ticket {
-                id: self.context.id,
+                id,
                 entered: Instant::now(),
                 priority,
+                arrival: None,
             },
         );
-        Ok(position + 1)
+        let network = host.network_position(target, id, priority);
+        host.changed();
+        Ok(network.unwrap_or(position + 1))
     }
     pub fn leave_queue(&self) {
-        for queue in self.runtime.host.lock().unwrap().queues.values_mut() {
+        let mut host = self.runtime.host.lock().unwrap();
+        for queue in host.queues.values_mut() {
             queue.retain(|ticket| ticket.id != self.context.id);
         }
+        host.changed();
     }
     pub fn queued_target(&self) -> io::Result<Option<String>> {
+        let registry = self.registry_counts();
+        let id = self.context.id;
         let mut host = self.runtime.host.lock().unwrap();
         let mut head = None;
+        let mut expired = false;
         for (server, queue) in &mut host.queues {
-            if let Some(ticket) = queue.iter().find(|ticket| ticket.id == self.context.id)
-                && ticket.entered.elapsed() >= Duration::from_secs(300)
+            if let Some(ticket) = queue.iter().find(|ticket| ticket.id == id)
+                && ticket.entered.elapsed() >= queue::TICKET_LIFETIME
             {
-                queue.retain(|ticket| ticket.id != self.context.id);
-                return Err(notice(Notice::QueueExpired));
+                queue.retain(|ticket| ticket.id != id);
+                expired = true;
+                break;
             }
-            if queue
-                .front()
-                .is_some_and(|ticket| ticket.id == self.context.id)
-            {
+            if queue.front().is_some_and(|ticket| ticket.id == id) {
                 head = Some(server.clone());
             }
+        }
+        if expired {
+            host.changed();
+            return Err(notice(Notice::QueueExpired));
+        }
+        if host.network.is_some() {
+            // In a cluster the leader decides who is first in line; without
+            // a recent word from it nobody is admitted from a queue.
+            let peer = host.peer().unwrap_or_default();
+            head = host.fresh_view().and_then(|view| {
+                host.queues
+                    .iter()
+                    .filter(|(_, queue)| queue.iter().any(|ticket| ticket.id == id))
+                    .map(|(server, _)| server)
+                    .find(|server| {
+                        view.destinations
+                            .get(*server)
+                            .and_then(|view| view.head.as_ref())
+                            .is_some_and(|head| head.peer == peer && head.id == id)
+                    })
+                    .cloned()
+            });
         }
         Ok(head.filter(|server| {
             let groups = self.runtime.groups.lock().unwrap();
             let members = groups.get(server);
-            let used = host
-                .leases
-                .values()
-                .filter(|servers| contains_destination(servers, server, members))
-                .count();
-            used < self.queues().get(server).copied().unwrap_or(0)
-                * members.map_or(1, BTreeSet::len)
+            host.used(server, members, registry.as_ref())
+                < self
+                    .queues()
+                    .get(server)
+                    .map_or(0, |capacity| queue::slots(*capacity, members))
         }))
     }
 }
@@ -1850,13 +2194,6 @@ fn group_members(config: &Config) -> BTreeMap<String, BTreeSet<String>> {
         .collect()
 }
 
-fn contains_destination(
-    servers: &BTreeSet<String>,
-    destination: &str,
-    members: Option<&BTreeSet<String>>,
-) -> bool {
-    servers.contains(destination) || members.is_some_and(|members| !servers.is_disjoint(members))
-}
 impl Drop for ExtensionSession {
     fn drop(&mut self) {
         {
@@ -1865,6 +2202,7 @@ impl Drop for ExtensionSession {
             for queue in host.queues.values_mut() {
                 queue.retain(|ticket| ticket.id != self.context.id);
             }
+            host.changed();
         }
         // Persistent plugins are told without waiting; their queues are bounded.
         let mut closing = self.context.clone();

@@ -16,13 +16,14 @@ pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use backups::{BackupTarget, Backups, DEFAULT_BACKUP_DIRECTORY, S3Target};
+pub use cluster::ClusterConfig;
 pub use managed::{
     InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
 };
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{
-    LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement, default_token_env,
-    valid_node_directory,
+    DEFAULT_MIN_FREE_DISK_MB, LOCAL_NODE, NodeConfig, NodeSchedule, NodeSelector, Placement,
+    default_token_env, valid_node_directory,
 };
 pub use permissions::PermissionsConfig;
 pub use services::{
@@ -35,6 +36,7 @@ pub use status::{
 pub use templates::ServerTemplate;
 
 mod backups;
+mod cluster;
 mod database;
 mod managed;
 mod messaging;
@@ -131,6 +133,9 @@ pub struct Config {
     /// `players = { record_ip }`: whether the player directory remembers
     /// the address a player last joined from. Default `true`.
     pub record_ip: bool,
+    /// `rift.config.cluster`: settings all cluster peers share. Inert
+    /// without a `cluster.toml` beside the configuration.
+    pub cluster: Option<ClusterConfig>,
     /// `backups`: snapshots of persistent instances on nodes.
     pub backups: Option<Backups>,
 }
@@ -379,6 +384,8 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "plugins",
     "logs",
     "perms",
+    // Membership changes, leadership transfers and backups of a cluster.
+    "cluster",
 ];
 
 /// Grants available to named `web.operators`.
@@ -394,11 +401,20 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "files",
     "plugins",
     "perms",
+    // Leadership transfers and drains of cluster peers.
+    "cluster",
 ];
 
 /// These grants can affect or reveal the whole proxy, so they require
 /// unrestricted scope. Permission data is network-wide, so `perms` is here too.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins", "perms"];
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &[
+    "cluster",
+    "config",
+    "deploy",
+    "extensions",
+    "plugins",
+    "perms",
+];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -655,7 +671,7 @@ impl Config {
                 ));
             }
         }
-        for (name, node) in &self.nodes {
+        for (name, node) in self.nodes.iter().filter(|(_, node)| !node.peer) {
             variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
         }
         if let Some(Backups {
@@ -751,6 +767,7 @@ impl Config {
             shutdown_timeout: Duration::from_secs(30),
             text: std::sync::Arc::default(),
             record_ip: true,
+            cluster: None,
             backups: None,
         };
         config.validate()?;
@@ -926,6 +943,7 @@ impl Config {
                     "shutdown_timeout_ms",
                     "text",
                     "players",
+                    "cluster",
                     "backups",
                 ],
                 "config",
@@ -966,7 +984,9 @@ impl Config {
             let templates = templates::parse(&root, directory, &software_cache)?;
             let template_sources = templates::parse_sources(&root)?;
             let service_groups = services::parse(&lua, &root, directory)?;
-            let nodes = nodes::parse(&root)?;
+            let mut nodes = nodes::parse(&root)?;
+            // On a cluster peer, every peer is a node too.
+            crate::cluster::peer_nodes::add_to(&mut nodes);
             let backups = backups::parse(&root, directory, &service_groups)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
@@ -1269,6 +1289,7 @@ impl Config {
                 plugin.online_mode = authentication.online_mode;
             }
             let forwarding = forwarding(&root)?;
+            let cluster = cluster::parse(&root)?;
             Ok(Self {
                 listeners,
                 backends,
@@ -1315,6 +1336,7 @@ impl Config {
                 shutdown_timeout,
                 text,
                 record_ip,
+                cluster,
                 backups,
             })
         };
@@ -1342,6 +1364,38 @@ impl Config {
         }
     }
 
+    /// What a cluster refuses: servers on `local`, the host of the proxy
+    /// that runs them. Every peer starts the same configuration, so a local
+    /// server would run once per peer; in a cluster each peer is a node
+    /// named after itself instead, and servers and groups select nodes
+    /// (docs/clustering.md, "Servers on the peers' own hosts").
+    pub fn check_cluster_placement(&self) -> io::Result<()> {
+        for (name, server) in &self.managed_servers {
+            if server.node.is_none() && !self.instances.contains_key(name) {
+                return Err(invalid(format!(
+                    "managed_servers.{name}: a cluster runs no server on {LOCAL_NODE:?}; give it a node (each peer is a node named after itself)"
+                )));
+            }
+        }
+        for (name, group) in &self.service_groups {
+            if group.nodes.is_none() {
+                return Err(invalid(format!(
+                    "service_groups.{name}: a cluster runs no instance on {LOCAL_NODE:?}; set nodes (each peer is a node named after itself)"
+                )));
+            }
+        }
+        if let Some((name, _)) = self
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.node.is_none())
+        {
+            return Err(invalid(format!(
+                "instances.{name}: runs on {LOCAL_NODE:?}, which a cluster refuses; `rift cluster init` moves such instances to the initializing peer"
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether authenticated sessions run player hooks: with extensions, or
     /// with persistent plugins once players have a verified identity.
     pub fn player_hooks(&self) -> bool {
@@ -1349,6 +1403,18 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if self.cluster.is_some() && self.database.is_some() {
+            return Err(invalid(
+                "cluster: a cluster replicates its own SQLite state; database.backend = \"postgres\" or \"mariadb\" cannot be combined with it",
+            ));
+        }
+        // A cluster peer has a cluster.toml, which names it before the
+        // configuration is evaluated.
+        if crate::cluster::settings::local_peer().is_some()
+            && !crate::cluster::settings::placement_reported()
+        {
+            self.check_cluster_placement()?;
+        }
         let path = self.instance_database.as_os_str().as_encoded_bytes();
         if path.is_empty()
             || path.len() > 4096
@@ -1441,8 +1507,10 @@ impl Config {
                 .values()
                 .chain(self.service_groups.values().map(|group| &group.server))
                 .any(|server| server.messaging.is_some());
+            // A peer's own node logs in to nothing.
+            let agents = self.nodes.values().any(|node| !node.peer);
             messaging
-                .validate_with_nodes(!self.nodes.is_empty() || logins)
+                .validate_with_nodes(agents || logins)
                 .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {
@@ -1748,7 +1816,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy, extensions, plugins and perms require unrestricted group access"
+                            "{path}: cluster, config, deploy, extensions, plugins and perms require unrestricted group access"
                         )));
                     }
                 }

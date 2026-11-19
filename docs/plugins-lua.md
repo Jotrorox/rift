@@ -140,9 +140,9 @@ plugins ([commands](plugin-events.md#commands)).
 
 | Function | Its `fn` receives |
 | --- | --- |
-| `rift.every(name, every_ms, fn)` | `{ api_version = 3, job = name }` |
+| `rift.every(name, every_ms, [{ scope = ... },] fn)` | `{ api_version = 3, job = name }`. In a [cluster](plugins.md#plugins-in-a-cluster) `scope = "cluster"` (the default) runs the job on the leader only, `"peer"` on every peer; a single Rift runs it either way |
 | `rift.timers.every(ms, [fn])`, `rift.timers.after(ms, [fn])` | The timer's handle, which `rift.timers.cancel(handle)` takes |
-| `rift.subscribe(subject, [queue,] [fn])` | `{ subject, payload, reply, subscription, handle }`. The call returns a handle for `rift.unsubscribe` |
+| `rift.subscribe(subject, [queue or { queue = ..., scope = ... },] [fn])` | `{ subject, payload, reply, subscription, handle }`. The call returns a handle for `rift.unsubscribe`. `scope` is `"cluster"` (the default: messages published on any peer of a [cluster](clustering.md#subject-scopes)) or `"local"` (only this peer's); a single Rift treats both alike |
 
 These also work in handlers. But hooks are fixed once the entry script
 finishes, so it must create at least one timer (or subscription) or register
@@ -160,7 +160,8 @@ mode:
 | `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions-lua.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil), `rift.permissions.meta(uuid, contexts?)` and `rift.permissions.set_meta(uuid, key, value_or_nil, { contexts?, expires_in?, expires_at? })`. `rift.permissions.add_group(uuid, group, { expires_in?, expires_at? })` makes the membership end after that many seconds or at that Unix time; adding again replaces the expiry. |
 | `bus.publish`, `bus.request`, `bus.subscribe`, `bus.unsubscribe` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply; `rift.subscribe` and `rift.unsubscribe(handle)`. |
 | `servers.*` | `rift.servers.*` waits for the control service and returns its decoded reply; `rift.servers.control(operation, payload)` reaches any `rift.control.*` operation. |
-| `timers.*` | `rift.timers.every`, `after`, `cancel`, and `rift.every` for named jobs. |
+| `timers.*` | `rift.timers.every`, `after`, `cancel`, and `rift.every` for named jobs. `rift.timers.*` tick on every cluster peer. |
+| (Lua only) cluster | `rift.cluster.lease(name, ttl_ms)`, `renew(name, token, ttl_ms)`, `release(name, token)`, `is_leader()` and `peer()`: [leases with fencing tokens](host-services.md#leases-in-a-cluster), the plugin's own names. They wait for the cluster on the plugin's thread; without a cluster a lease is always granted. |
 | `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. [Logs](plugin-operations.md#logs) says where the lines go. |
 | `background.*` | `rift.background.defer()`, `resolve(ticket, decision)`, `run(payload, [fn])` and `is_worker()`: see [background work](#background-work). |
 | `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.2.1"`); `rift.clock()` and `rift.time()`. |

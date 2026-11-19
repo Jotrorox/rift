@@ -2,7 +2,8 @@
 //! TLS 1.3 with ALPN `rift-messaging/1`, token authentication, publish,
 //! subscribe, request/reply and retained-stream consumers. The proxy's server
 //! (`rift::messaging::quic::Server`) shares this crate's [`frame`] codec and
-//! TLS configuration.
+//! TLS configuration. [`Client::connect_any`] takes the addresses of every
+//! peer of a Rift cluster and fails over between them.
 //!
 //! ```rust,no_run
 //! use bytes::Bytes;
@@ -38,6 +39,65 @@ pub type Result<T> = io::Result<T>;
 pub const ALPN: &[u8] = b"rift-messaging/1";
 pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAME_BYTES: usize = MAX_PAYLOAD_BYTES + 64 * 1024;
+
+/// Which peers of a Rift cluster a subscription to a user subject hears.
+/// On a single Rift both behave the same. Rift's own subjects keep their
+/// fixed scopes whatever a subscription asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SubscriptionScope {
+    /// Messages published on any peer (the default).
+    #[default]
+    Cluster,
+    /// Only messages published on the peer the subscriber is connected to.
+    Local,
+}
+
+impl SubscriptionScope {
+    /// `"cluster"` or `"local"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cluster => "cluster",
+            Self::Local => "local",
+        }
+    }
+}
+
+impl std::fmt::Display for SubscriptionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SubscriptionScope {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "cluster" => Ok(Self::Cluster),
+            "local" => Ok(Self::Local),
+            _ => Err(invalid(format!(
+                "subscription scope must be \"cluster\" or \"local\", not {value:?}"
+            ))),
+        }
+    }
+}
+
+/// One address of a messaging listener: where to send packets, and the
+/// name its certificate is verified for.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ServerAddress {
+    pub address: std::net::SocketAddr,
+    pub server_name: String,
+}
+
+impl ServerAddress {
+    pub fn new(address: std::net::SocketAddr, server_name: impl Into<String>) -> Self {
+        Self {
+            address,
+            server_name: server_name.into(),
+        }
+    }
+}
 
 /// One message on a subject, with an optional reply subject.
 #[derive(Clone, Debug, PartialEq, Eq)]

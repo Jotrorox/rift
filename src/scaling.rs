@@ -55,8 +55,28 @@ fn backoff(cooldown: Duration, failures: u32) -> Duration {
 }
 
 impl Scaler {
+    /// [`Scaler::next_with`] with no reports from other peers.
+    #[cfg(test)]
     pub fn next(&mut self, snapshot: &Snapshot, now: Instant) -> Option<Change> {
-        let servers = snapshot.managed.snapshot();
+        self.next_with(snapshot, &BTreeMap::new(), now)
+    }
+
+    /// [`Scaler::next`] for a cluster leader: `remote` adds the reservations
+    /// that the other peers reported for each server (docs/clustering.md,
+    /// "Inputs from other peers"), so a server players are on their way to
+    /// through another peer is neither counted as idle nor retired.
+    pub fn next_with(
+        &mut self,
+        snapshot: &Snapshot,
+        remote: &BTreeMap<String, usize>,
+        now: Instant,
+    ) -> Option<Change> {
+        let mut servers = snapshot.managed.snapshot();
+        for server in &mut servers {
+            if let Some(reserved) = remote.get(&server.name) {
+                server.reservations = server.reservations.saturating_add(*reserved);
+            }
+        }
         let queues = snapshot.extensions.queue_lengths();
         let mut groups: Vec<_> = snapshot.config.service_groups.iter().collect();
         let start = self

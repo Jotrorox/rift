@@ -25,10 +25,12 @@ for namespace, methods in pairs({
     http = { "request" },
     players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "dialog", "clear_dialog", "kick", "transfer", "broadcast" },
     servers = { "create", "remove", "start", "stop", "download" },
+    cluster = { "lease", "renew", "release", "is_leader", "peer" },
 }) do
     local proxy = {}
     local scope = namespace == "players" and "API v2 extension callbacks, on_message and on_http"
         or namespace == "servers" and "callbacks such as on_message, on_http and extensions"
+        or namespace == "cluster" and "extension callbacks and jobs"
         or namespace == "permissions" and "API v3 extension callbacks"
         or "API v2 extension callbacks"
     for _, method in ipairs(methods) do
@@ -98,30 +100,55 @@ function api.command(name, definition)
     commands[name] = definition
 end
 
--- rift.every(name, every_ms, function(ctx) ... end): an extensions.jobs
--- entry (fixed delay, first run after one interval). Implies api_version = 2.
-function api.every(name, every_ms, callback)
+-- rift.every(name, every_ms, [{ scope = "cluster" | "peer" },] function(ctx) ... end):
+-- an extensions.jobs entry (fixed delay, first run after one interval).
+-- Implies api_version = 2. In a cluster a job runs on the leader only
+-- (scope = "cluster", the default) or on every peer (scope = "peer").
+function api.every(name, every_ms, options, callback)
     configuring()
+    if callback == nil then callback, options = options, nil end
+    local scope
+    if options ~= nil then
+        if type(options) ~= "table" then
+            error("rift.every expects a job name, an interval in milliseconds, optional options and a function")
+        end
+        for key in pairs(options) do
+            if key ~= "scope" then error("rift.every options take scope, not " .. tostring(key)) end
+        end
+        scope = options.scope
+    end
     if type(name) ~= "string" or type(callback) ~= "function" then
         error("rift.every expects a job name, an interval in milliseconds and a function")
     end
     if jobs[name] then error("duplicate rift.every job: " .. name) end
-    jobs[name] = { every_ms = every_ms, run = callback }
+    jobs[name] = { every_ms = every_ms, run = callback, scope = scope }
 end
 
--- rift.subscribe(subject, [queue,] function(message) ... end): a
--- messaging.subscriptions entry whose messages go to this function instead
--- of on_message.
+-- rift.subscribe(subject, [queue | { queue = ..., scope = ... },]
+-- function(message) ... end): a messaging.subscriptions entry whose messages
+-- go to this function instead of on_message. In a cluster, scope = "local"
+-- hears only this peer's messages on user subjects ("cluster" is the default).
 function api.subscribe(subject, queue, callback)
     configuring()
     if callback == nil then callback, queue = queue, nil end
+    local scope
+    if type(queue) == "table" then
+        local options = queue
+        for key in pairs(options) do
+            if key ~= "queue" and key ~= "scope" then
+                error("rift.subscribe options take queue and scope, not " .. tostring(key))
+            end
+        end
+        queue, scope = options.queue, options.scope
+    end
     if type(subject) ~= "string" or (queue ~= nil and type(queue) ~= "string")
+        or (scope ~= nil and type(scope) ~= "string")
         or type(callback) ~= "function" then
-        error("rift.subscribe expects a subject, an optional queue group and a function")
+        error("rift.subscribe expects a subject, an optional queue group or options table and a function")
     end
     if subscriptions[subject] then error("duplicate rift.subscribe subject: " .. subject) end
     subscriptions[subject] = callback
-    subjects[#subjects + 1] = { subject = subject, queue = queue }
+    subjects[#subjects + 1] = { subject = subject, queue = queue, scope = scope }
 end
 
 local function extensions(version)

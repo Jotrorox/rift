@@ -11,22 +11,38 @@
 //! servers and whenever their permissions change (see [`Players::watch`]).
 //! The roster record's tab list display name, the player's prefix and suffix
 //! around their name, is resolved at the same moments from the join on.
+//!
+//! In a cluster, the players of other peers are on the roster too, and every
+//! action for one of them goes to its peer through a [`PlayerRouter`] (see
+//! [`routing`]). Synchronous callers (Lua, plugins, the BungeeCord bridge)
+//! cannot wait for that peer's answer: for them, `true` means the action
+//! went to the player's peer. The `async` variants ([`Players::deliver`],
+//! [`Players::broadcast_routed`], [`Players::route_transfer`]) wait for it.
 use super::fields;
 use crate::{
     messaging::Broker,
     permissions::Authority,
-    players::{PlayerRegistry, VISIBLE_TO, Viewer},
-    text::{Text, Unrendered},
+    players::{
+        PlayerRegistry, RemotePlayer, VISIBLE_TO, Viewer,
+        claims::{ClaimChange, ClaimOp, Claims, Refusal},
+    },
+    text::{
+        Text, Unrendered,
+        catalog::{self, Notice},
+    },
 };
 use mlua::{Lua, Table, Value};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{Arc, Mutex, PoisonError, RwLock},
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+
+pub mod routing;
+use routing::{LocalRouter, PlayerRouter, SessionHooks, WireBody, WireRequest, WireResult};
 
 /// Undelivered actions per player. A full queue reports failure instead of waiting.
 const QUEUE: usize = 32;
@@ -34,8 +50,12 @@ const MAX_TEXT: usize = 1024;
 /// Action calls per invocation; a broadcast counts once.
 const MAX_CALLS: usize = 256;
 const MAX_TITLE_MS: i64 = 60_000;
+/// How long [`Players::disconnect_all`] waits for one session's queue.
+const DISCONNECT_WAIT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An action for one player's session. Serializable, so that a peer of a
+/// cluster can send it to the peer that holds the player.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlayerAction {
     /// Plain text or a JSON text component already checked by `Text`.
     Message(Text),
@@ -61,6 +81,7 @@ pub enum PlayerAction {
     /// Show, change or (with `None`) remove one of the player's boss bars.
     BossBar {
         name: String,
+        #[serde(with = "boss_bar_wire")]
         bar: Option<crate::protocol::BossBar>,
     },
     /// Show a dialog, replacing any open one; clicks on its plugin actions go
@@ -71,6 +92,77 @@ pub enum PlayerAction {
     },
     /// Close the dialog Rift showed, if it is still open.
     ClearDialog,
+    /// Leave this proxy: a 1.20.5+ client in configuration or play gets the
+    /// Transfer packet to `host:port` (another peer of the cluster); any
+    /// other is disconnected with `fallback`. Sent by a peer that drains.
+    Handoff {
+        host: String,
+        port: u16,
+        fallback: Text,
+    },
+}
+
+/// What [`Players::hand_off`] did: sessions told to go to another peer, and
+/// sessions told to reconnect. A session that did not take the action in
+/// time counts in neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandOff {
+    pub transferred: usize,
+    pub disconnected: usize,
+}
+
+/// The serde form of a boss bar, which the protocol type does not have.
+mod boss_bar_wire {
+    use crate::protocol::BossBar;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value as Json;
+
+    #[derive(Serialize)]
+    struct Borrowed<'a> {
+        text: &'a Json,
+        progress: f32,
+        color: u8,
+        style: u8,
+        flags: u8,
+    }
+
+    #[derive(Deserialize)]
+    struct Owned {
+        text: Json,
+        progress: f32,
+        color: u8,
+        style: u8,
+        flags: u8,
+    }
+
+    pub fn serialize<S: Serializer>(
+        bar: &Option<BossBar>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        bar.as_ref()
+            .map(|bar| Borrowed {
+                text: &bar.text,
+                progress: bar.progress,
+                color: bar.color,
+                style: bar.style,
+                flags: bar.flags,
+            })
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<BossBar>, D::Error> {
+        Ok(
+            Option::<Owned>::deserialize(deserializer)?.map(|bar| BossBar {
+                text: bar.text,
+                progress: bar.progress.clamp(0.0, 1.0),
+                color: bar.color,
+                style: bar.style,
+                flags: bar.flags,
+            }),
+        )
+    }
 }
 
 struct Entry {
@@ -115,6 +207,10 @@ pub struct Players {
     languages: Arc<std::sync::atomic::AtomicU64>,
     /// `tab_list.format` of the configuration in effect.
     tab_format: Arc<Mutex<Option<Arc<str>>>>,
+    /// Delivers actions for other peers' players.
+    router: Arc<RwLock<Arc<dyn PlayerRouter>>>,
+    /// What remote requests need from the running proxy.
+    hooks: Arc<RwLock<Option<Arc<dyn SessionHooks>>>>,
 }
 
 /// A player's tab list name: `format` with `{prefix}`, `{name}`, `{suffix}`,
@@ -223,6 +319,7 @@ impl PlayerHandle {
             && entry.locale.as_deref() != locale
         {
             entry.locale = locale.map(str::to_owned);
+            self.players.client_attributes(entry);
         }
     }
 }
@@ -416,15 +513,20 @@ pub(crate) fn dialog(value: Value) -> mlua::Result<crate::dialog::Dialog> {
 
 const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";
 
+/// Whether `target` is a lowercase UUID (else a name).
+fn is_uuid(target: &str) -> bool {
+    target.len() == 32
+        && target
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Find a player by lowercase UUID or case-insensitive name.
 fn find<'a>(
     sessions: &'a BTreeMap<u64, Entry>,
     target: &str,
 ) -> Result<Option<(&'a u64, &'a Entry)>, &'static str> {
-    let uuid = target.len() == 32
-        && target
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let uuid = is_uuid(target);
     if !uuid && !crate::players::valid_username(target) {
         return Err(INVALID_TARGET);
     }
@@ -435,6 +537,53 @@ fn find<'a>(
             entry.name.eq_ignore_ascii_case(target)
         }
     }))
+}
+
+fn hex(uuid: &[u8; 16]) -> String {
+    uuid.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The UUID a lowercase hexadecimal target names.
+fn parse_uuid(target: &str) -> Option<[u8; 16]> {
+    if !is_uuid(target) {
+        return None;
+    }
+    let mut uuid = [0; 16];
+    for (index, byte) in uuid.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&target[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(uuid)
+}
+
+/// Queue a boss bar change for `entry`, tracking the per-player limit.
+fn queue_boss_bar(
+    entry: &mut Entry,
+    name: &str,
+    bar: Option<crate::protocol::BossBar>,
+) -> Result<bool, &'static str> {
+    if !crate::protocol::boss_bars_supported(entry.protocol) {
+        return Ok(false);
+    }
+    let shown = bar.is_some();
+    if shown
+        && !entry.boss_bars.contains(name)
+        && entry.boss_bars.len() >= crate::protocol::MAX_BOSS_BARS
+    {
+        return Err("a player can have at most 8 boss bars");
+    }
+    let action = PlayerAction::BossBar {
+        name: name.to_owned(),
+        bar,
+    };
+    if entry.actions.try_send(action).is_err() {
+        return Ok(false);
+    }
+    if shown {
+        entry.boss_bars.insert(name.to_owned());
+    } else {
+        entry.boss_bars.remove(name);
+    }
+    Ok(true)
 }
 
 impl Players {
@@ -452,7 +601,8 @@ impl Players {
             });
         Self {
             sessions: Arc::default(),
-            roster: Arc::default(),
+            // A cluster peer's presence component holds the roster already.
+            roster: crate::cluster::attach::take_roster().unwrap_or_default(),
             destinations,
             groups,
             events,
@@ -461,7 +611,33 @@ impl Players {
             record_ip: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             languages: Arc::default(),
             tab_format: Arc::default(),
+            router: Arc::new(RwLock::new(Arc::new(LocalRouter))),
+            hooks: Arc::default(),
         }
+    }
+
+    /// Deliver actions for other peers' players through `router`.
+    pub fn set_router(&self, router: Arc<dyn PlayerRouter>) {
+        *self.router.write().unwrap_or_else(PoisonError::into_inner) = router;
+    }
+
+    fn router(&self) -> Arc<dyn PlayerRouter> {
+        self.router
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What remote transfers and dialog clicks run through.
+    pub fn set_session_hooks(&self, hooks: Arc<dyn SessionHooks>) {
+        *self.hooks.write().unwrap_or_else(PoisonError::into_inner) = Some(hooks);
+    }
+
+    fn hooks(&self) -> Option<Arc<dyn SessionHooks>> {
+        self.hooks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// `tab_list.format`: how tab lists name players. A change renames every
@@ -507,11 +683,20 @@ impl Players {
     /// name, as `player-info.language` reports it; `None` when the player
     /// is offline, the target is not valid, or Rift uses the default.
     pub fn language_of(&self, target: &str) -> Option<String> {
-        let sessions = self.lock();
-        find(&sessions, target)
-            .ok()
-            .flatten()
-            .and_then(|(_, entry)| Self::effective_language(entry))
+        {
+            let sessions = self.lock();
+            match find(&sessions, target) {
+                Ok(Some((_, entry))) => return Self::effective_language(entry),
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
+        // A player of another peer, with the language that peer reported.
+        self.remote(target)?
+            .player
+            .language
+            .as_deref()
+            .map(str::to_owned)
     }
 
     /// Run `convert`, which turns text for `target` into [`Text`], with the
@@ -534,8 +719,21 @@ impl Players {
             .or_else(|| entry.locale.as_deref().and_then(locale_language))
     }
 
+    /// Tell other peers what the client of `entry` reported.
+    fn client_attributes(&self, entry: &Entry) {
+        let language = Self::effective_language(entry);
+        self.roster.set_client(
+            &entry.key,
+            entry.protocol,
+            entry.locale.as_deref(),
+            language.as_deref(),
+        );
+    }
+
     fn record(&self, record: crate::directory::Record) -> crate::plugins::api::PlayerRecord {
-        let online = self.lock().values().any(|entry| entry.uuid == record.uuid);
+        let online = self.lock().values().any(|entry| entry.uuid == record.uuid)
+            || parse_uuid(&record.uuid)
+                .is_some_and(|uuid| self.roster.remote_by_uuid(&uuid).is_some());
         crate::plugins::api::PlayerRecord {
             uuid: record.uuid,
             name: record.name,
@@ -591,6 +789,7 @@ impl Players {
         for entry in self.lock().values_mut() {
             if entry.uuid == record.uuid {
                 entry.language.clone_from(&language);
+                self.client_attributes(entry);
             }
         }
         self.languages
@@ -658,7 +857,7 @@ impl Players {
         // roster record the login created (usually already with this rule).
         let visible_to = self.visibility(uuid, server);
         self.roster.set_visibility(uuid, visible_to.clone());
-        let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = hex(uuid);
         // Read before the join is written: a first join has no language.
         let language = self.directory.language(&hex);
         {
@@ -683,6 +882,7 @@ impl Players {
             actions,
             boss_bars: BTreeSet::new(),
         };
+        self.client_attributes(&entry);
         let event = self.event("join", id, &entry, None);
         self.lock().insert(id, entry);
         self.publish(event);
@@ -696,74 +896,247 @@ impl Players {
         )
     }
 
-    /// Names of joined players by lowercase UUID.
+    /// Names of joined players by lowercase UUID, on every peer.
     pub fn names(&self) -> BTreeMap<String, String> {
-        self.lock()
+        let mut names: BTreeMap<String, String> = self
+            .lock()
             .values()
             .map(|entry| (entry.uuid.clone(), entry.name.clone()))
-            .collect()
+            .collect();
+        for remote in self.roster.remote_players() {
+            names
+                .entry(hex(&remote.player.uuid))
+                .or_insert(remote.player.name);
+        }
+        names
+    }
+
+    /// Another peer's player by lowercase UUID or case-insensitive name; the
+    /// target is already valid.
+    fn remote(&self, target: &str) -> Option<RemotePlayer> {
+        match parse_uuid(target) {
+            Some(uuid) => self.roster.remote_by_uuid(&uuid),
+            None => self.roster.remote_by_name(target),
+        }
+    }
+
+    /// The request that carries `action` to a player of another peer.
+    fn request(remote: &RemotePlayer, action: PlayerAction) -> WireRequest {
+        WireRequest {
+            incarnation: remote.incarnation,
+            body: WireBody::Action {
+                connection: remote.player.connection,
+                uuid: remote.player.uuid,
+                action,
+            },
+        }
+    }
+
+    /// Send `request` to `peer` without waiting for the answer; false when
+    /// there is no runtime to send it from.
+    fn dispatch(&self, peer: u16, request: WireRequest) -> bool {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        let delivery = self.router().deliver(peer, request);
+        drop(runtime.spawn(async move {
+            match delivery.await {
+                Ok(WireResult::Error(reason)) => {
+                    log_warn!("player action refused by peer {peer}: {reason}");
+                }
+                Err(error) => log_warn!("player action not delivered: {error}"),
+                Ok(_) => {}
+            }
+        }));
+        true
     }
 
     /// Queue an action for a lowercase UUID or case-insensitive player name.
-    /// False means that the player is offline or has a full queue.
+    /// False means that the player is offline or has a full queue. For a
+    /// player on another peer, true means the action went to that peer.
     pub fn send(&self, target: &str, action: PlayerAction) -> std::io::Result<bool> {
-        let sessions = self.lock();
-        Ok(find(&sessions, target)
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?
-            .is_some_and(|(_, entry)| entry.actions.try_send(action).is_ok()))
+        {
+            let sessions = self.lock();
+            let found = find(&sessions, target).map_err(|message| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+            })?;
+            if let Some((_, entry)) = found {
+                return Ok(entry.actions.try_send(action).is_ok());
+            }
+        }
+        Ok(self.remote(target).is_some_and(|remote| {
+            self.dispatch(remote.player.peer, Self::request(&remote, action))
+        }))
+    }
+
+    /// [`Players::send`] that waits for the answer of the player's peer.
+    pub async fn deliver(&self, target: &str, action: PlayerAction) -> std::io::Result<bool> {
+        let remote = {
+            let sessions = self.lock();
+            let found = find(&sessions, target).map_err(|message| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+            })?;
+            if let Some((_, entry)) = found {
+                return Ok(entry.actions.try_send(action).is_ok());
+            }
+            drop(sessions);
+            self.remote(target)
+        };
+        let Some(remote) = remote else {
+            return Ok(false);
+        };
+        let delivery = self
+            .router()
+            .deliver(remote.player.peer, Self::request(&remote, action));
+        match delivery.await {
+            Ok(WireResult::Sent(sent)) => Ok(sent),
+            Ok(WireResult::Error(reason)) => Err(std::io::Error::other(reason)),
+            Ok(_) => Ok(false),
+            Err(error) => {
+                log_warn!("player action not delivered: {error}");
+                Ok(false)
+            }
+        }
     }
 
     /// Queue an action for a case-insensitive player name. False means that
     /// the player is offline or has a full queue.
     pub fn send_named(&self, name: &str, action: PlayerAction) -> bool {
-        self.lock()
-            .values()
-            .find(|entry| entry.name.eq_ignore_ascii_case(name))
-            .is_some_and(|entry| entry.actions.try_send(action).is_ok())
+        {
+            let sessions = self.lock();
+            if let Some(entry) = sessions
+                .values()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            {
+                return entry.actions.try_send(action).is_ok();
+            }
+        }
+        self.roster
+            .remote_by_name(name)
+            .is_some_and(|remote| self.dispatch(remote.player.peer, Self::request(&remote, action)))
     }
 
-    /// Queue an action for every joined player and count those that accepted it.
+    /// Queue an action for every joined player and count those of this peer
+    /// that accepted it; every other peer delivers it to its own players.
     pub fn send_all(&self, action: &PlayerAction) -> usize {
+        let count = self.broadcast_local(None, action);
+        self.fan_out(None, action);
+        count
+    }
+
+    /// Queue `action` for this peer's players on `servers` (everyone for
+    /// `None`) and count those that accepted it.
+    fn broadcast_local(&self, servers: Option<&BTreeSet<String>>, action: &PlayerAction) -> usize {
         self.lock()
             .values()
+            .filter(|entry| servers.is_none_or(|servers| servers.contains(&entry.server)))
             .filter(|entry| entry.actions.try_send(action.clone()).is_ok())
             .count()
     }
 
+    /// The broadcast request for every other peer, with the incarnation it
+    /// is addressed to.
+    fn broadcasts(
+        &self,
+        servers: Option<&BTreeSet<String>>,
+        action: &PlayerAction,
+    ) -> Vec<(u16, WireRequest)> {
+        let incarnations = self.roster.peer_incarnations();
+        self.router()
+            .peers()
+            .into_iter()
+            .filter_map(|peer| {
+                Some((
+                    peer,
+                    WireRequest {
+                        incarnation: *incarnations.get(&peer)?,
+                        body: WireBody::Broadcast {
+                            servers: servers.cloned(),
+                            action: action.clone(),
+                        },
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Send a broadcast to every other peer without waiting.
+    fn fan_out(&self, servers: Option<&BTreeSet<String>>, action: &PlayerAction) {
+        for (peer, request) in self.broadcasts(servers, action) {
+            self.dispatch(peer, request);
+        }
+    }
+
     /// Queue a plugin message for the backend of a case-insensitive player name.
     pub fn forward_to_player(&self, name: &str, data: &[u8]) -> bool {
-        self.lock()
-            .values()
-            .find(|entry| entry.name.eq_ignore_ascii_case(name))
-            .is_some_and(|entry| {
-                entry
+        {
+            let sessions = self.lock();
+            if let Some(entry) = sessions
+                .values()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            {
+                return entry
                     .actions
                     .try_send(PlayerAction::Forward {
                         server: entry.server.clone(),
                         data: data.to_vec(),
                     })
-                    .is_ok()
-            })
+                    .is_ok();
+            }
+        }
+        self.roster.remote_by_name(name).is_some_and(|remote| {
+            let action = PlayerAction::Forward {
+                server: remote.player.server.clone(),
+                data: data.to_vec(),
+            };
+            self.dispatch(remote.player.peer, Self::request(&remote, action))
+        })
     }
 
     /// Queue a plugin message through one player on each server that `include`
     /// selects, oldest connection first, passing over full queues. Servers
-    /// without players are skipped. Returns the number of servers reached.
+    /// without players are skipped. A server with players only on other
+    /// peers is reached through one of them. Returns the number of servers
+    /// reached.
     pub fn forward_to_servers(&self, include: impl Fn(&str) -> bool, data: &[u8]) -> usize {
-        let sessions = self.lock();
         let mut reached = BTreeSet::new();
-        for entry in sessions.values() {
-            if include(&entry.server)
-                && !reached.contains(entry.server.as_str())
-                && entry
-                    .actions
-                    .try_send(PlayerAction::Forward {
-                        server: entry.server.clone(),
-                        data: data.to_vec(),
-                    })
-                    .is_ok()
-            {
-                reached.insert(entry.server.as_str());
+        {
+            let sessions = self.lock();
+            for entry in sessions.values() {
+                if include(&entry.server)
+                    && !reached.contains(entry.server.as_str())
+                    && entry
+                        .actions
+                        .try_send(PlayerAction::Forward {
+                            server: entry.server.clone(),
+                            data: data.to_vec(),
+                        })
+                        .is_ok()
+                {
+                    reached.insert(entry.server.clone());
+                }
+            }
+        }
+        let mut carriers: BTreeMap<String, RemotePlayer> = BTreeMap::new();
+        for remote in self.roster.remote_players() {
+            let server = &remote.player.server;
+            if !include(server) || reached.contains(server) {
+                continue;
+            }
+            match carriers.get(server) {
+                Some(carrier) if carrier.player.connection <= remote.player.connection => {}
+                _ => {
+                    carriers.insert(server.clone(), remote);
+                }
+            }
+        }
+        for (server, carrier) in carriers {
+            let action = PlayerAction::Forward {
+                server: server.clone(),
+                data: data.to_vec(),
+            };
+            if self.dispatch(carrier.player.peer, Self::request(&carrier, action)) {
+                reached.insert(server);
             }
         }
         reached.len()
@@ -782,7 +1155,6 @@ impl Players {
         Ok(())
     }
 
-    /// Match players on a server or in a service group; nil matches everyone.
     /// The network roster, shared with sessions and every count.
     pub fn roster(&self) -> &Arc<PlayerRegistry> {
         &self.roster
@@ -911,11 +1283,22 @@ impl Players {
 
     /// Names of joined players `viewer` may see, for name completion.
     pub fn names_for(&self, viewer: Viewer<'_>) -> Vec<String> {
-        self.lock()
+        let mut names: Vec<String> = self
+            .lock()
             .values()
             .filter(|entry| viewer.sees(&entry.key, entry.visible_to.as_deref()))
             .map(|entry| entry.name.clone())
-            .collect()
+            .collect();
+        names.extend(
+            self.roster
+                .remote_players()
+                .into_iter()
+                .filter(|remote| {
+                    viewer.sees(&remote.player.uuid, remote.player.visible_to.as_deref())
+                })
+                .map(|remote| remote.player.name),
+        );
+        names
     }
 
     /// The service group `server` is an instance of, for the `group`
@@ -929,28 +1312,30 @@ impl Players {
             .map(|(group, _)| group.clone())
     }
 
-    fn matcher(&self, server: Option<String>) -> Result<impl Fn(&Entry) -> bool, &'static str> {
-        let mut members = None;
-        if let Some(server) = &server {
-            self.known(server)?;
-            members = self
-                .groups
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(server)
-                .cloned();
-        }
-        Ok(move |entry: &Entry| {
-            server.as_ref().is_none_or(|server| {
-                *server == entry.server
-                    || members
-                        .as_ref()
-                        .is_some_and(|members| members.contains(&entry.server))
-            })
-        })
+    /// The servers a filter names: a server and the instances of the service
+    /// group of that name; `None` matches everyone.
+    fn selection(&self, server: Option<&str>) -> Result<Option<BTreeSet<String>>, &'static str> {
+        let Some(server) = server else {
+            return Ok(None);
+        };
+        self.known(server)?;
+        let mut servers = self
+            .groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(server)
+            .cloned()
+            .unwrap_or_default();
+        servers.insert(server.to_owned());
+        Ok(Some(servers))
     }
 
-    fn player_info(entry: &Entry, id: u64) -> crate::plugins::api::PlayerInfo {
+    fn player_info(
+        &self,
+        entry: &Entry,
+        id: u64,
+        peer: Option<&str>,
+    ) -> crate::plugins::api::PlayerInfo {
         crate::plugins::api::PlayerInfo {
             connection_id: id,
             uuid: entry.uuid.clone(),
@@ -962,42 +1347,106 @@ impl Players {
             ip: entry.ip.clone(),
             properties: entry.properties.clone(),
             language: Self::effective_language(entry),
+            peer: peer.map(str::to_owned),
         }
     }
 
-    /// Joined players, optionally only those on one server or service group.
+    fn remote_info(player: crate::players::Player) -> crate::plugins::api::PlayerInfo {
+        crate::plugins::api::PlayerInfo {
+            connection_id: player.connection,
+            uuid: hex(&player.uuid),
+            peer: Some(crate::players::identity::peer_label(player.peer)),
+            name: player.name,
+            server: player.server,
+            protocol: player.protocol,
+            visible_to: player.visible_to.as_deref().map(str::to_owned),
+            locale: player.locale.as_deref().map(str::to_owned),
+            ip: player.ip.to_string(),
+            properties: player
+                .properties
+                .iter()
+                .map(|property| crate::plugins::api::ProfileProperty {
+                    name: property.name.clone(),
+                    value: property.value.clone(),
+                    signature: property.signature.clone(),
+                })
+                .collect(),
+            language: player.language.as_deref().map(str::to_owned),
+        }
+    }
+
+    /// This peer's name in listings; `None` without a cluster, which keeps
+    /// listings as they always were.
+    fn own_label(&self) -> Option<String> {
+        let identity = self.roster.identity();
+        identity
+            .is_clustered()
+            .then(|| crate::players::identity::peer_label(identity.peer))
+    }
+
+    /// Joined players, optionally only those on one server or service group,
+    /// on every peer.
     pub fn list(
         &self,
         server: Option<&str>,
     ) -> Result<Vec<crate::plugins::api::PlayerInfo>, String> {
-        let matches = self.matcher(server.map(str::to_owned))?;
-        Ok(self
+        let servers = self.selection(server)?;
+        let matches = |name: &str| {
+            servers
+                .as_ref()
+                .is_none_or(|servers| servers.contains(name))
+        };
+        let own = self.own_label();
+        let mut list: Vec<_> = self
             .lock()
             .iter()
-            .filter(|(_, entry)| matches(entry))
-            .map(|(id, entry)| Self::player_info(entry, *id))
-            .collect())
+            .filter(|(_, entry)| matches(&entry.server))
+            .map(|(id, entry)| self.player_info(entry, *id, own.as_deref()))
+            .collect();
+        list.extend(
+            self.roster
+                .remote_players()
+                .into_iter()
+                .filter(|remote| matches(&remote.player.server))
+                .map(|remote| Self::remote_info(remote.player)),
+        );
+        Ok(list)
     }
 
-    /// One player by lowercase UUID or case-insensitive name.
+    /// One player by lowercase UUID or case-insensitive name, on any peer.
     pub fn get(&self, target: &str) -> Result<Option<crate::plugins::api::PlayerInfo>, String> {
-        let sessions = self.lock();
-        Ok(find(&sessions, target)?.map(|(id, entry)| Self::player_info(entry, *id)))
+        let own = self.own_label();
+        {
+            let sessions = self.lock();
+            if let Some((id, entry)) = find(&sessions, target)? {
+                return Ok(Some(self.player_info(entry, *id, own.as_deref())));
+            }
+        }
+        Ok(self
+            .remote(target)
+            .map(|remote| Self::remote_info(remote.player)))
     }
 
-    /// Names starting with `prefix` (ignoring ASCII case), sorted.
+    /// Names starting with `prefix` (ignoring ASCII case), sorted, on every
+    /// peer.
     pub fn names_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let starts = |name: &str| {
+            name.get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        };
         let mut names: Vec<_> = self
             .lock()
             .values()
-            .filter(|entry| {
-                entry
-                    .name
-                    .get(..prefix.len())
-                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-            })
+            .filter(|entry| starts(&entry.name))
             .map(|entry| entry.name.clone())
             .collect();
+        names.extend(
+            self.roster
+                .remote_players()
+                .into_iter()
+                .filter(|remote| starts(&remote.player.name))
+                .map(|remote| remote.player.name),
+        );
         names.sort_by_key(|name| name.to_ascii_lowercase());
         names
     }
@@ -1010,46 +1459,115 @@ impl Players {
     }
 
     /// Queue a chat message for every player on `server` (everyone for
-    /// `None`) and count those that accepted it. Text that names a message
-    /// is rendered once per language among them, and each player gets
-    /// theirs.
+    /// `None`) and count those of this peer that accepted it; every other
+    /// peer delivers it to its own players. Text that names a message is
+    /// rendered once per language among the recipients, and each player
+    /// gets theirs.
     pub fn broadcast(&self, message: &Unrendered, server: Option<&str>) -> Result<usize, String> {
-        let matches = self.matcher(server.map(str::to_owned))?;
+        let servers = self.selection(server)?;
         if !message.varies() {
-            let message = message.render(None)?;
-            return Ok(self
-                .lock()
-                .values()
-                .filter(|entry| matches(entry))
-                .filter(|entry| {
-                    entry
-                        .actions
-                        .try_send(PlayerAction::Message(message.clone()))
-                        .is_ok()
-                })
-                .count());
+            let action = PlayerAction::Message(message.render(None)?);
+            let count = self.broadcast_local(servers.as_ref(), &action);
+            self.fan_out(servers.as_ref(), &action);
+            return Ok(count);
         }
+        let mut rendered = BTreeMap::new();
+        let count = self.broadcast_rendered(servers.as_ref(), message, &mut rendered)?;
+        for (remote, text) in self.remote_renders(servers.as_ref(), message, &mut rendered)? {
+            self.dispatch(
+                remote.player.peer,
+                Self::request(&remote, PlayerAction::Message(text)),
+            );
+        }
+        Ok(count)
+    }
+
+    /// [`Players::broadcast`] that waits for every peer and counts the
+    /// players of the whole network that accepted it.
+    pub async fn broadcast_routed(
+        &self,
+        message: &Unrendered,
+        server: Option<&str>,
+    ) -> Result<usize, String> {
+        let servers = self.selection(server)?;
+        let router = self.router();
+        if !message.varies() {
+            let action = PlayerAction::Message(message.render(None)?);
+            let mut count = self.broadcast_local(servers.as_ref(), &action);
+            let deliveries: Vec<_> = self
+                .broadcasts(servers.as_ref(), &action)
+                .into_iter()
+                .map(|(peer, request)| router.deliver(peer, request))
+                .collect();
+            for delivery in deliveries {
+                match delivery.await {
+                    Ok(WireResult::Count(delivered)) => count += delivered,
+                    Ok(_) => {}
+                    Err(error) => log_warn!("broadcast not delivered: {error}"),
+                }
+            }
+            return Ok(count);
+        }
+        let mut rendered = BTreeMap::new();
+        let mut count = self.broadcast_rendered(servers.as_ref(), message, &mut rendered)?;
+        // A peer delivers one action to all of its players, so text that
+        // differs by language goes to each of its players on its own.
+        let deliveries: Vec<_> = self
+            .remote_renders(servers.as_ref(), message, &mut rendered)?
+            .into_iter()
+            .map(|(remote, text)| {
+                router.deliver(
+                    remote.player.peer,
+                    Self::request(&remote, PlayerAction::Message(text)),
+                )
+            })
+            .collect();
+        for delivery in deliveries {
+            match delivery.await {
+                Ok(WireResult::Sent(true)) => count += 1,
+                Ok(_) => {}
+                Err(error) => log_warn!("broadcast not delivered: {error}"),
+            }
+        }
+        Ok(count)
+    }
+
+    /// `message` in `language`, rendered once per language in `rendered`.
+    /// The call was checked, so only size can fail a language; that
+    /// language gets the default text.
+    fn render_in(
+        message: &Unrendered,
+        language: Option<String>,
+        rendered: &mut BTreeMap<Option<String>, Text>,
+    ) -> Result<Text, String> {
+        if let Some(text) = rendered.get(&language) {
+            return Ok(text.clone());
+        }
+        let text = message
+            .render(language.as_deref())
+            .or_else(|_| message.render(None))?;
+        rendered.insert(language, text.clone());
+        Ok(text)
+    }
+
+    /// Queue `message` for this peer's players on `servers`, each in their
+    /// language, and count those that accepted it.
+    fn broadcast_rendered(
+        &self,
+        servers: Option<&BTreeSet<String>>,
+        message: &Unrendered,
+        rendered: &mut BTreeMap<Option<String>, Text>,
+    ) -> Result<usize, String> {
         // Rendered outside the lock: it reads the catalogue.
         let recipients: Vec<_> = self
             .lock()
             .values()
-            .filter(|entry| matches(entry))
+            .filter(|entry| servers.is_none_or(|servers| servers.contains(&entry.server)))
             .map(|entry| (entry.actions.clone(), Self::effective_language(entry)))
             .collect();
-        let mut rendered: BTreeMap<Option<String>, Text> = BTreeMap::new();
         let mut reached = 0;
         for (actions, language) in recipients {
-            let text = match rendered.get(&language) {
-                Some(text) => text.clone(),
-                None => {
-                    // The call was checked; only size can fail a language.
-                    let text = message
-                        .render(language.as_deref())
-                        .or_else(|_| message.render(None))?;
-                    rendered.insert(language, text.clone());
-                    text
-                }
-            };
+            let text = Self::render_in(message, language, rendered)?;
             if actions.try_send(PlayerAction::Message(text)).is_ok() {
                 reached += 1;
             }
@@ -1057,9 +1575,28 @@ impl Players {
         Ok(reached)
     }
 
+    /// `message` for each player of another peer on `servers`, in the
+    /// language that peer reported for them.
+    fn remote_renders(
+        &self,
+        servers: Option<&BTreeSet<String>>,
+        message: &Unrendered,
+        rendered: &mut BTreeMap<Option<String>, Text>,
+    ) -> Result<Vec<(RemotePlayer, Text)>, String> {
+        self.roster
+            .remote_players()
+            .into_iter()
+            .filter(|remote| servers.is_none_or(|servers| servers.contains(&remote.player.server)))
+            .map(|remote| {
+                let language = remote.player.language.as_deref().map(str::to_owned);
+                Self::render_in(message, language, rendered).map(|text| (remote, text))
+            })
+            .collect()
+    }
+
     /// Show, change or remove one boss bar, tracking the per-player limit.
     /// False means that the player is offline, too old for boss bars, or has
-    /// a full queue.
+    /// a full queue. The peer of a player on another peer checks the limit.
     pub fn boss_bar(
         &self,
         target: &str,
@@ -1069,77 +1606,483 @@ impl Players {
         if !super::token(name) {
             return Err("boss bar name must be 1..=64 lowercase letters, digits, '.', '_' or '-'");
         }
-        let mut sessions = self.lock();
-        let Some(id) = find(&sessions, target)?.map(|(id, _)| *id) else {
+        {
+            let mut sessions = self.lock();
+            if let Some(id) = find(&sessions, target)?.map(|(id, _)| *id) {
+                let entry = sessions.get_mut(&id).unwrap();
+                return queue_boss_bar(entry, name, bar);
+            }
+        }
+        let Some(remote) = self.remote(target) else {
             return Ok(false);
         };
-        let entry = sessions.get_mut(&id).unwrap();
-        if !crate::protocol::boss_bars_supported(entry.protocol) {
+        if !crate::protocol::boss_bars_supported(remote.player.protocol) {
             return Ok(false);
-        }
-        let shown = bar.is_some();
-        if shown
-            && !entry.boss_bars.contains(name)
-            && entry.boss_bars.len() >= crate::protocol::MAX_BOSS_BARS
-        {
-            return Err("a player can have at most 8 boss bars");
         }
         let action = PlayerAction::BossBar {
             name: name.to_owned(),
             bar,
         };
-        if entry.actions.try_send(action).is_err() {
-            return Ok(false);
-        }
-        if shown {
-            entry.boss_bars.insert(name.to_owned());
-        } else {
-            entry.boss_bars.remove(name);
-        }
-        Ok(true)
+        Ok(self.dispatch(remote.player.peer, Self::request(&remote, action)))
     }
 
     /// Show a dialog (`Some`) or close the one Rift showed (`None`). False
     /// means that the player is offline, older than 1.21.6, or has a full
-    /// queue.
+    /// queue. A dialog for a player on another peer brings its clicks back
+    /// here.
     pub fn dialog(
         &self,
         target: &str,
         dialog: Option<crate::dialog::Dialog>,
         owner: crate::dialog::Owner,
     ) -> std::io::Result<bool> {
-        let sessions = self.lock();
-        let entry = find(&sessions, target)
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
-        let Some((_, entry)) = entry else {
-            return Ok(false);
-        };
-        if !crate::protocol::dialogs_supported(entry.protocol) {
-            return Ok(false);
-        }
-        let action = match dialog {
+        let action = |owner| match dialog {
             Some(dialog) => PlayerAction::Dialog {
                 dialog: Arc::new(dialog),
                 owner,
             },
             None => PlayerAction::ClearDialog,
         };
-        Ok(entry.actions.try_send(action).is_ok())
+        {
+            let sessions = self.lock();
+            let entry = find(&sessions, target).map_err(|message| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+            })?;
+            if let Some((_, entry)) = entry {
+                if !crate::protocol::dialogs_supported(entry.protocol) {
+                    return Ok(false);
+                }
+                return Ok(entry.actions.try_send(action(owner)).is_ok());
+            }
+        }
+        let Some(remote) = self.remote(target) else {
+            return Ok(false);
+        };
+        if !crate::protocol::dialogs_supported(remote.player.protocol) {
+            return Ok(false);
+        }
+        let identity = self.roster.identity();
+        let owner = match owner {
+            crate::dialog::Owner::Script => crate::dialog::Owner::Remote {
+                peer: identity.peer,
+                incarnation: identity.incarnation,
+                plugin: None,
+            },
+            crate::dialog::Owner::Plugin(plugin) => crate::dialog::Owner::Remote {
+                peer: identity.peer,
+                incarnation: identity.incarnation,
+                plugin: Some(plugin),
+            },
+            forwarded @ crate::dialog::Owner::Remote { .. } => forwarded,
+        };
+        Ok(self.dispatch(remote.player.peer, Self::request(&remote, action(owner))))
     }
 
-    fn info(lua: &Lua, entry: &Entry, id: u64) -> mlua::Result<Table> {
+    /// Send a click on a dialog that peer `peer` showed back to it.
+    pub async fn route_dialog_click(
+        &self,
+        peer: u16,
+        incarnation: u64,
+        plugin: Option<String>,
+        context: super::Context,
+    ) -> std::io::Result<()> {
+        let request = WireRequest {
+            incarnation,
+            body: WireBody::DialogClick { plugin, context },
+        };
+        match self.router().deliver(peer, request).await {
+            Ok(WireResult::Sent(_)) => Ok(()),
+            Ok(WireResult::Stale) => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the peer that showed this dialog has restarted",
+            )),
+            Ok(WireResult::Error(reason)) => Err(std::io::Error::other(reason)),
+            Ok(other) => Err(std::io::Error::other(format!(
+                "unexpected answer to a dialog click: {other:?}"
+            ))),
+            Err(error) => Err(std::io::Error::other(error)),
+        }
+    }
+
+    /// Move another peer's session `connection` to a backend through its
+    /// control queue and wait for the answer, as `rift admin transfer` does
+    /// for this peer's sessions.
+    pub async fn route_transfer(
+        &self,
+        connection: u64,
+        backend: &str,
+        admin: bool,
+    ) -> Result<serde_json::Value, String> {
+        const GONE: &str = "player is no longer online; refresh status";
+        let Some(remote) = self.roster.remote_by_connection(connection) else {
+            return Err(GONE.into());
+        };
+        let request = WireRequest {
+            incarnation: remote.incarnation,
+            body: WireBody::Transfer {
+                connection,
+                backend: backend.to_owned(),
+                admin,
+            },
+        };
+        match self.router().deliver(remote.player.peer, request).await {
+            Ok(WireResult::Transfer(result)) => result,
+            Ok(WireResult::Stale) => Err(GONE.into()),
+            Ok(WireResult::Error(reason)) => Err(reason),
+            Ok(other) => Err(format!("unexpected answer to a transfer: {other:?}")),
+            Err(error) => Err(format!("the player's proxy is unreachable: {error}")),
+        }
+    }
+
+    /// Move another peer's player, by case-insensitive name, to `backend`
+    /// through their session's control queue, as BungeeCord `ConnectOther`
+    /// does for this peer's players. Does not wait; false when nobody of
+    /// that name is on another peer.
+    pub fn transfer_remote(&self, name: &str, backend: &str) -> bool {
+        let Some(remote) = self.roster.remote_by_name(name) else {
+            return false;
+        };
+        let request = WireRequest {
+            incarnation: remote.incarnation,
+            body: WireBody::Transfer {
+                connection: remote.player.connection,
+                backend: backend.to_owned(),
+                admin: false,
+            },
+        };
+        self.dispatch(remote.player.peer, request)
+    }
+
+    /// Run a request another peer routed here. A request for another
+    /// incarnation of this peer, or for a connection id this incarnation did
+    /// not mint, is refused: it is meant for a session that is gone.
+    pub async fn handle_remote(&self, request: WireRequest) -> WireResult {
+        let identity = self.roster.identity();
+        if request.incarnation != identity.incarnation {
+            return WireResult::Stale;
+        }
+        match request.body {
+            WireBody::Action {
+                connection,
+                uuid,
+                action,
+            } => {
+                if !identity.owns(connection) {
+                    return WireResult::Stale;
+                }
+                self.act(connection, &uuid, action)
+            }
+            WireBody::Broadcast { servers, action } => {
+                WireResult::Count(self.broadcast_local(servers.as_ref(), &action))
+            }
+            WireBody::Transfer {
+                connection,
+                backend,
+                admin,
+            } => {
+                if !identity.owns(connection) {
+                    return WireResult::Stale;
+                }
+                match self.hooks() {
+                    Some(hooks) => {
+                        WireResult::Transfer(hooks.transfer(connection, backend, admin).await)
+                    }
+                    None => WireResult::Error("this peer runs no sessions".into()),
+                }
+            }
+            WireBody::DialogClick { plugin, context } => {
+                let owner = match plugin {
+                    Some(plugin) => crate::dialog::Owner::Plugin(plugin),
+                    None => crate::dialog::Owner::Script,
+                };
+                match self.hooks() {
+                    Some(hooks) => match hooks.dialog(context, owner).await {
+                        Ok(()) => WireResult::Sent(true),
+                        Err(error) => WireResult::Error(error.to_string()),
+                    },
+                    None => WireResult::Error("this peer runs no extensions".into()),
+                }
+            }
+            WireBody::Contexts {
+                uuid,
+                server,
+                contexts,
+            } => {
+                let contexts = match rift_permissions::ContextSet::from_pairs(contexts) {
+                    Ok(contexts) => contexts,
+                    Err(error) => return WireResult::Error(error.to_string()),
+                };
+                match self.permissions.report_contexts(
+                    rift_permissions::Uuid::from_bytes(uuid),
+                    &server,
+                    contexts,
+                ) {
+                    Ok(accepted) => WireResult::Sent(accepted),
+                    Err(error) => WireResult::Error(error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// The peer holding player `uuid` and the incarnation to address, when
+    /// it is another peer: from the player's attributes, else from the
+    /// claims (a login whose attributes have not arrived yet).
+    fn owner(&self, uuid: &[u8; 16]) -> Option<(u16, u64)> {
+        if let Some(remote) = self.roster.remote_by_uuid(uuid) {
+            return Some((remote.player.peer, remote.incarnation));
+        }
+        let own = self.roster.identity();
+        if !own.is_clustered() {
+            return None;
+        }
+        Claims::live(&*self.roster.claims())
+            .into_iter()
+            .find(|record| record.uuid == Some(*uuid) && record.holder.peer != own.peer)
+            .map(|record| (record.holder.peer, record.holder.incarnation))
+    }
+
+    /// The backend of player `uuid` when another peer holds them.
+    pub fn remote_server(&self, uuid: &[u8; 16]) -> Option<String> {
+        self.roster
+            .remote_by_uuid(uuid)
+            .map(|remote| remote.player.server)
+    }
+
+    /// Hand permission contexts that backend `server` reported to the peer
+    /// holding player `uuid`, and wait for its answer: whether it accepted
+    /// them (the player is on `server` there). `None` when no other peer
+    /// holds the player.
+    pub async fn route_contexts(
+        &self,
+        uuid: [u8; 16],
+        server: &str,
+        contexts: &rift_permissions::ContextSet,
+    ) -> Option<Result<bool, String>> {
+        let (peer, incarnation) = self.owner(&uuid)?;
+        let request = WireRequest {
+            incarnation,
+            body: WireBody::Contexts {
+                uuid,
+                server: server.to_owned(),
+                contexts: contexts
+                    .iter()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+            },
+        };
+        Some(match self.router().deliver(peer, request).await {
+            Ok(WireResult::Sent(accepted)) => Ok(accepted),
+            Ok(WireResult::Stale) => Ok(false),
+            Ok(WireResult::Error(reason)) => Err(reason),
+            Ok(other) => Err(format!("unexpected answer to a context report: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        })
+    }
+
+    /// [`Players::route_contexts`] for a blocking worker thread of the
+    /// runtime, such as the permission bus's request handlers. `None` as
+    /// well when called outside a runtime.
+    pub fn route_contexts_blocking(
+        &self,
+        uuid: [u8; 16],
+        server: &str,
+        contexts: &rift_permissions::ContextSet,
+    ) -> Option<Result<bool, String>> {
+        self.owner(&uuid)?;
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        runtime.block_on(self.route_contexts(uuid, server, contexts))
+    }
+
+    /// Queue `action` for this peer's session `connection` of player `uuid`.
+    fn act(&self, connection: u64, uuid: &[u8; 16], action: PlayerAction) -> WireResult {
+        let mut sessions = self.lock();
+        let Some(entry) = sessions
+            .get_mut(&connection)
+            .filter(|entry| entry.key == *uuid)
+        else {
+            return WireResult::Sent(false);
+        };
+        match action {
+            PlayerAction::BossBar { name, bar } => match queue_boss_bar(entry, &name, bar) {
+                Ok(sent) => WireResult::Sent(sent),
+                Err(reason) => WireResult::Error(reason.into()),
+            },
+            PlayerAction::Dialog { .. } | PlayerAction::ClearDialog
+                if !crate::protocol::dialogs_supported(entry.protocol) =>
+            {
+                WireResult::Sent(false)
+            }
+            action => WireResult::Sent(entry.actions.try_send(action).is_ok()),
+        }
+    }
+
+    /// Queue a kick for this peer's player `uuid`; whether a session took it.
+    fn kick(&self, uuid: &[u8; 16], reason: Text) -> bool {
+        self.lock()
+            .values()
+            .find(|entry| entry.key == *uuid)
+            .is_some_and(|entry| entry.actions.try_send(PlayerAction::Kick(reason)).is_ok())
+    }
+
+    /// Disconnect every player of this peer with `message`: a peer that
+    /// stayed cut off from the cluster for `cluster.partition_grace` lets its
+    /// players log in again through a healthy peer. Returns how many
+    /// sessions took the kick.
+    pub async fn disconnect_all(&self, message: Text) -> usize {
+        let sessions: Vec<_> = self
+            .lock()
+            .values()
+            .map(|entry| entry.actions.clone())
+            .collect();
+        let mut kicked = 0;
+        for actions in sessions {
+            let kick = actions.send(PlayerAction::Kick(message.clone()));
+            if matches!(
+                tokio::time::timeout(DISCONNECT_WAIT, kick).await,
+                Ok(Ok(()))
+            ) {
+                kicked += 1;
+            }
+        }
+        kicked
+    }
+
+    /// How many players are connected to this process.
+    pub fn local_sessions(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Send every player of this peer elsewhere as the peer drains: clients
+    /// that know the Transfer packet (1.20.5+) go to `targets` (`host`,
+    /// `port`) in turn, so they spread over the other peers; the others, and
+    /// everyone when there is no target, are disconnected with `message`.
+    /// A session whose client turns out not to be transferable when the
+    /// action arrives is disconnected with `message` as well.
+    pub async fn hand_off(&self, targets: &[(String, u16)], message: Text) -> HandOff {
+        let sessions: Vec<_> = self
+            .lock()
+            .values()
+            .map(|entry| (entry.protocol, entry.actions.clone()))
+            .collect();
+        let mut done = HandOff::default();
+        let mut next = 0;
+        for (protocol, actions) in sessions {
+            let transferable = crate::protocol::ProtocolVersion::new(protocol)
+                .is_ok_and(|version| version.has_transfer());
+            let action = match targets.get(next % targets.len().max(1)) {
+                Some((host, port)) if transferable => {
+                    next += 1;
+                    PlayerAction::Handoff {
+                        host: host.clone(),
+                        port: *port,
+                        fallback: message.clone(),
+                    }
+                }
+                _ => PlayerAction::Kick(message.clone()),
+            };
+            let transfer = matches!(action, PlayerAction::Handoff { .. });
+            if matches!(
+                tokio::time::timeout(DISCONNECT_WAIT, actions.send(action)).await,
+                Ok(Ok(()))
+            ) {
+                if transfer {
+                    done.transferred += 1;
+                } else {
+                    done.disconnected += 1;
+                }
+            }
+        }
+        done
+    }
+
+    /// Claim this peer's players again after it rejoined the cluster. A
+    /// player who logged in elsewhere meanwhile is disconnected here.
+    /// Returns how many sessions were disconnected.
+    pub async fn reclaim(&self) -> usize {
+        let claims = self.roster.claims();
+        let mut disconnected = 0;
+        for record in self.roster.local_claims() {
+            let Some(uuid) = record.uuid else {
+                continue;
+            };
+            let claimed = Claims::propose(
+                &*claims,
+                ClaimOp::Reclaim {
+                    key: record.key,
+                    name: record.name,
+                    uuid,
+                    holder: record.holder,
+                },
+            );
+            match claimed.await {
+                Err(Refusal::AlreadyConnected | Refusal::DuplicateName) => {
+                    if self.roster.lose(&uuid)
+                        && self.kick(&uuid, catalog::notice(Notice::LoginAlreadyConnected))
+                    {
+                        disconnected += 1;
+                    }
+                }
+                Err(refusal) => log_warn!("reclaiming a player failed: {refusal}"),
+                Ok(()) => {}
+            }
+        }
+        disconnected
+    }
+
+    /// Follow one change of the claims: another peer's player whose claim
+    /// was released leaves the roster, and a player of this peer whose claim
+    /// somebody else now holds is disconnected. Returns how many sessions
+    /// were disconnected.
+    pub fn apply_claim_change(&self, change: &ClaimChange) -> usize {
+        self.roster
+            .apply_claim_change(change)
+            .iter()
+            .filter(|uuid| self.kick(uuid, catalog::notice(Notice::LoginAlreadyConnected)))
+            .count()
+    }
+
+    /// Compare the roster with every live claim, after missing changes.
+    pub fn reconcile_claims(&self) -> usize {
+        let live = Claims::live(&*self.roster.claims());
+        self.roster
+            .reconcile(&live)
+            .iter()
+            .filter(|uuid| self.kick(uuid, catalog::notice(Notice::LoginAlreadyConnected)))
+            .count()
+    }
+
+    /// Follow the claims until they go away; see
+    /// [`Players::apply_claim_change`]. Install the claims first.
+    pub async fn follow_claims(self) {
+        use tokio::sync::broadcast::error::RecvError;
+        let mut changes = Claims::subscribe(&*self.roster.claims());
+        loop {
+            match changes.recv().await {
+                Ok(change) => {
+                    self.apply_claim_change(&change);
+                }
+                Err(RecvError::Lagged(_)) => {
+                    self.reconcile_claims();
+                }
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
+
+    /// The table Lua sees for a player.
+    fn lua_info(lua: &Lua, info: &crate::plugins::api::PlayerInfo) -> mlua::Result<Table> {
         let player = lua.create_table()?;
-        player.raw_set("uuid", entry.uuid.as_str())?;
-        player.raw_set("name", entry.name.as_str())?;
-        player.raw_set("server", entry.server.as_str())?;
-        player.raw_set("connection_id", id.to_string())?;
-        player.raw_set("protocol", entry.protocol)?;
-        player.raw_set("visible_to", entry.visible_to.as_deref())?;
-        player.raw_set("locale", entry.locale.as_deref())?;
-        player.raw_set("language", Self::effective_language(entry))?;
-        player.raw_set("ip", entry.ip.as_str())?;
-        let properties = lua.create_table_with_capacity(entry.properties.len(), 0)?;
-        for property in &entry.properties {
+        player.raw_set("uuid", info.uuid.as_str())?;
+        player.raw_set("name", info.name.as_str())?;
+        player.raw_set("server", info.server.as_str())?;
+        player.raw_set("connection_id", info.connection_id.to_string())?;
+        player.raw_set("protocol", info.protocol)?;
+        player.raw_set("visible_to", info.visible_to.as_deref())?;
+        player.raw_set("locale", info.locale.as_deref())?;
+        player.raw_set("language", info.language.as_deref())?;
+        player.raw_set("ip", info.ip.as_str())?;
+        let properties = lua.create_table_with_capacity(info.properties.len(), 0)?;
+        for property in &info.properties {
             let item = lua.create_table()?;
             item.raw_set("name", property.name.as_str())?;
             item.raw_set("value", property.value.as_str())?;
@@ -1147,6 +2090,9 @@ impl Players {
             properties.raw_push(item)?;
         }
         player.raw_set("properties", properties)?;
+        if let Some(peer) = &info.peer {
+            player.raw_set("peer", peer.as_str())?;
+        }
         Ok(player)
     }
 
@@ -1172,12 +2118,12 @@ impl Players {
             "list",
             lua.create_function(move |lua, server: Option<String>| {
                 crate::script::check_deadline(deadline)?;
-                let matches = players.matcher(server).map_err(error)?;
                 let list = lua.create_table()?;
-                for (id, entry) in players.lock().iter() {
-                    if matches(entry) {
-                        list.raw_push(Self::info(lua, entry, *id)?)?;
-                    }
+                for info in players
+                    .list(server.as_deref())
+                    .map_err(|message| error(&message))?
+                {
+                    list.raw_push(Self::lua_info(lua, &info)?)?;
                 }
                 Ok(list)
             })?,
@@ -1187,10 +2133,10 @@ impl Players {
             "get",
             lua.create_function(move |lua, target: String| {
                 crate::script::check_deadline(deadline)?;
-                let sessions = players.lock();
-                find(&sessions, &target)
-                    .map_err(error)?
-                    .map(|(id, entry)| Self::info(lua, entry, *id))
+                players
+                    .get(&target)
+                    .map_err(|message| error(&message))?
+                    .map(|info| Self::lua_info(lua, &info))
                     .transpose()
             })?,
         )?;
@@ -1256,19 +2202,7 @@ impl Players {
             lua.create_function(move |lua, prefix: Option<String>| {
                 crate::script::check_deadline(deadline)?;
                 let prefix = prefix.unwrap_or_default();
-                let mut names: Vec<_> = players
-                    .lock()
-                    .values()
-                    .filter(|entry| {
-                        entry
-                            .name
-                            .get(..prefix.len())
-                            .is_some_and(|start| start.eq_ignore_ascii_case(&prefix))
-                    })
-                    .map(|entry| entry.name.clone())
-                    .collect();
-                names.sort_by_key(|name| name.to_ascii_lowercase());
-                lua.create_sequence_from(names)
+                lua.create_sequence_from(players.names_with_prefix(&prefix))
             })?,
         )?;
 

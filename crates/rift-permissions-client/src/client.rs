@@ -109,10 +109,41 @@ struct Shared {
 
 /// Where and as whom to connect.
 struct Target {
-    address: String,
-    server_name: String,
+    /// Every address with the name its certificate is verified for, the
+    /// preferred one first.
+    servers: Vec<(String, String)>,
+    /// Which of `servers` to try first.
+    next: AtomicUsize,
     tls: quinn::ClientConfig,
     token: String,
+}
+
+/// The host of `host:port`, without IPv6 brackets.
+fn host_of(address: &str) -> &str {
+    address
+        .rsplit_once(':')
+        .map_or(address, |(host, _)| host)
+        .trim_matches(['[', ']'])
+}
+
+/// The addresses to try with their TLS names. A server name that was only
+/// derived from `address` is derived from each address in the same way, so
+/// each peer of a cluster can carry its own name.
+fn servers(config: &Config) -> Vec<(String, String)> {
+    let derived = config.server_name.is_empty() || config.server_name == host_of(&config.address);
+    let mut servers = vec![(config.address.clone(), config.server_name.clone())];
+    for address in &config.addresses {
+        if servers.iter().any(|(known, _)| known == address) {
+            continue;
+        }
+        let name = if derived {
+            host_of(address).to_owned()
+        } else {
+            config.server_name.clone()
+        };
+        servers.push((address.clone(), name));
+    }
+    servers
 }
 
 struct Session {
@@ -170,6 +201,7 @@ impl Client {
             }
         }
         let tls = rift_messaging::tls_client_config(&config.ca).map_err(config_error)?;
+        let servers = servers(&config);
         let (snapshot_path, fallback) = match config.offline_policy {
             OfflinePolicy::Deny => (None, None),
             OfflinePolicy::LastSnapshot(path) => (Some(path), None),
@@ -200,8 +232,8 @@ impl Client {
             shared.load_snapshot(path);
         }
         let target = Target {
-            address: config.address,
-            server_name: config.server_name,
+            servers,
+            next: AtomicUsize::new(0),
             tls,
             token: token.into(),
         };
@@ -631,15 +663,16 @@ impl Shared {
         let mut reported: Option<Instant> = None;
         loop {
             match self.connect(&target).await {
-                Ok(session) => {
+                Ok((session, address)) => {
                     info!(
-                        "rift-permissions: connected to {} at revision {}",
-                        target.address,
+                        "rift-permissions: connected to {address} at revision {}",
                         self.replica.revision()
                     );
                     backoff = MIN_BACKOFF;
                     let error = self.serve(session).await;
                     self.disconnect();
+                    // Try the next address first: this one may be gone.
+                    target.next.fetch_add(1, Ordering::Relaxed);
                     warn!(
                         "rift-permissions: connection lost ({error}); serving revision {} from the replica",
                         self.replica.revision()
@@ -663,25 +696,45 @@ impl Shared {
         }
     }
 
-    async fn connect(self: &Arc<Self>, target: &Target) -> Result<Session, Error> {
-        let address = tokio::net::lookup_host(&target.address)
+    /// Connect to the first of the target's addresses that accepts,
+    /// starting with the preferred one. Returns the session and the address.
+    async fn connect(self: &Arc<Self>, target: &Target) -> Result<(Session, String), Error> {
+        let count = target.servers.len();
+        let start = target.next.load(Ordering::Relaxed);
+        let mut last = None;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let (address, server_name) = &target.servers[index];
+            match self.connect_to(target, address, server_name).await {
+                Ok(session) => {
+                    target.next.store(index, Ordering::Relaxed);
+                    return Ok((session, address.clone()));
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Config("no proxy address".into())))
+    }
+
+    async fn connect_to(
+        self: &Arc<Self>,
+        target: &Target,
+        address: &str,
+        server_name: &str,
+    ) -> Result<Session, Error> {
+        let resolved = tokio::net::lookup_host(address)
             .await
             .map_err(Error::Transport)?
             .next()
             .ok_or_else(|| {
                 Error::Transport(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("{} resolves to no address", target.address),
+                    format!("{address} resolves to no address"),
                 ))
             })?;
-        let bus = Bus::connect(
-            address,
-            &target.server_name,
-            target.tls.clone(),
-            &target.token,
-        )
-        .await
-        .map_err(Error::Transport)?;
+        let bus = Bus::connect(resolved, server_name, target.tls.clone(), &target.token)
+            .await
+            .map_err(Error::Transport)?;
         // Subscribe before `hello`, so no update between the two is lost.
         let session = Session {
             updates: bus

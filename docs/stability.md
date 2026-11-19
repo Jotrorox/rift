@@ -39,6 +39,7 @@ the minor version carries the compatibility promise:
 | Messaging protocol | 1 | Additive within a protocol version. See the [messaging protocol](messaging-protocol.md). |
 | Permissions protocol | 1 | Additive within a protocol version. See the [permissions protocol](permissions-protocol.md#versioning). |
 | Node agent protocol | Features the agent advertises | Additive: commands and fields are only added. The controller uses an addition only on agents that advertise its feature. See [controller and node agents](#controller-and-node-agents). |
+| Cluster peers | The log entry kinds and schema versions every member announces | Peers of different releases work together during a rolling upgrade, with the features of the oldest member; new ones take effect once every member supports them. See [cluster upgrades](clustering.md#upgrades). |
 | HTTP API | Rift's version | Documented endpoints and fields are kept; fields may be added. See the [HTTP API](http-api.md). |
 | Java artifacts (`io.github.jotrorox.rift`) | Rift's version | Source and binary compatible across patch releases. |
 | Rust, Go and C SDKs | The plugin contract version they implement | Source compatible on the `0.2` track. |

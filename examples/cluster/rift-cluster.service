@@ -1,0 +1,71 @@
+# The unit of one cluster peer (docs/clustering.md, docs/deployment.md#run-a-cluster).
+# Install it on every peer as /etc/systemd/system/rift.service.
+#
+# A peer writes its rift.lua when a deployment arrives and keeps its Raft log,
+# snapshots and template blobs beside it, so rift.lua and cluster.toml live in
+# the state directory /var/lib/rift, owned by rift:
+#   /var/lib/rift/cluster.toml       this peer's copy of eu-1.toml, eu-2.toml, ...
+#   /var/lib/rift/rift.lua           the shared configuration (absent on a new peer)
+# /etc/rift/cluster/: ca.pem and this peer's certificate and key, readable by rift.
+# /etc/rift/cluster.env, owned by root with mode 0600:
+#   RIFT_CLUSTER_TOKEN=<the same token on every peer>
+#   RIFT_ADMIN_TOKEN=..., RIFT_WEB_TOKEN=..., RIFT_FORWARDING_SECRET=...
+[Unit]
+Description=Rift Minecraft session proxy (cluster peer)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=rift
+Group=rift
+WorkingDirectory=/var/lib/rift
+StateDirectory=rift
+StateDirectoryMode=0700
+EnvironmentFile=/etc/rift/cluster.env
+# No `rift check` before the start: a new peer has no rift.lua until the
+# cluster sends it one.
+ExecStart=/usr/local/bin/rift --config /var/lib/rift/rift.lua
+# A reload of a hand-edited rift.lua deploys it to every peer.
+ExecReload=/usr/local/bin/rift check /var/lib/rift/rift.lua
+ExecReload=/bin/kill -HUP $MAINPID
+# SIGTERM drains the peer: its 1.20.5+ players move to another peer's
+# public_address, the others get a reconnect message.
+KillSignal=SIGTERM
+# Stopping the unit also kills this peer's servers, except named servers with
+# keep_running, which need KillMode=process (docs/kept-servers.md).
+KillMode=control-group
+# Must exceed the five-second transfer wait plus shutdown_timeout_ms (30 s).
+TimeoutStopSec=60s
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=8192
+Delegate=memory
+DelegateSubgroup=rift
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+# Left out on purpose, as in examples/rift.service: MemoryDenyWriteExecute,
+# ProtectKernelTunables, ProtectControlGroups and a SystemCallFilter.
+
+[Install]
+WantedBy=multi-user.target

@@ -45,10 +45,26 @@ The bus follows NATS-style subjects, queue groups and request/reply.
 > Rift uses its own [wire protocol](messaging-protocol.md). Existing NATS
 > clients do not speak it.
 
-The broker runs in a single process, without clustering, replication,
-transactions or exactly-once processing. For those systems' full semantics,
-see the official [NATS concepts](https://docs.nats.io/nats-concepts/overview)
-and [JetStream documentation](https://docs.nats.io/nats-concepts/jetstream).
+The broker runs in one process, without replication, transactions or
+exactly-once processing. For those systems' full semantics, see the official
+[NATS concepts](https://docs.nats.io/nats-concepts/overview) and
+[JetStream documentation](https://docs.nats.io/nats-concepts/jetstream).
+
+### In a cluster
+
+The peers of a [cluster](clustering.md) each run a broker, and the brokers
+federate: a message reaches every subscriber in the cluster that should
+see it, forwarded at most once to each peer. Which subjects cross peers
+depends on their [scope](clustering.md#subject-scopes): Rift's request
+subjects are answered by the peer a client is connected to, events about
+replicated state come from each subscriber's own peer, session events come
+from the peer where they happen (Lua and plugins see only their own
+peer's, so plugin code sees each event once), and user subjects cross
+peers. A subscription to a user subject can ask for `"local"` scope to hear
+only its own peer; the default is `"cluster"`. A queue group delivers each
+message to one member in the whole cluster, preferring a member on the
+publisher's peer. See [the protocol](messaging-protocol.md#clusters) for
+what clients notice.
 
 ## Use the bus in process
 
@@ -230,6 +246,12 @@ bus.publish("game.player.join", "hello".getBytes(StandardCharsets.UTF_8));
 
 - The client connects in the background, reconnects with backoff and
   re-establishes its subscriptions.
+- For a cluster, add every peer with `addAddress(host, port)` (or
+  `addAddress(host, port, serverName)`); `fromEnvironment()` reads them
+  from `RIFT_BUS_ADDRESSES`. After losing a connection the client moves on
+  to the next address at once.
+- `subscribe(pattern, queue, SubscriptionScope.LOCAL, handler)` hears only
+  the peer the client is connected to.
 - Every operation returns a `CompletableFuture` that completes on a client
   thread, never on a server thread.
 - Publications and requests fail fast while disconnected and are never

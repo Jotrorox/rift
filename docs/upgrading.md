@@ -19,6 +19,11 @@ A graceful stop is available through `rift admin shutdown`,
 Look for `rift: draining ...` followed by `rift: shutdown complete`.
 `shutdown deadline reached` means the drain expired.
 
+A [cluster](clustering.md) peer drains the same way, but first hands its
+leadership away and sends its 1.20.5+ players to other peers with the
+Transfer packet; older clients get a reconnect message. See
+[rolling restarts](clustering.md#rolling-restarts).
+
 > [!WARNING]
 > Keep the supervisor's stop deadline longer than Rift's drain: 40 seconds in
 > the examples.
@@ -108,6 +113,38 @@ Agents keep no database, so they need no backup. To roll back within the same
 minor release, the controller can go back on its own. To roll back across a
 minor release, roll back the agents as well: an older controller does not
 support agents from a newer minor release.
+
+## Upgrade a cluster
+
+Upgrade a [cluster](clustering.md) one peer at a time, so the others keep
+the network running and a majority of voters stays up:
+
+```sh
+# Before the first peer, on any peer: a backup to go back to.
+rift admin cluster backup /var/backups/rift/cluster-before-upgrade.sqlite3
+# On each peer in turn:
+sudo systemctl stop rift               # drains; players move to other peers
+sudo install -m 0755 ./rift /usr/local/bin/rift
+sudo systemctl start rift
+rift admin cluster status --leader     # wait: the peer is up and not behind
+```
+
+- **Mixed releases** work together with the features of the oldest member.
+  New kinds of log entries and schema migrations are enabled only after
+  every member supports them, so they take effect once the last peer is
+  upgraded. A member that is down holds them back until it is upgraded or
+  removed.
+- **Check** with `rift check --strict` on each peer: it reports peers still
+  on another version.
+- **Going back.** Before the last peer is upgraded, an upgraded peer can run
+  the previous binary again. Once new features or a schema migration are
+  enabled, an older peer is refused when it connects, and going back means
+  starting a new cluster from the backup with
+  `rift cluster init --from-backup` (see
+  [backup and recovery](clustering.md#backup-and-recovery)). Changes made
+  since the backup are lost, as with a single Rift's database copy.
+- **Node agents** are upgraded after the peers, as under
+  [upgrade nodes](#upgrade-nodes).
 
 ## Roll back
 
