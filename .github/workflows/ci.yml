@@ -804,7 +804,9 @@ jobs:
   build-linux:
     name: Build shared Linux test executable
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The release build takes about ten minutes while the shared cache
+    # lacks a branch's new dependencies (openraft with clustering).
+    timeout-minutes: 20
     outputs:
       compatibility: ${{ steps.compatibility.outputs.servers }}
     steps:
