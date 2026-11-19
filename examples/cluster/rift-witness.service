@@ -1,0 +1,49 @@
+# The unit of a cluster witness (docs/clustering.md#voters-learners-and-witnesses).
+# Install it on the witness host as /etc/systemd/system/rift-witness.service,
+# with witness.toml as /var/lib/rift/cluster.toml, the certificates in
+# /etc/rift/cluster/ and /etc/rift/cluster.env (root, mode 0600) holding
+# RIFT_CLUSTER_TOKEN=<the same token on every peer>.
+[Unit]
+Description=Rift cluster witness
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=rift
+Group=rift
+WorkingDirectory=/var/lib/rift
+StateDirectory=rift
+StateDirectoryMode=0700
+EnvironmentFile=/etc/rift/cluster.env
+ExecStart=/usr/local/bin/rift witness --config /var/lib/rift/rift.lua
+# rift witness stops cleanly on Ctrl-C (SIGINT).
+KillSignal=SIGINT
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target
