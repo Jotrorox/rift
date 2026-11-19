@@ -59,10 +59,19 @@ Where you can write it:
 | --- | --- |
 | `rift.text.mini(markup, args)` | A component table. `args` maps names to strings or numbers (shown as written), component tables or [styles](#style-arguments) |
 | `rift.text.legacy(text, marker)` | A component table from `&` codes (or another marker) |
-| `rift.text.to_legacy(text)` | A string with `§` codes |
-| `rift.text.plain(text)` | The words without formatting |
-| `rift.text.to_mini(text)` | Markup for a component |
+| `rift.text.message(key, args)` | The [`message` object](#send-a-message) as a table, `{ message = key, args = args }`. It stays unresolved until a call renders it for its recipient |
+| `rift.text.render(text, language)` | A component table with markup, legacy codes and messages resolved, in `language` or the default. Plain text stays a string |
+| `rift.text.to_legacy(text, language)` | A string with `§` codes |
+| `rift.text.plain(text, language)` | The words without formatting |
+| `rift.text.to_mini(text, language)` | Markup for a component |
 | `rift.text.escape(text)` | `text` escaped so it can be spliced into markup safely |
+
+`language` is optional and only matters for messages in the text: a tag such
+as `de` or `de_de`, without it the default. An invalid tag is an error. In a
+persistent Lua plugin a key without `:` is one of the plugin's own messages;
+in `rift.lua` and script-mode plugins keys are qualified. WebAssembly plugins
+have the same functions in the contract's `text` interface (since
+`rift:plugin@0.2.1`).
 
 ## Markup tags
 
@@ -363,7 +372,7 @@ component works, like `mini`:
 
 ```lua
 -- A persistent Lua plugin: its own message, in the target's language.
-rift.players.message(player, { message = "invited", args = { from = ctx.name } })
+rift.players.message(player, rift.text.message("invited", { from = ctx.name }))
 -- rift.lua, a script-mode plugin or a bus service: a qualified key.
 rift.players.message(player, { message = "party:invited", args = { from = ctx.name } })
 ```
@@ -404,6 +413,7 @@ reports: the one set with `players.set-language`, else the client's locale
 | A deferred answer (`background.resolve`) | The player the deferred event is about |
 | `status` (MOTD, version, sample), a console command's reply | The default: a ping carries no locale |
 | Configuration text (`server_list`, `tab_list`, `deny_message`, ...) | The default, rendered once when the configuration loads |
+| `rift.text.render`, `plain`, `to_legacy`, `to_mini` and the `text` interface | The `language` argument, else the default, wherever they are called (in a hook, `init` or a background worker) |
 
 Text never carries an unresolved message further into Rift: a tab list or a
 boss bar keeps the text it was given in the target's language until it is

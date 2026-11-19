@@ -1233,6 +1233,73 @@ static inline bool rift_set_language(const rift_string_t *target, const char *la
 }
 
 // ---------------------------------------------------------------------------
+// Text conversions (rift:plugin 0.2.1: set `min_api = "0.2.1"` in plugin.toml)
+//
+// What `rift.text` does in Lua: Rift converts `text` (borrowed) with markup,
+// legacy codes and messages resolved, the plugin's own messages by
+// unqualified key, in `language` ("de", "de_de"; NULL for the default). On
+// success `*out` holds the result, owned by you (free it with
+// `rift_string_free`), and the function returns true. On failure it returns
+// false with `*out` empty; the host's error goes to `*err`, owned by you,
+// or, when `err` is NULL, to the log at warn level. Use `rift_text_render` in
+// `init` to check a template from the configuration:
+//
+//   // In exports_rift_plugin_handler_init(config_json, ret, err):
+//   rift_string_t json;
+//   if (!rift_text_render(rift_text_json(template_json), NULL, &json, err)) {
+//     return false;  // init fails with the host's error
+//   }
+//   rift_string_free(&json);
+
+static inline bool rift__text_call(bool (*call)(rift_plugin_text_text_t *, rift_string_t *, rift_string_t *,
+                                                rift_string_t *),
+                                   const char *function, rift_text_t text, const char *language,
+                                   rift_string_t *out, rift_string_t *err) {
+  rift_string_t lang = rift_str(language), failure = {NULL, 0};
+  out->ptr = NULL;
+  out->len = 0;
+  if (err) {
+    err->ptr = NULL;
+    err->len = 0;
+  }
+  if (!call(&text, language ? &lang : NULL, out, &failure)) {
+    out->ptr = NULL;
+    out->len = 0;
+    if (err) {
+      *err = failure;
+    } else {
+      rift__host_error(function, &failure);
+    }
+    return false;
+  }
+  return true;
+}
+
+// The JSON text component `text` becomes; plain text becomes a JSON string.
+static inline bool rift_text_render(rift_text_t text, const char *language, rift_string_t *out,
+                                    rift_string_t *err) {
+  return rift__text_call(rift_plugin_text_render, "text.render", text, language, out, err);
+}
+
+// The words of `text` without formatting.
+static inline bool rift_text_to_plain(rift_text_t text, const char *language, rift_string_t *out,
+                                      rift_string_t *err) {
+  return rift__text_call(rift_plugin_text_plain, "text.plain", text, language, out, err);
+}
+
+// `text` with `§` codes, for surfaces that only take strings.
+static inline bool rift_text_to_legacy(rift_text_t text, const char *language, rift_string_t *out,
+                                       rift_string_t *err) {
+  return rift__text_call(rift_plugin_text_to_legacy, "text.to-legacy", text, language, out, err);
+}
+
+// Markup that writes `text`; plain text comes back escaped.
+static inline bool rift_text_to_mini(rift_text_t text, const char *language, rift_string_t *out,
+                                     rift_string_t *err) {
+  return rift__text_call(rift_plugin_text_to_mini, "text.to-mini", text, language, out, err);
+}
+
+// ---------------------------------------------------------------------------
 // Permissions
 
 // Adds the user to `group`, until `expires_at` Unix seconds (replacing an

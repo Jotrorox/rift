@@ -1,4 +1,4 @@
-//! Host bindings for `rift:plugin@0.2.0`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.2.1`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
@@ -12,7 +12,8 @@ wasmtime::component::bindgen!({
 });
 
 use self::rift::plugin::{
-    background, bus, log, meta, permissions, players, servers, store, timers, types,
+    background, bus, log, meta, permissions, players, servers, store, text as text_api, timers,
+    types,
 };
 
 /// Guest paths of the granted directories (`meta.data-dir`, `meta.config-dir`).
@@ -683,6 +684,40 @@ impl meta::Host for State {
 
     fn api(&mut self) -> String {
         self.services.meta().api().to_owned()
+    }
+}
+
+impl State {
+    /// One function of the `text` interface (see [`Services::text`]).
+    ///
+    /// [`Services::text`]: crate::plugins::services::Services::text
+    fn write_text(
+        &mut self,
+        text: types::Text,
+        language: Option<String>,
+        form: crate::text::Form,
+        label: &str,
+    ) -> Result<String, String> {
+        let text = text_as_written(text, label)?;
+        self.services.text(&text, language.as_deref(), form, label)
+    }
+}
+
+impl text_api::Host for State {
+    fn render(&mut self, text: types::Text, language: Option<String>) -> Result<String, String> {
+        self.write_text(text, language, crate::text::Form::Json, "text.render")
+    }
+
+    fn plain(&mut self, text: types::Text, language: Option<String>) -> Result<String, String> {
+        self.write_text(text, language, crate::text::Form::Plain, "text.plain")
+    }
+
+    fn to_legacy(&mut self, text: types::Text, language: Option<String>) -> Result<String, String> {
+        self.write_text(text, language, crate::text::Form::Legacy, "text.to-legacy")
+    }
+
+    fn to_mini(&mut self, text: types::Text, language: Option<String>) -> Result<String, String> {
+        self.write_text(text, language, crate::text::Form::Mini, "text.to-mini")
     }
 }
 

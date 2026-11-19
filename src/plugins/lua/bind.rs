@@ -376,13 +376,13 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
-    // The exact `rift:plugin` version, such as "0.2.0".
+    // The exact `rift:plugin` version, such as "0.2.1".
     meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 
     registration(lua, &rift, state)?;
     helpers(lua, &rift, state)?;
-    crate::text::lua::install(lua, &rift)?;
+    crate::text::lua::install(lua, &rift, Some(spec.name.as_str()))?;
     rift.raw_set("players", players(lua, state)?)?;
     rift.raw_set("store", store(lua, state)?)?;
     rift.raw_set("permissions", permissions(lua, state)?)?;

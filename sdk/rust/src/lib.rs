@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.2.0`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.2.1`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -74,8 +74,8 @@
 //! # Host API
 //!
 //! [`players`], [`store`], [`permissions`], [`bus`], [`servers`], [`timers`],
-//! [`background`], [`log`] and [`meta`] mirror the WIT interfaces of the same
-//! names. Errors are the host's message as a `String`. [`log`] also installs
+//! [`background`], [`log`], [`meta`] and [`text`] mirror the WIT interfaces of
+//! the same names. Errors are the host's message as a `String`. [`log`] also installs
 //! a [`::log`] logger before `init`, so `log::info!` and friends reach Rift's
 //! log. Plugin configuration arrives as JSON; decode it with [`config()`].
 //!
@@ -280,7 +280,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.2.0",
+        world: "rift:plugin/plugin@0.2.1",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -926,7 +926,7 @@ pub mod background {
 }
 
 /// Plugin metadata and clocks. `api` is the `rift:plugin` version the host
-/// implements, such as `0.2.0`.
+/// implements, such as `0.2.1`.
 pub mod meta {
     pub use crate::bindings::rift::plugin::meta::{
         api, clock, config_dir, data_dir, name, time, version,
@@ -1000,9 +1000,56 @@ pub mod log {
 /// [`Display`](std::fmt::Display) (its JSON text). A bare string is never
 /// read as markup, so player input passed as an argument or as text cannot
 /// add tags or click events.
+///
+/// [`text::render`], [`text::plain`], [`text::to_legacy`] and
+/// [`text::to_mini`] ask Rift to convert text, for text that leaves through
+/// something other than a player (a bus payload, an HTTP response, a log
+/// line) and to check a template from the configuration in `init`. They need
+/// `min_api = "0.2.1"` in `plugin.toml`.
 pub mod text {
+    use crate::bindings::rift::plugin::text as host;
     use serde_json::{Map, Value};
     use std::fmt;
+
+    /// The JSON text component `text` becomes, with markup, legacy codes and
+    /// messages resolved, in `language` (such as `de` or `de_de`) or the
+    /// default. Plain text becomes a JSON string. An invalid text or
+    /// language is an error.
+    ///
+    /// ```no_run
+    /// use rift_plugin::text;
+    ///
+    /// // {"color":"red","text":"Hi"}
+    /// let red = text::render(text::mini("<red>Hi"), None)?;
+    /// // The plugin's own message `greeting`, in German.
+    /// let words = text::plain(text::message("greeting"), Some("de"))?;
+    /// # let _ = (red, words);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn render(text: impl Into<crate::Text>, language: Option<&str>) -> Result<String, String> {
+        host::render(&text.into(), language)
+    }
+
+    /// The words of `text` without formatting, with messages resolved in
+    /// `language` or the default; see [`render`].
+    pub fn plain(text: impl Into<crate::Text>, language: Option<&str>) -> Result<String, String> {
+        host::plain(&text.into(), language)
+    }
+
+    /// `text` with `§` codes, for surfaces that only take strings; see
+    /// [`render`].
+    pub fn to_legacy(
+        text: impl Into<crate::Text>,
+        language: Option<&str>,
+    ) -> Result<String, String> {
+        host::to_legacy(&text.into(), language)
+    }
+
+    /// Markup that writes `text`; plain text comes back escaped. See
+    /// [`render`].
+    pub fn to_mini(text: impl Into<crate::Text>, language: Option<&str>) -> Result<String, String> {
+        host::to_mini(&text.into(), language)
+    }
 
     /// Rift markup, such as `<gold>Hi <player>!`. Add arguments with
     /// [`Mini::arg`] and [`Mini::arg_component`].

@@ -2,7 +2,7 @@
 
 A plugin is code that receives Rift's events and calls Rift's host API. Every
 plugin uses the same contract, [`wit/rift-plugin.wit`](../wit/rift-plugin.wit)
-(`rift:plugin@0.2.0`): one event schema, one set of answers, one host API. What
+(`rift:plugin@0.2.1`): one event schema, one set of answers, one host API. What
 differs is where the code runs:
 
 | Mode | What it is | Trust | Configured with |
@@ -159,7 +159,8 @@ underscores (`set_language`).
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
 | `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](plugin-operations.md#logs). Control characters are replaced. |
 | `background` | `defer()`, `resolve(ticket, decision)`, `run(payload)`, `is-worker()` | [Background work](plugin-events.md#background-work). |
-| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.0`. |
+| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.1`. |
+| `text` | `render(text, language?)`, `plain`, `to-legacy`, `to-mini` | Since 0.2.1 (set `min_api = "0.2.1"`); what [`rift.text`](text.md#rifttext-in-lua) does in Lua. Each converts [`text`](plugin-events.md#text) with markup, legacy codes and [messages](text.md#plugin-messages) resolved, the plugin's own by unqualified key, in `language` (a tag such as `de` or `de_de`) or the default, and returns compact JSON, the words, `§` codes or markup. An invalid text or language is the error. It works in `init`, `reload` and background workers, so `init` can check a template from the configuration. |
 
 Calls that wait (bus requests, server operations, store writes) block only the
 plugin's own thread. Persistent plugins get no per-call budgets beyond their

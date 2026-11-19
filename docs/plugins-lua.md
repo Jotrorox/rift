@@ -163,7 +163,8 @@ mode:
 | `timers.*` | `rift.timers.every`, `after`, `cancel`, and `rift.every` for named jobs. |
 | `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. [Logs](plugin-operations.md#logs) says where the lines go. |
 | `background.*` | `rift.background.defer()`, `resolve(ticket, decision)`, `run(payload, [fn])` and `is_worker()`: see [background work](#background-work). |
-| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.2.0"`); `rift.clock()` and `rift.time()`. |
+| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.2.1"`); `rift.clock()` and `rift.time()`. |
+| `text.*` | [`rift.text`](text.md#rifttext-in-lua): `rift.text.render(text, language)` returns a component table, `plain`, `to_legacy` and `to_mini` a string, all with the plugin's own messages by unqualified key, in `language` or the default. `rift.text.message(key, args)` builds a `message` object, and `mini`, `legacy` and `escape` exist as in `rift.lua`. They work in `init`, hooks and background workers alike. |
 | (Lua only) | `rift.http.request(url, options)` takes any `http`/`https` URL instead of an integration name; options are `method`, `body`, `headers` and `timeout_ms` (default 10 s, at most 60 s). Requires `capabilities.network` (default true). |
 | (script only) | `rift.setup`, `rift.plugin` and `rift.config` configure Rift and exist only in `rift.lua`. |
 

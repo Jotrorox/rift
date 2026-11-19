@@ -1001,8 +1001,6 @@ async fn players_api_renders_qualified_messages_for_each_player() {
         local players = require('rift.players')
         assert(players.message('Alice', { message = 'party:greet', args = { name = 'Bob' } }))
         assert(players.kick('Bob', { message = 'party:greet', args = { name = 'Alice' } }))
-        local ok, err = pcall(players.message, 'Alice', { message = 'greet', args = { name = 'x' } })
-        assert(not ok and tostring(err):find('namespace:key', 1, true), tostring(err))
         assert(players.broadcast({ message = 'party:greet', args = { name = 'all' } }) == 2)
         assert(players.broadcast({ text = 'plain' }) == 2)
         return { deny = { message = 'party:denied' } }

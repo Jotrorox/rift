@@ -86,6 +86,7 @@ Rust, Go and Lua examples.
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
 | `log` | `rift_log(RIFT_INFO, "format %d", value)`. |
+| `text` | `rift_text_render`, `rift_text_to_plain`, `rift_text_to_legacy`, `rift_text_to_mini` (since 0.2.1); see [converting text](#converting-text). |
 | configuration JSON | `rift_json_get_string(&config, "key", &out)` reads one top-level string; use cJSON or jsmn for more. |
 | `dialog`, `players.dialog` | [Dialogs](dialogs.md): `rift_show_dialog(&target, json)` and `rift_plugin_players_clear_dialog`; clicks reach `exports_rift_plugin_handler_dialog(rift_dialog_response_t *)`, which owns its argument (free it with `rift_dialog_response_free`). The weak default ignores clicks. No registration needed. |
 
@@ -368,6 +369,44 @@ Rift reads markup only from an explicit `mini` object. A bare JSON string, as
 in `rift_text_json("\"<red>hi\"")`, is shown as written, and so is all plain
 text. Pass player input with `rift_mini_arg`, never by formatting it into the
 markup. The tags are listed in [Styled text](text.md).
+
+## Converting text
+
+`rift_text_render(text, language, &out, &err)`, `rift_text_to_plain`,
+`rift_text_to_legacy` and `rift_text_to_mini` are the contract's `text`
+interface (since 0.2.1: set `min_api = "0.2.1"` in `plugin.toml`). Rift
+converts `text` with markup, legacy codes and the plugin's messages resolved
+in `language` (`"de"`; `NULL` for the default) into compact JSON, the words,
+`§` codes or markup. `rift_text_to_plain` is not `rift_text_plain`, which
+makes a plain text view.
+
+- `text` is borrowed, like every argument of a host function.
+- On success the function returns true and `out` is yours: free it with
+  `rift_string_free`.
+- On failure it returns false with `out` empty, and the host's error is in
+  `err`, yours to free; with `err` NULL the error is logged at warn level.
+
+Use them for text that leaves through a bus payload, an HTTP response or a
+log line, and in `init` to check a template from the configuration:
+
+```c
+// In exports_rift_plugin_handler_init(config_json, ret, err):
+rift_string_t json;
+if (!rift_text_render(rift_text_json(template_json), NULL, &json, err)) {
+  return false;  // init fails with the host's error, which the bindings free
+}
+rift_string_free(&json);
+
+// The plugin's own message `created` without formatting, in German.
+rift_msg_t msg = rift_msg("created");
+char *created = rift_msg_finish(&msg);
+rift_string_t line;
+if (rift_text_to_plain(rift_text_json(created), "de", &line, NULL)) {
+  rift_log(RIFT_INFO, "German: " RIFT_STR_FMT, RIFT_STR_ARG(line));
+  rift_string_free(&line);
+}
+free(created);
+```
 
 ## Memory ownership
 

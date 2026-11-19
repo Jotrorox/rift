@@ -194,6 +194,21 @@ impl Services {
         MetaApi(&self.0)
     }
 
+    /// `text.render`, `plain`, `to-legacy` and `to-mini`: `text` as written,
+    /// with markup, legacy codes and this plugin's messages (when
+    /// unqualified) resolved in `language` or the default, written in
+    /// `form`. The same as `rift.text` in a Lua plugin, and independent of
+    /// any hook, so it works in `init`, `reload` and background workers.
+    pub fn text(
+        &self,
+        text: &Text,
+        language: Option<&str>,
+        form: crate::text::Form,
+        label: &str,
+    ) -> Result<String, String> {
+        crate::text::convert(text, Some(self.0.spec.name.as_str()), language, form, label)
+    }
+
     /// `log.log`: Rift's log stream, prefixed with the plugin name. Control
     /// characters are replaced so a message cannot forge other log lines.
     pub fn log(&self, level: Level, message: &str) {

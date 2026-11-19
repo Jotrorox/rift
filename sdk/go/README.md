@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.0` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.1` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -44,7 +44,7 @@ Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.2.0
+go get github.com/Jotrorox/rift/sdk/go@v0.2.1
 ```
 
 ## Writing a plugin

@@ -20,7 +20,7 @@ TinyGo's Linux release; `brew install binaryen` on macOS).
 **Use TinyGo 0.42.0** (see [gotchas](#gotchas)):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.2.0
+go get github.com/Jotrorox/rift/sdk/go@v0.2.1
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o my_plugin.wasm .
 ```
 
@@ -105,7 +105,8 @@ Lua examples.
 | `bus` | `rift.Publish`, `Reply`, `Request`, `Subscribe`, `Unsubscribe`, `StreamPublish`. |
 | `servers` | `rift.ServerCreate`, `ServerRemove`, `ServerStart`, `ServerStop`, `TemplateDownload`, `Control`. |
 | `timers` | `rift.Every`, `After`, `CancelTimer`. |
-| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`, and `rift.API()`, the contract version the host implements (`0.2.0`). |
+| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`, and `rift.API()`, the contract version the host implements (`0.2.1`). |
+| `text` | `rift.RenderText`, `PlainText`, `ToLegacy`, `ToMini` (since 0.2.1); see [text](#text). |
 | `result<T, string>` | `(T, error)` with a `rift.HostError`. |
 | `option<T>` | Parameters: `""` for an optional string, `0` for an optional Unix time, the zero `rift.Text{}` for an optional text. Record fields: pointers (`rift.Ptr(v)` makes one) and zero texts. |
 | configuration JSON | `rift.ConfigString(json, "key")` returns `(value, ok, err)` with a built-in parser; `rift.DecodeConfig(json, &cfg)` uses `encoding/json`, which adds about 850 KB. |
@@ -169,6 +170,21 @@ diamond := rift.Sprite("item/diamond").Shadow("#000000", 0.5).HoverItem("minecra
   `rift.Message` is the decision that shows a player text.
 - `rift.Escape(s)` escapes text for splicing into markup. An argument needs no
   escaping.
+- `rift.RenderText(text, language)`, `rift.PlainText`, `rift.ToLegacy` and
+  `rift.ToMini` (the contract's `text` interface, since 0.2.1: set
+  `min_api = "0.2.1"` in `plugin.toml`) ask Rift to convert text, with
+  markup, legacy codes and the plugin's messages resolved in `language`
+  (`"de"`; `""` for the default). Each returns `(string, error)`: compact
+  JSON, the words, `§` codes or markup. Use them for text that leaves through
+  a bus payload, an HTTP response or a log line, and in `OnInit` to check a
+  template from the configuration:
+
+  ```go
+  if _, err := rift.RenderText(rift.Mini(cfg.Greeting).Text(), ""); err != nil {
+  	return rift.Registration{}, err
+  }
+  line, err := rift.PlainText(rift.Msg("created").Text(), "de")
+  ```
 - The component builders:
 
   | Kind | Functions and methods |

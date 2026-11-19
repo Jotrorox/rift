@@ -1,4 +1,4 @@
-//! Engine-neutral mirrors of the `rift:plugin@0.2.0` WIT types
+//! Engine-neutral mirrors of the `rift:plugin@0.2.1` WIT types
 //! (`wit/rift-plugin.wit`). Engines translate their own values (Lua tables,
 //! wasmtime bindgen records) into these; the host never sees engine values.
 //! Core types are reused where their shape already matches the contract.
@@ -16,7 +16,7 @@ pub use crate::{
 pub const API_VERSION: &str = "0.2";
 /// The exact `rift:plugin` package version, for a manifest's `min_api` and
 /// `meta.api`.
-pub const CONTRACT_VERSION: &str = "0.2.0";
+pub const CONTRACT_VERSION: &str = "0.2.1";
 
 /// `major.minor.patch` as numbers, or `None` for anything else.
 pub fn parse_version(version: &str) -> Option<[u32; 3]> {

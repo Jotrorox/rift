@@ -717,7 +717,7 @@ async fn aliases_the_console_the_directory_and_background_work_reach_lua() {
             (
                 "init.lua",
                 r#"
-assert(rift.meta.api == "0.2.0")
+assert(rift.meta.api == "0.2.1")
 assert(not rift.background.is_worker())
 assert(not pcall(rift.on, "work", function() end), "work belongs in the worker script")
 rift.command("whois", {
@@ -976,5 +976,70 @@ end)
     };
     assert_eq!(denied(Some("de_at")).await, "Kein Zutritt.");
     assert_eq!(denied(None).await, "No entry.");
+    runtime.plugins().shutdown().await;
+}
+
+/// `rift.text` in a persistent plugin resolves the plugin's own messages by
+/// unqualified key, in the language asked for, in `init`, in hooks and in
+/// background workers alike.
+#[tokio::test]
+async fn rift_text_resolves_the_plugins_own_messages() {
+    crate::text::catalog::install_test_catalog();
+    let root = folder(
+        "[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n",
+        &[
+            (
+                "init.lua",
+                r#"
+local greet = rift.text.message("greet", { name = "init" })
+assert(greet.message == "greet" and greet.args.name == "init")
+-- In init, outside any hook.
+local at_init = rift.text.render(greet, "de")
+assert(rift.text.plain(at_init) == "Hallo init.", rift.text.plain(at_init))
+assert(rift.text.plain(greet) == "Hello init.")
+assert(not pcall(rift.text.render, rift.text.message("nope")))
+assert(not pcall(rift.text.plain, greet, "not a language"))
+rift.command("words", { permission = "", run = function(ctx)
+    local language = ctx.args ~= "" and ctx.args or nil
+    return { message = rift.text.plain(rift.text.message("created"), language) .. " "
+        .. rift.text.to_mini({ mini = "<red>x" }) }
+end })
+rift.command("slow", { permission = "", run = function(ctx)
+    local ticket = rift.background.defer()
+    rift.background.run(ctx.args, function(result, err)
+        rift.background.resolve(ticket, { message = result or ("failed: " .. err) })
+    end)
+    return { message = "ignored" }
+end })
+"#,
+            ),
+            (
+                "worker.lua",
+                r#"
+rift.on("work", function(language)
+    return rift.text.plain({ message = "denied" }, language)
+end)
+"#,
+            ),
+        ],
+    );
+    let runtime = started(&root, "{}", &Broker::default()).await;
+    let message = |text: &str| Action::Message(text.into());
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(
+        alex.command("words de").await.unwrap(),
+        message("Erstellt. <red>x</red>")
+    );
+    // Without a language: the default, whatever the hook's player reads.
+    let mut german = session(&runtime, 8, "Jonas");
+    german.context.language = Some("de".into());
+    assert_eq!(
+        german.command("words").await.unwrap(),
+        message("Created. <red>x</red>")
+    );
+    assert_eq!(
+        alex.command("slow de").await.unwrap(),
+        message("Kein Zutritt.")
+    );
     runtime.plugins().shutdown().await;
 }

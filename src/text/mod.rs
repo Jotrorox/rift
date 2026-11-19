@@ -278,6 +278,25 @@ impl Text {
         }
     }
 
+    /// Markup that writes this text; plain text is escaped.
+    pub fn to_mini(&self) -> String {
+        match self {
+            Self::Plain(text) => markup::escape(text),
+            Self::Component(component) => markup::serialize(component),
+        }
+    }
+
+    /// This text written in `form`, as the `text` interface and `rift.text`
+    /// return it.
+    pub fn written(&self, form: Form) -> String {
+        match form {
+            Form::Json => self.for_client(Profile::UNKNOWN).to_string(),
+            Form::Plain => self.to_string(),
+            Form::Legacy => self.to_legacy(Profile::UNKNOWN),
+            Form::Mini => self.to_mini(),
+        }
+    }
+
     /// `prefix` followed by this text, keeping the text's formatting.
     pub fn prefixed(&self, prefix: &str) -> Self {
         match self {
@@ -386,6 +405,49 @@ pub fn rendering<R>(
 ) -> R {
     let _scope = render_scope(namespace, language);
     convert()
+}
+
+/// What the `text` interface (`render`, `plain`, `to-legacy`, `to-mini`)
+/// and the matching `rift.text` functions write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    /// The component as compact JSON; plain text is a JSON string.
+    Json,
+    /// The words without formatting.
+    Plain,
+    /// `§` codes.
+    Legacy,
+    /// Markup.
+    Mini,
+}
+
+/// `text` as written ([`Text::json_as_written`], [`Text::lua_as_written`]
+/// or plain text), checked and with markup, legacy codes and messages
+/// resolved for a caller in `namespace` (see [`rendering`]), in `language`
+/// (a tag as a plugin writes it, such as `de-DE`; `None` for the default).
+/// The same for every engine, at any time: it does not depend on the scope
+/// a hook runs in.
+pub fn resolve(
+    text: &Text,
+    namespace: Option<&str>,
+    language: Option<&str>,
+    label: &str,
+) -> Result<Text, String> {
+    let language = language
+        .map(|tag| crate::directory::language_tag(tag).map_err(|error| format!("{label}: {error}")))
+        .transpose()?;
+    rendering(namespace, language.as_deref(), || text.checked(label))
+}
+
+/// [`resolve`], written in `form`.
+pub fn convert(
+    text: &Text,
+    namespace: Option<&str>,
+    language: Option<&str>,
+    form: Form,
+    label: &str,
+) -> Result<String, String> {
+    resolve(text, namespace, language, label).map(|text| text.written(form))
 }
 
 /// The caller's namespace and the recipient's language: the innermost
@@ -1121,5 +1183,107 @@ mod tests {
             Text::Plain("x".into()).for_client(old).into_owned(),
             json!("x")
         );
+    }
+
+    #[test]
+    fn the_text_interface_resolves_then_writes_each_form() {
+        with_messages(|| {
+            let convert = |text: Json, language: Option<&str>, form: Form| {
+                super::convert(
+                    &Text::Component(text),
+                    Some("party"),
+                    language,
+                    form,
+                    "text.render",
+                )
+            };
+            // Markup, legacy codes and messages, in each form.
+            let red = json!({"mini": "<red>Hi"});
+            let rendered = convert(red.clone(), None, Form::Json).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Json>(&rendered).unwrap(),
+                json!({"text": "Hi", "color": "red"})
+            );
+            assert_eq!(convert(red.clone(), None, Form::Plain).unwrap(), "Hi");
+            assert_eq!(convert(red.clone(), None, Form::Legacy).unwrap(), "§cHi");
+            assert_eq!(convert(red, None, Form::Mini).unwrap(), "<red>Hi</red>");
+            assert_eq!(
+                convert(json!({"legacy": "&cRed &lbold"}), None, Form::Legacy).unwrap(),
+                "§cRed §lbold"
+            );
+            // The caller's own message by unqualified key, in a language
+            // written either way, or the default.
+            let greet = json!({"message": "greet", "args": {"name": "Alex"}});
+            assert_eq!(
+                convert(greet.clone(), None, Form::Plain).unwrap(),
+                "Hello Alex."
+            );
+            assert_eq!(
+                convert(greet.clone(), Some("de"), Form::Plain).unwrap(),
+                "Hallo Alex."
+            );
+            assert_eq!(
+                convert(greet.clone(), Some("DE"), Form::Plain).unwrap(),
+                "Hallo Alex."
+            );
+            assert_eq!(
+                convert(greet.clone(), Some("fr-FR"), Form::Plain).unwrap(),
+                "Hello Alex."
+            );
+            let rendered = convert(greet.clone(), Some("de"), Form::Json).unwrap();
+            assert_eq!(
+                Text::Component(serde_json::from_str(&rendered).unwrap()).to_string(),
+                "Hallo Alex."
+            );
+            // Another plugin's message by qualified key; none without a
+            // namespace for an unqualified one.
+            assert_eq!(
+                super::convert(
+                    &Text::Component(json!({"message": "party:created"})),
+                    None,
+                    Some("de"),
+                    Form::Plain,
+                    "rift.text.plain",
+                )
+                .unwrap(),
+                "Erstellt."
+            );
+            assert!(
+                super::convert(
+                    &Text::Component(json!({"message": "created"})),
+                    None,
+                    None,
+                    Form::Plain,
+                    "rift.text.plain",
+                )
+                .is_err()
+            );
+            // An invalid language, key or argument is an error that names
+            // the call.
+            let error = convert(greet.clone(), Some("d"), Form::Plain).unwrap_err();
+            assert!(error.starts_with("text.render: a language is"), "{error}");
+            let error = convert(json!({"message": "nope"}), None, Form::Json).unwrap_err();
+            assert!(error.starts_with("text.render"), "{error}");
+            let error = convert(json!({"message": "greet"}), None, Form::Json).unwrap_err();
+            assert!(error.starts_with("text.render"), "{error}");
+            // The scope a hook runs in does not leak in.
+            assert_eq!(
+                rendering(Some("t"), Some("de"), || convert(
+                    greet.clone(),
+                    None,
+                    Form::Plain
+                ))
+                .unwrap(),
+                "Hello Alex."
+            );
+        });
+        // Plain text is shown as written: a JSON string, escaped markup.
+        let plain = Text::Plain("<red> \"\\".into());
+        let write = |form| super::convert(&plain, None, None, form, "text.render").unwrap();
+        assert_eq!(write(Form::Json), r#""<red> \"\\""#);
+        assert_eq!(write(Form::Plain), "<red> \"\\");
+        assert_eq!(write(Form::Legacy), "<red> \"\\");
+        assert_eq!(write(Form::Mini), r#"\<red> "\\"#);
+        assert!(super::convert(&Text::Plain(String::new()), None, None, Form::Plain, "p").is_err());
     }
 }

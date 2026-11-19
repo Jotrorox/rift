@@ -13,6 +13,7 @@ import (
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/players"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/servers"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/store"
+	hosttext "github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/text"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/timers"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
@@ -417,5 +418,33 @@ func Clock() float64 { return meta.Clock() }
 // Time returns Unix time in seconds.
 func Time() int64 { return meta.Time() }
 
-// API returns the rift:plugin version the host implements, such as "0.2.0".
+// API returns the rift:plugin version the host implements, such as "0.2.1".
 func API() string { return meta.API() }
+
+// Text conversions (rift:plugin 0.2.1: set min_api = "0.2.1" in plugin.toml)
+
+// RenderText returns the JSON text component t becomes, with markup, legacy
+// codes and messages resolved, in language (such as "de" or "de_de"; "" for
+// the default). Plain text becomes a JSON string. It also checks a template
+// from the plugin's configuration during Init.
+func RenderText(t Text, language string) (string, error) {
+	return unwrap(hosttext.Render(t.lower(), optional(language)))
+}
+
+// PlainText returns the words of t without formatting, with messages
+// resolved in language ("" for the default).
+func PlainText(t Text, language string) (string, error) {
+	return unwrap(hosttext.Plain(t.lower(), optional(language)))
+}
+
+// ToLegacy returns t with § codes, for surfaces that only take strings, with
+// messages resolved in language ("" for the default).
+func ToLegacy(t Text, language string) (string, error) {
+	return unwrap(hosttext.ToLegacy(t.lower(), optional(language)))
+}
+
+// ToMini returns markup that writes t (plain text comes back escaped), with
+// messages resolved in language ("" for the default).
+func ToMini(t Text, language string) (string, error) {
+	return unwrap(hosttext.ToMini(t.lower(), optional(language)))
+}
