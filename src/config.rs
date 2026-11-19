@@ -400,11 +400,20 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "files",
     "plugins",
     "perms",
+    // Leadership transfers and drains of cluster peers.
+    "cluster",
 ];
 
 /// These grants can affect or reveal the whole proxy, so they require
 /// unrestricted scope. Permission data is network-wide, so `perms` is here too.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins", "perms"];
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &[
+    "cluster",
+    "config",
+    "deploy",
+    "extensions",
+    "plugins",
+    "perms",
+];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -1396,7 +1405,9 @@ impl Config {
         }
         // A cluster peer has a cluster.toml, which names it before the
         // configuration is evaluated.
-        if crate::cluster::settings::local_peer().is_some() {
+        if crate::cluster::settings::local_peer().is_some()
+            && !crate::cluster::settings::placement_reported()
+        {
             self.check_cluster_placement()?;
         }
         let path = self.instance_database.as_os_str().as_encoded_bytes();
@@ -1800,7 +1811,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy, extensions, plugins and perms require unrestricted group access"
+                            "{path}: cluster, config, deploy, extensions, plugins and perms require unrestricted group access"
                         )));
                     }
                 }

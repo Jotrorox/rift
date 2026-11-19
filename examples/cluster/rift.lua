@@ -15,8 +15,8 @@
 -- Later edits are deployments: change it on one peer (or in the dashboard) and
 -- reload; every peer writes the new revision to its rift.lua and reloads.
 
--- rift.peer is this peer's name. It is nil while `rift cluster init` reads
--- this file and outside a cluster, hence the fallback.
+-- rift.peer is this peer's name (also while `rift cluster init` reads this
+-- file). It is nil outside a cluster, hence the fallback.
 local hosts = {
     ["eu-1"] = "10.0.0.1",
     ["eu-2"] = "10.0.0.2",
@@ -53,12 +53,14 @@ rift.config.authentication = { online_mode = true }
 rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 rift.config.network = { hubs = { "lobby" } }
 
--- Bus clients and the servers' bus logins reach any peer. The messaging
--- section is shared, so advertise a name that resolves to every peer; each
--- host's certificate at this path names that name and the host itself.
+-- Bus clients and the servers' bus logins reach any peer. Each peer announces
+-- its own bus address: bus_address in its cluster.toml, else its advertise
+-- host with this port (10.0.0.1:7443 on eu-1). Bus clients verify every
+-- peer's certificate for one name, so each host's certificate at this path
+-- names bus.eu.internal.
 rift.config.messaging = {
     listen = "0.0.0.0:7443",
-    advertise = "bus.eu.internal:7443",
+    advertise_server_name = "bus.eu.internal",
     certificate = "/etc/rift/messaging.pem",
     private_key = "/etc/rift/messaging-key.pem",
 }

@@ -159,10 +159,13 @@ pub fn instance_logins(config: &Config) -> Vec<String> {
             ));
         }
     }
-    let advertised = config
-        .messaging
-        .as_ref()
-        .is_some_and(|messaging| messaging.advertise.is_some());
+    // A cluster peer's instances are told its own bus address, which comes
+    // from its cluster.toml (`bus_address`, else its advertise host).
+    let advertised = rift::cluster::settings::local_peer().is_some()
+        || config
+            .messaging
+            .as_ref()
+            .is_some_and(|messaging| messaging.advertise.is_some());
     let loopback = config
         .messaging
         .as_ref()

@@ -888,7 +888,13 @@ The bus (`src/cluster/bus*`) differs from the design as follows:
   and checks tokens from the replicated key; without a cluster the file is
   used as before.
 - **Bus addresses.** Each peer records its messaging address and certificate
-  name in a `bus` entry; `RIFT_BUS_ADDRESSES` lists every live peer, this
+  name in a `bus` entry. The address is the peer's own, since the shared
+  `messaging.advertise` cannot tell peers apart: `bus_address` in its
+  `cluster.toml`, else the host of its `advertise` with the bound port of
+  `messaging.listen`, else (a wildcard `advertise`) what a single Rift uses.
+  The certificate name is `messaging.advertise_server_name`, else the host
+  of `bus_address`, else the host of `messaging.advertise`, else the
+  peer's host (`bus_address`/`bus_server_name` in `src/runtime.rs`); `RIFT_BUS_ADDRESSES` lists every live peer, this
   peer first. When the peers' certificate names differ, `RIFT_BUS_SERVER_NAME`
   is left unset and clients verify each address for its own host. Node agents
   get the list as repeated `--controller` flags.
@@ -1359,20 +1365,40 @@ also named, came with the second pass of step 7 (see
   reconnect to other peers, the embedded agent stops its servers (except
   kept named servers), and presence, the bus, the leader tasks and Raft
   stop.
-- **The backend always sees a login.** A transferred client reconnects with
+- **A peer's backends see a login.** A transferred client reconnects with
   handshake intent 3 (transfer). Rift accepts it from 1.20.5+ clients (and
-  refuses it from older ones with `login.transfer_version`), as before. Rift
-  now always sends the backend intent 2 (login), whatever the client sent,
-  so backends need no `accepts-transfers=true`; previously only online-mode
-  and forwarded logins were rewritten.
+  refuses it from older ones with `login.transfer_version`), as before. A
+  cluster peer (its registry's claims are networked,
+  `PlayerRegistry::clustered`) sends the backend intent 2 (login) for it, so
+  backends need no `accepts-transfers=true` for players handed over by a
+  draining peer; it cannot tell those from transfers by other servers, and
+  neither is a transfer the backend must accept, since the proxy did.
+  Without a cluster nothing changed: switches and online-mode logins are
+  rewritten to intent 2, other clients' intent passes on.
+- **Every login on a peer claims its name first.** A single Rift reads a
+  login's name only when something needs it (a network, hooks, managed
+  servers, online mode, permission principals, maintenance); otherwise it
+  passes the login through and registers the player only after the
+  backend's Login Success. On a peer that let two peers admit one name, so
+  a peer claims every login's name before any backend sees it
+  (`PlayerRegistry::claims_before_backend` in the login path of
+  `src/runtime.rs`).
 - **`rift cluster init --from-backup`** also clears what the old cluster's
   peers held while they ran: player name and UUID claims
   (`cluster_claims`), node session claims (`bus_node_sessions`), bus
   addresses (`bus_addresses`) and per-peer configuration reports
   (`config_peers`), besides the peer table, stored proposal results,
   features, checksums and the next Raft id. A claim of a peer that is no
-  member would otherwise keep its player out. Since `rift.peer` is not set
-  while init reads the configuration, `rift.peer` is nil there.
+  member would otherwise keep its player out.
+- **`rift cluster init` reads the configuration as the peer.** It sets the
+  local peer name first (`settings::set_local_peer`), so `rift.peer` is the
+  peer's name and node names that may be peer-nodes pass validation
+  (`peer_nodes::pending`); with `settings::report_placement` the placement
+  check (servers on `local`) is left to init, which reports it and converts
+  registered instances. `rift check` and `rift witness` set the peer name
+  the same way; `rift cluster recover` reads no configuration. A starting
+  peer adds the peer-nodes to the configuration it read before they were
+  known (`main`), as every later evaluation does.
 - **`rift admin cluster backup`** writes the copy after a linearizable read
   (`read_barrier`), with SQLite's online backup API from the replica, and
   switches the copy to `journal_mode=DELETE`, so it is one plain file
@@ -1401,6 +1427,20 @@ also named, came with the second pass of step 7 (see
   directory. Finally it makes a peer leave while a 1.20.5 client and a 1.8
   client are connected to it, and asserts that the 1.20.5 client is
   transferred to another peer and the 1.8 client disconnected.
+- **The dashboard's Cluster panel** polls `GET /api/cluster` with the
+  status and appears only when it reports `enabled: true`. The web handler
+  and `rift admin cluster` add `players` to every peer entry, counted by
+  peer from the player registry, which holds every peer's players
+  (`admin::peer_players`), so `Cluster::status` stays free of the proxy
+  runtime. Load comes from the peer-node's agent in `/api/status`.
+  `POST /api/cluster/transfer-leader` and
+  `POST /api/cluster/peers/{name}/leave` call `Cluster::admin` with the
+  arguments of `rift admin cluster transfer-leader` and `leave`, so a
+  follower forwards them as the admin command does; they need the new
+  unrestricted web permission `cluster` and are audited as
+  `transfer_leader` and `leave_peer`. Server listings add `peer` only while
+  `cluster::global()` is set: the node itself for a peer-node, `null`
+  otherwise, so a single Rift's JSON is unchanged.
 
 ### Not done
 
@@ -1408,10 +1448,6 @@ also named, came with the second pass of step 7 (see
   no scoped timer (their timers tick on every peer) and cannot reach the
   leases. Each needs a contract release with regenerated C, Go and Rust
   SDKs.
-- **No dashboard panel.** The design's Cluster panel with each peer's role,
-  lag, players, load and configuration hash was not built; the dashboard
-  shows only `cluster_warning` for plugins. `GET /api/cluster` and
-  `rift admin cluster` serve the data.
 - **`keep_running` in service groups.** Only named servers on a peer's own
   node keep running through a restart of their peer; `keep_running` in a
   service group with `nodes` is refused, in a cluster as elsewhere.
@@ -1420,11 +1456,6 @@ also named, came with the second pass of step 7 (see
   follower, while the old leader's move continues or aborts there.
 - **`rift admin backups`** (the list) runs on the peer asked, so its "last
   attempt" column shows only that peer's attempts.
-- **The messaging section is shared.** `messaging.listen` and
-  `messaging.advertise` cannot depend on `rift.peer`, so every peer records
-  the same bus address for `RIFT_BUS_ADDRESSES`. A DNS name that resolves to
-  every peer works around it; node agents take one `--controller` per peer
-  regardless.
 - **The scaler across a leader change** is covered by the simulation for one
   demand and one instance
   (`one_demand_makes_one_instance_across_a_leader_change`), not for scaling

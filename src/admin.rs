@@ -551,6 +551,8 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
 /// Operational state only: never include process arguments, environment or paths.
 pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
     let config = &snapshot.config;
+    // Only a cluster adds `peer`; a single Rift's listing stays as it was.
+    let clustered = rift::cluster::global().is_some();
     let servers: Vec<_> = snapshot
         .managed
         .snapshot()
@@ -563,7 +565,7 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 .backends
                 .get(&server.name)
                 .map(|backend| backend.address());
-            json!({
+            let mut value = json!({
                 "name": server.name,
                 "state": server.state.as_str(),
                 "pid": server.pid,
@@ -595,10 +597,48 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "port": address
                     .and_then(|address| address.parse::<SocketAddr>().ok())
                     .map(|address| address.port()),
-            })
+            });
+            if clustered {
+                value["peer"] = json!(server_peer(config, server.node.as_deref()));
+            }
+            value
         })
         .collect();
     json!(servers)
+}
+
+/// The peer a server runs on in a cluster: a peer's own node is that peer.
+/// Servers on a `rift node` agent belong to no peer.
+fn server_peer<'a>(config: &Config, node: Option<&'a str>) -> Option<&'a str> {
+    node.filter(|node| {
+        config
+            .nodes
+            .get(*node)
+            .is_some_and(|definition| definition.peer)
+    })
+}
+
+/// Count each peer's connected players into a cluster status: `players` on
+/// every entry of `peers`, from the player registry, which holds every
+/// peer's players. Values without `peers` stay as they are.
+pub(crate) fn peer_players(snapshot: &Snapshot, status: &mut Value) {
+    let Some(peers) = status.get_mut("peers").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for player in snapshot.players.snapshot() {
+        *counts
+            .entry(rift::players::identity::peer_label(player.peer))
+            .or_default() += 1;
+    }
+    for peer in peers {
+        let count = peer["name"]
+            .as_str()
+            .and_then(|name| counts.get(name))
+            .copied()
+            .unwrap_or(0);
+        peer["players"] = json!(count);
+    }
 }
 
 /// Node agents with reachability, capacity and allocation; never tokens.
@@ -1151,7 +1191,12 @@ pub(crate) async fn execute(
             crate::cordon::apply(&snapshot, node, action).map_err(|error| error.message)
         }
         [command, rest @ ..] if command == "cluster" => match rift::cluster::global() {
-            Some(cluster) => cluster.admin(rest).await,
+            // A status answer counts each peer's players; others stay as
+            // they are.
+            Some(cluster) => cluster.admin(rest).await.map(|mut value| {
+                peer_players(&snapshot, &mut value);
+                value
+            }),
             None => Err("this Rift is not a cluster peer: it has no cluster.toml".into()),
         },
         [command] if command == "reload" => {

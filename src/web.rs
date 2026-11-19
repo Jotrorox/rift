@@ -622,6 +622,11 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
             .route("/api/cluster", get(cluster))
+            .route(
+                "/api/cluster/transfer-leader",
+                post(cluster_transfer_leader),
+            )
+            .route("/api/cluster/peers/{name}/leave", post(cluster_leave))
             .route("/api/nodes/warm", post(warm_templates))
             .route("/api/nodes/plan", get(node_plan))
             .route("/api/plugins", get(plugin_list))
@@ -966,6 +971,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
                 ["api", "audit"] => "audit",
+                // Leadership transfers and drains; the status is `read`.
+                ["api", "cluster", _, ..] => "cluster",
                 _ => "read",
             }
         };
@@ -1101,6 +1108,19 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // Cluster changes concern every peer: unrestricted operators only.
+            ["api", "cluster", "peers", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.groups.is_none(),
+                    if peer_argument(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            ["api", "cluster", _, ..] => (access.groups.is_none(), String::new()),
             ["api", "groups", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -1141,6 +1161,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "nodes", _, "cordon"] => "cordon_node",
             ["api", "nodes", _, "drain"] => "drain_node",
             ["api", "nodes", _, "uncordon"] => "uncordon_node",
+            ["api", "cluster", "transfer-leader"] => "transfer_leader",
+            ["api", "cluster", "peers", _, "leave"] => "leave_peer",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "template-sources", _, "sync"] => "sync_template_source",
@@ -1432,15 +1454,70 @@ async fn service_groups(
 
 /// The cluster this peer belongs to: members, roles, leader, term, indexes
 /// and lag (`rift admin cluster`). `{"enabled": false}` on a single Rift.
-async fn cluster() -> Json<Value> {
+async fn cluster(State(app): State<App>) -> Json<Value> {
     Json(match rift::cluster::global() {
         Some(cluster) => {
             let mut status = cluster.status();
+            admin::peer_players(&app.snapshot(), &mut status);
             status["enabled"] = json!(true);
             status
         }
         None => json!({"enabled": false}),
     })
+}
+
+/// `POST /api/cluster/transfer-leader` with `{}` (the best caught-up voter)
+/// or `{"peer": name}`: `rift admin cluster transfer-leader [<name>]`.
+async fn cluster_transfer_leader(body: Result<Json<Value>, JsonRejection>) -> Response {
+    let value = match payload(body, &["peer"]) {
+        Ok(value) => value,
+        Err(failure) => return failure.into_response(),
+    };
+    let mut args = vec!["transfer-leader".to_owned()];
+    match value.get("peer") {
+        None => {}
+        Some(Value::String(peer)) if peer_argument(peer) => {
+            args.push(peer.clone());
+        }
+        Some(_) => return error(StatusCode::BAD_REQUEST, "peer must be a peer name"),
+    }
+    cluster_admin(&args).await
+}
+
+/// `POST /api/cluster/peers/{name}/leave` with `{}`: `rift admin cluster
+/// leave <name>`. The peer drains: it hands its players to other peers,
+/// then its process exits.
+async fn cluster_leave(
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(failure) = payload(body, &[]) {
+        return failure.into_response();
+    }
+    if !peer_argument(&name) {
+        return error(StatusCode::BAD_REQUEST, "expected a peer name");
+    }
+    cluster_admin(&["leave".to_owned(), name]).await
+}
+
+/// A peer name that `rift admin cluster` cannot mistake for a flag.
+fn peer_argument(name: &str) -> bool {
+    rift::cluster::settings::valid_peer_name(name) && !name.starts_with('-')
+}
+
+/// A membership command run as `rift admin cluster` runs it: a follower
+/// forwards it to the leader.
+async fn cluster_admin(args: &[String]) -> Response {
+    let Some(cluster) = rift::cluster::global() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "this Rift is not a cluster peer: it has no cluster.toml",
+        );
+    };
+    match cluster.admin(args).await {
+        Ok(value) => Json(value).into_response(),
+        Err(message) => error(StatusCode::CONFLICT, message),
+    }
 }
 
 async fn nodes(State(app): State<App>) -> Json<Value> {
@@ -2762,7 +2839,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/cluster","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/cluster","POST /api/cluster/transfer-leader","POST /api/cluster/peers/{name}/leave","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

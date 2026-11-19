@@ -19,8 +19,7 @@ StateDirectory=rift
 StateDirectoryMode=0700
 EnvironmentFile=/etc/rift/cluster.env
 ExecStart=/usr/local/bin/rift witness --config /var/lib/rift/rift.lua
-# rift witness stops cleanly on Ctrl-C (SIGINT).
-KillSignal=SIGINT
+# rift witness stops cleanly on SIGTERM (systemctl stop) and SIGINT.
 TimeoutStopSec=30s
 Restart=on-failure
 RestartSec=5s

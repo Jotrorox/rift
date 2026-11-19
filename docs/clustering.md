@@ -194,11 +194,17 @@ version or holding other secrets.
   `public_address` in each `cluster.toml` must reach that one peer the way
   a player does, since a peer that [drains](#rolling-restarts) sends players
   there.
-- **Bus clients** get every peer's address. Servers with a
-  [bus login](bus-logins.md) find them in `RIFT_BUS_ADDRESSES`, and the
-  Java client uses that list to fail over.
-- **Node agents** take one `--controller` per peer (see
-  [nodes](nodes.md#run-an-agent)); the agent connects to the first that
+- **Bus clients** get every peer's address. Each peer's is its own:
+  `bus_address` in its `cluster.toml`, else the host of its `advertise` with
+  the port of `messaging.listen` (the messaging section is shared, so
+  `messaging.advertise` cannot tell peers apart). Servers with a
+  [bus login](bus-logins.md) find the addresses in `RIFT_BUS_ADDRESSES`,
+  their own peer's first, and the Java client uses that list to fail over.
+  Bus clients verify every peer's messaging certificate for one name
+  (`messaging.advertise_server_name`, else the host of `messaging.advertise`,
+  else each peer's own host), so the certificates name it.
+- **Node agents** take one `--controller` per peer, each peer's bus address
+  (see [nodes](nodes.md#run-an-agent)); the agent connects to the first that
   accepts and moves on when one fails.
 
 ### Getting there from one Rift
@@ -225,8 +231,11 @@ state:
   current `rift.lua` becomes the last deployment.
 
 Init refuses a peer whose Raft file already belongs to a cluster, and an
-instance database that already holds another cluster's state. `rift.peer`
-is nil while init reads the configuration.
+instance database that already holds another cluster's state. Init reads
+the configuration as the peer will: `rift.peer` is the peer's name, and
+servers and groups may name peer-nodes (any valid peer name, checked once
+the peers run). Servers still on `local` do not stop init; it names them,
+and they must get a node before the peer starts.
 
 ## `cluster.toml`
 
@@ -246,6 +255,7 @@ are refused, and the file may be at most 64 KiB.
 | `token_env` | `RIFT_CLUSTER_TOKEN` | The environment variable that holds the cluster token, at least 16 bytes |
 | `seeds` | none | `host:port` addresses of other peers to contact first; at most 64 |
 | `public_address` | none | `host:port` where players reach this peer, for [transfers](#rolling-restarts) from a draining peer |
+| `bus_address` | host of `advertise`, port of `messaging.listen` | `host:port` where bus clients and node agents reach this peer's messaging listener. The peer records it for the other peers, and its servers find it first in `RIFT_BUS_ADDRESSES`. With a wildcard `advertise` and no `bus_address`, the peer uses `messaging.advertise` as a single Rift does |
 | `witness` | `false` | This host is a [witness](#voters-learners-and-witnesses); `rift witness` sets it |
 | `[labels]` | none | Labels of this peer's [node](#servers-on-the-peers-own-hosts): keys of 1–64 bytes, values up to 256 bytes; keys starting with `node.` are reserved |
 | `[node] memory_mb` | none | Memory this peer's node offers servers, 1 to 16777216 |
@@ -291,7 +301,7 @@ take `--config <path>` for a `rift.lua` elsewhere.
 | `rift cluster init --peer <name>` | Creates a cluster whose only voter is this peer, from this Rift's instance database. Run it while Rift is stopped |
 | `rift cluster init --peer <name> --from-backup <file>` | The same, from a [backup](#backup-and-recovery) instead of the local database |
 | `rift cluster recover --peer <name> --i-understand-data-loss` | Makes this peer the only voter when the other voters are gone for good. Run it while Rift is stopped on this host |
-| `rift witness` | Runs this host as a [witness](#voters-learners-and-witnesses) until Ctrl-C (SIGINT) |
+| `rift witness` | Runs this host as a [witness](#voters-learners-and-witnesses) until SIGTERM (`systemctl stop`) or Ctrl-C (SIGINT), either of which stops it cleanly |
 
 ### `rift admin cluster`
 
@@ -668,8 +678,10 @@ member:
    servers); then the peer leaves Raft and exits.
 
 A transferred client connects to the target with the transfer intent. Rift
-accepts that from 1.20.5+ clients and always sends its backend a normal
-login, so backends need no `accepts-transfers=true`.
+accepts that from 1.20.5+ clients, and a cluster peer sends its backend a
+normal login for it (a handoff between peers is no transfer from the
+backend's point of view), so backends need no `accepts-transfers=true`. A
+single Rift passes the transfer intent on as before.
 
 To restart or upgrade a cluster, take one peer at a time:
 
@@ -735,9 +747,11 @@ The new cluster has a new id, one voter and Raft ids from 1; the old
 cluster's peers, player claims, node sessions, bus addresses and per-peer
 reports are cleared. Since the backup holds the deployment history, put the
 last deployed revision beside `cluster.toml` as `rift.lua` (or start the
-peer with `--adopt-deployed`). `rift.peer` is nil while init reads the
-configuration, so write fallbacks such as `admin_ports[rift.peer] or 9091`.
-Then start Rift and add peers as on a first setup.
+peer with `--adopt-deployed`). Init reads the configuration as the new peer
+does, with `rift.peer` set to its name. Once running, a peer needs every
+node its configuration names, so when servers or groups are placed on
+peer-nodes, restore onto peers named like the old ones. Then start Rift and
+add peers as on a first setup.
 
 **Recover from the loss of a majority.** When the other voters are gone for
 good, a surviving peer can continue alone:
@@ -774,17 +788,11 @@ peer that lost its own disk while the others survive is re-added with
   wait while there is no leader; plugin store writes give up after five
   seconds.
 - **Memory streams** start empty after a leader change.
-- **The messaging section is shared**, so `messaging.advertise` is the same
-  on every peer and `RIFT_BUS_ADDRESSES` holds that one address for all of
-  them. Use a DNS name that reaches every peer, and give node agents one
-  `--controller` per peer.
 - **Moves forwarded from a follower** show progress only on the follower
   that forwarded them, and fail there if the leader changes while the move
   runs; check the move on the new leader.
 - **`keep_running`** works for named servers on a peer's own node, not for
   service groups.
-- **No dashboard panel** for the cluster; use `rift admin cluster` or
-  `GET /api/cluster`.
 - **Byzantine peers** are out of scope: peers trust each other completely.
 
 ## Operating a cluster
@@ -804,7 +812,7 @@ same object; over HTTP it also has `"enabled": true`, and a Rift without
 | `last_log_index`, `commit_index`, `applied_index`, `snapshot_index`, `log_bytes` | Its log and replica |
 | `diverged` | Its replica diverged and is being repaired |
 | `membership_changing` | A membership change is still being committed |
-| `peers` | One entry per peer: `name`, `raft_id`, `incarnation`, `role` (`voter`, `witness`, `learner`, `pending`), `address`, `public_address`, `leader`, `this_peer`, `up`, `expired`, `last_heard_ms`, `lag` (entries behind the leader; only on the leader, see `status --leader`), `version` and `labels` (including the announced `node.*` limits) |
+| `peers` | One entry per peer: `name`, `raft_id`, `incarnation`, `role` (`voter`, `witness`, `learner`, `pending`), `address`, `public_address`, `leader`, `this_peer`, `up`, `expired`, `last_heard_ms`, `lag` (entries behind the leader; only on the leader, see `status --leader`), `version`, `labels` (including the announced `node.*` limits) and `players` (connected to that peer) |
 | `configuration` | The last `deployment` (`id`, `revision`, `actor`, `action`, `timestamp_unix_ms`, `shared_hash`), each peer's report (`peer`, `reported`, `deployment`, `in_sync`, `shared_hash`, `shared_differs`, `reload_error`) and the replicated `templates` (`folders`, `files`, `bytes`) |
 
 `rift check --strict` on a peer reports, besides the checks of a single Rift:
@@ -822,6 +830,25 @@ same object; over HTTP it also has `"enabled": true`, and a Rift without
   behind the leader, and node agents that cannot be fenced.
 
 Plain `rift check` also flags persistent plugins without `cluster = true`.
+
+On a peer, `GET /api/players`, `GET /api/servers`, `rift.players.list`,
+`rift.control.servers`, `rift admin status` and `rift admin servers` give
+every player and server a `peer`: the peer holding the player's connection,
+and the peer whose own node runs the server (`null` on a `rift node` agent).
+A single Rift's output has no `peer`.
+
+### Dashboard
+
+The [dashboard](http.md#the-cluster-panel)'s Overview page shows a Cluster
+panel on every peer, from the same status: each peer's role, reachability,
+last heard, incarnation, lag, players, load, version and configuration
+state, its labels and limits, the term, leader and indexes, and a warning
+while the replica diverged or there is no leader. Its Servers table gets a
+Peer column. Operators with the web `cluster` permission can hand the
+leadership to another voter and drain a peer from the panel
+(`POST /api/cluster/transfer-leader`, `POST /api/cluster/peers/{name}/leave`;
+see the [HTTP API](http-api.md#status-and-metrics)), which run as
+`rift admin cluster transfer-leader` and `leave` do.
 
 ### Metrics
 

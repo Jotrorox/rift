@@ -447,6 +447,10 @@ pub struct Session<C, B> {
     /// `authentication.signed_chat`: when false, no backend learns the
     /// player's chat key (1.19–1.19.2) or chat session (1.19.3+).
     signed_chat: bool,
+    /// Whether a client that arrived with the transfer intent reaches its
+    /// backends with the login intent: on a cluster peer, whose arrivals
+    /// with the transfer intent may be players another peer handed over.
+    transfers_as_logins: bool,
     forwarding: Option<Forwarding>,
     network: bool,
     bungeecord: bool,
@@ -504,6 +508,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             authenticated_profile: None,
             profile_key: None,
             signed_chat: true,
+            transfers_as_logins: false,
             forwarding: None,
             network: false,
             bungeecord: false,
@@ -667,6 +672,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// the player's chat as unsigned. Set before the first backend login.
     pub fn set_signed_chat(&mut self, signed_chat: bool) {
         self.signed_chat = signed_chat;
+    }
+
+    /// Send backends the login intent although the client arrived with the
+    /// transfer intent; a cluster peer turns this on, since a player handed
+    /// over by another peer is no transfer from the backend's point of view
+    /// and backends without `accepts-transfers=true` refuse that intent. Set
+    /// before the first backend login.
+    pub fn set_transfers_as_logins(&mut self, transfers_as_logins: bool) {
+        self.transfers_as_logins = transfers_as_logins;
     }
 
     /// Whether backends learn this player's chat signing material. A reload
@@ -986,11 +1000,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         });
         let mut handshake = self.handshake.clone();
         handshake.protocol = backend_version.number();
-        // Backends always see a login. A client that arrived with the
-        // transfer intent (sent here by another server or by a cluster peer
-        // that drained) was accepted by Rift, so backends need not accept
-        // transfers themselves.
-        handshake.next_state = NextState::Login;
+        // A switch, an online-mode login and a cluster peer's arrival with
+        // the transfer intent (possibly a player another peer handed over)
+        // reach the backend as a login; otherwise the client's intent passes.
+        if replacing || self.authenticated_profile.is_some() || self.transfers_as_logins {
+            handshake.next_state = NextState::Login;
+        }
         if let Some(forwarding) = &self.forwarding
             && let Some(address) = forwarding.handshake_address(&self.handshake.address)?
         {

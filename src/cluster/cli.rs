@@ -107,6 +107,11 @@ async fn init(flags: Flags) -> io::Result<()> {
         .peer
         .ok_or_else(|| super::invalid(format!("rift cluster init needs --peer <name>\n{USAGE}")))?;
     let settings = load_settings(&flags.config, Some(&peer))?;
+    // The configuration is read as this peer reads it: `rift.peer` is its
+    // name, and servers and groups may name peer-nodes, which are checked
+    // once the peer runs. Init reports servers still on `local` itself.
+    settings::set_local_peer(&settings.peer);
+    settings::report_placement();
     let config = load_config(&flags.config)?;
     if config
         .as_ref()
@@ -425,13 +430,17 @@ fn recover(flags: Flags) -> io::Result<()> {
     Ok(())
 }
 
-/// `rift witness`: a voter without listeners, until Ctrl-C.
+/// `rift witness`: a voter without listeners, until SIGINT or SIGTERM
+/// (Ctrl-C on Windows), as the proxy stops.
 pub async fn witness(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("{USAGE}");
         return Ok(());
     }
     let flags = flags(args)?;
+    // Registered first, so a stop that arrives while the peer starts is
+    // not lost (and does not kill the process without a clean shutdown).
+    let mut stop = Stop::new()?;
     let mut settings = load_settings(&flags.config, None)?;
     settings.witness = true;
     settings::set_local_peer(&settings.peer);
@@ -457,8 +466,53 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     // A witness holds template blobs, so it counts toward the voters an
     // upload must reach before its manifest commits.
     super::files::attach_witness(&cluster).await?;
-    log_info!("cluster: witness {name} running; Ctrl-C stops it");
-    tokio::signal::ctrl_c().await?;
+    log_info!("cluster: witness {name} running; SIGINT or SIGTERM (Ctrl-C) stops it");
+    stop.wait().await;
+    log_info!("cluster: witness {name} stopping");
     cluster.shutdown().await;
     Ok(())
+}
+
+/// The signals that stop a witness: those that stop the proxy.
+#[cfg(unix)]
+struct Stop {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Stop {
+    fn new() -> io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn wait(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+/// The signals that stop a witness: those that stop the proxy.
+#[cfg(windows)]
+struct Stop {
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+#[cfg(windows)]
+impl Stop {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::windows::ctrl_c()?,
+        })
+    }
+
+    async fn wait(&mut self) {
+        self.interrupt.recv().await;
+    }
 }

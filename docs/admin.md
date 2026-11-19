@@ -97,7 +97,7 @@ Prefix each command with `rift admin`.
 | `plugins restart <name>` | `plugins` | Stops a persistent plugin and starts a fresh instance with its current configuration; recorded in the operator audit log with the plugin name |
 | `plugins run <command> [arguments]` | `plugins` | Runs a persistent plugin's [command](plugin-events.md#commands) that is registered with `console`, and prints its message |
 | `perms <command>` | `perms` | Runs the [`/perms` grammar](permissions-commands.md) with console rights, plus `log`, `compiled`, `doctor` and `backends` |
-| `cluster`, `cluster status [--leader]` | `status` | Shows this [cluster](clustering.md#operating-a-cluster) peer's view of members, roles, leader, term, indexes and lag; `--leader` fetches the leader's view, which knows every peer's lag |
+| `cluster`, `cluster status [--leader]` | `status` | Shows this [cluster](clustering.md#operating-a-cluster) peer's view of members, roles, leader, term, indexes, lag and each peer's players; `--leader` fetches the leader's view, which knows every peer's lag |
 | `cluster add <name> <host:port> [--witness]` | `cluster` | Adds a peer as a learner; see [membership commands](clustering.md#rift-admin-cluster) |
 | `cluster promote <name>`, `cluster demote <name> [--force]` | `cluster` | Makes a caught-up learner a voter, or a voter a learner |
 | `cluster remove <name> [--force]`, `cluster replace <name> [--force]` | `cluster` | Removes a peer, or re-adds one that lost its Raft file under a new id |

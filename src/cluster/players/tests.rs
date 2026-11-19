@@ -17,7 +17,7 @@ use crate::{
     },
     messaging::Broker,
     permissions::Authority,
-    players::{Admission, PlayerRegistration, claims::Claims},
+    players::{Admission, NameReservation, PlayerRegistration, claims::Claims},
     service_state::ServiceStates,
     text::Text,
 };
@@ -310,6 +310,57 @@ async fn simultaneous_logins_on_two_peers_let_exactly_one_win() {
         Claims::live(&*players.roster().claims()).is_empty()
     })
     .await;
+    net.shutdown().await;
+}
+
+/// The decision the runtime makes before a backend sees a login
+/// (`PlayerRegistry::claims_before_backend`), for a configuration a single
+/// Rift passes through without reading the name (no network, hooks,
+/// managed servers or online mode, as in tests/cluster.rs): a peer's
+/// registry, once attached, makes every login claim its name, so of two
+/// simultaneous logins of one name on two peers exactly one reaches its
+/// backend. A registry nobody attached decides alone and would not.
+#[tokio::test(start_paused = true)]
+async fn a_plain_proxy_peer_claims_every_name_before_its_backend() {
+    let single = Peer::new();
+    assert!(!single.players.roster().clustered());
+    assert!(!single.players.roster().claims_before_backend(false));
+    let mut net = Net::new(3, Net::config());
+    net.form(3).await;
+    for index in 0..3 {
+        let roster = net.players(index).roster().clone();
+        assert!(roster.clustered(), "peer {index}");
+        assert!(roster.claims_before_backend(false), "peer {index}");
+    }
+    /// A plain login up to the moment its backend would see it: the name
+    /// it holds then, `None` when it would not have claimed one.
+    async fn reach_backend(
+        players: &Players,
+        counter: u64,
+        name: &str,
+    ) -> io::Result<Option<NameReservation>> {
+        let roster = players.roster().clone();
+        if !roster.claims_before_backend(false) {
+            return Ok(None);
+        }
+        let connection = roster.identity().connection_id(counter);
+        roster.claim_name(name, connection).await.map(Some)
+    }
+    let (a, b) = (net.players(0), net.players(1));
+    let (first, second) =
+        tokio::join!(reach_backend(&a, 10, "Twin"), reach_backend(&b, 10, "twin"));
+    let held: Vec<bool> = [&first, &second]
+        .iter()
+        .map(|outcome| matches!(outcome, Ok(Some(_))))
+        .collect();
+    assert_eq!(held.iter().filter(|held| **held).count(), 1, "{held:?}");
+    let error = first
+        .as_ref()
+        .err()
+        .or_else(|| second.as_ref().err())
+        .unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    drop((first, second));
     net.shutdown().await;
 }
 

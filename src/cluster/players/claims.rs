@@ -548,6 +548,10 @@ impl Claims for RaftClaims {
     fn subscribe(&self) -> broadcast::Receiver<ClaimChange> {
         self.shared.subscribe()
     }
+
+    fn networked(&self) -> bool {
+        true
+    }
 }
 
 /// The release that undoes a granted claim whose caller went away.

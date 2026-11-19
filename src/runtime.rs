@@ -734,12 +734,16 @@ pub async fn handle(
             || snapshot.config.player_hooks()
             || !snapshot.config.service_groups.is_empty();
         // Backend permission replicas need the player's snapshot before the
-        // login reaches them, so the name is read first.
-        let tracked_login = network_configured
-            || !snapshot.config.managed_servers.is_empty()
-            || snapshot.authenticator.is_some()
-            || snapshot.perms.has_principals()
-            || snapshot.config.maintenance_permission.is_some();
+        // login reaches them, so the name is read first. A cluster peer
+        // claims every login's name before any backend sees it: another
+        // peer may admit the same name at the same moment.
+        let tracked_login = snapshot.players.claims_before_backend(
+            network_configured
+                || !snapshot.config.managed_servers.is_empty()
+                || snapshot.authenticator.is_some()
+                || snapshot.perms.has_principals()
+                || snapshot.config.maintenance_permission.is_some(),
+        );
         let network_enabled = session.switch_supported() && network_configured;
         // Proxy-side checks see the dimension and game mode the backend sends.
         session.track_permission_contexts(snapshot.extensions.permissions().clone());
@@ -751,6 +755,9 @@ pub async fn handle(
             session.enable_bungeecord();
         }
         session.set_signed_chat(snapshot.config.authentication.signed_chat);
+        // A cluster peer's arrivals with the transfer intent may be players
+        // another peer handed over: its backends see a login.
+        session.set_transfers_as_logins(snapshot.players.clustered());
         let mut login_name = if tracked_login {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
@@ -2017,19 +2024,24 @@ fn instance_logins(
 }
 
 /// Every address instances may reach the bus at, the preferred one first:
-/// `messaging.advertise`, else the bound address with `127.0.0.1` for an
-/// unspecified IP, which only local instances can use (`rift check` warns
-/// about nodes then). A cluster adds its other peers here.
+/// on a cluster peer its own bus address (`bus_address` in cluster.toml, else
+/// its advertise host with the listener's port; see [`peer_bus_address`]);
+/// otherwise `messaging.advertise`, else the bound address with `127.0.0.1`
+/// for an unspecified IP, which only local instances can use (`rift check`
+/// warns about nodes then). A cluster adds its other peers here.
 fn bus_addresses(config: &Config, bound: SocketAddr) -> Vec<String> {
     let messaging = config.messaging.as_ref().expect("listening");
-    let address = messaging.advertise.clone().unwrap_or_else(|| {
-        let ip = if bound.ip().is_unspecified() {
-            std::net::IpAddr::from([127, 0, 0, 1])
-        } else {
-            bound.ip()
-        };
-        SocketAddr::new(ip, bound.port()).to_string()
-    });
+    let address = peer_bus_address(bound)
+        .map(|(address, _)| address)
+        .or_else(|| messaging.advertise.clone())
+        .unwrap_or_else(|| {
+            let ip = if bound.ip().is_unspecified() {
+                std::net::IpAddr::from([127, 0, 0, 1])
+            } else {
+                bound.ip()
+            };
+            SocketAddr::new(ip, bound.port()).to_string()
+        });
     let mut addresses = vec![address];
     if let Some(cluster) = rift::cluster::global() {
         for other in rift::cluster::bus::other_addresses(cluster) {
@@ -2041,17 +2053,41 @@ fn bus_addresses(config: &Config, bound: SocketAddr) -> Vec<String> {
     addresses
 }
 
-/// The name the messaging certificate is verified for.
-fn bus_server_name(config: &Config) -> String {
+/// A cluster peer's own bus address, and whether its `cluster.toml` names
+/// it (`bus_address`) rather than deriving it from `advertise`. `None` on a
+/// single Rift, and when `advertise` is a wildcard address: the messaging
+/// section is shared, so `messaging.advertise` cannot tell peers apart.
+fn peer_bus_address(bound: SocketAddr) -> Option<(String, bool)> {
+    let settings = rift::cluster::global()?.settings();
+    let address = settings.bus_address(bound.port())?;
+    Some((address, settings.bus_address.is_some()))
+}
+
+/// The name the messaging certificate is verified for:
+/// `messaging.advertise_server_name`; else the host of a cluster peer's
+/// `bus_address`; else the host of `messaging.advertise`; else the host a
+/// cluster peer derived from its `advertise`; else `localhost`.
+fn bus_server_name(config: &Config, bound: SocketAddr) -> String {
     let messaging = config.messaging.as_ref().expect("listening");
-    messaging.advertise_server_name.clone().unwrap_or_else(|| {
-        messaging
-            .advertise
-            .as_deref()
-            .and_then(|advertise| advertise.rsplit_once(':'))
-            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
-            .unwrap_or_else(|| "localhost".to_owned())
-    })
+    let host = |address: &str| rift::cluster::settings::host_of(address).to_owned();
+    let peer = peer_bus_address(bound);
+    messaging
+        .advertise_server_name
+        .clone()
+        .or_else(|| {
+            peer.as_ref()
+                .filter(|(_, named)| *named)
+                .map(|(address, _)| host(address.as_str()))
+        })
+        .or_else(|| {
+            messaging
+                .advertise
+                .as_deref()
+                .filter(|advertise| advertise.contains(':'))
+                .map(host)
+        })
+        .or_else(|| peer.as_ref().map(|(address, _)| host(address.as_str())))
+        .unwrap_or_else(|| "localhost".to_owned())
 }
 
 /// Where bus clients reach this peer, as a cluster announces it: the
@@ -2059,7 +2095,7 @@ fn bus_server_name(config: &Config) -> String {
 fn bus_address(config: &Config, bound: SocketAddr) -> rift::cluster::bus::BusAddress {
     rift::cluster::bus::BusAddress {
         address: bus_addresses(config, bound).remove(0),
-        server_name: bus_server_name(config),
+        server_name: bus_server_name(config, bound),
     }
 }
 
@@ -2068,7 +2104,7 @@ fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::ins
     let messaging = config.messaging.as_ref().expect("listening");
     let mut addresses = bus_addresses(config, bound);
     let address = addresses.remove(0);
-    let server_name = bus_server_name(config);
+    let server_name = bus_server_name(config, bound);
     let path = messaging
         .certificate
         .as_ref()

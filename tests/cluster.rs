@@ -5,6 +5,13 @@
 //! peers, restoring a backup into a new cluster, and draining a peer with
 //! `rift admin cluster leave`, which sends a 1.20.5 client to another peer
 //! with the Transfer packet and gives a 1.8 client a reconnect message.
+//!
+//! The first configuration places a named server on peer `a`'s own node, so
+//! `rift cluster init` (also `--from-backup`) and every peer's start read a
+//! configuration that names a peer-node. The server never starts.
+//!
+//! When the test fails, the fixture prints every running peer's last log
+//! lines and its `GET /api/cluster` before it stops them.
 use rift::protocol::{
     Codec, Handshake, MAX_FRAME_SIZE, NextState, Packet, read_string, read_varint, write_string,
     write_varint,
@@ -66,10 +73,15 @@ struct Fixture {
     root: PathBuf,
     peers: Vec<Peer>,
     backend: SocketAddr,
+    /// The port of the named server on peer `a`'s node, which never starts.
+    spare: u16,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!("cluster test failed; the peers:{}", self.diagnostics());
+        }
         for peer in &mut self.peers {
             peer.process.take();
         }
@@ -155,7 +167,8 @@ impl Fixture {
         let backend_address = backend.local_addr().unwrap();
         thread::spawn(move || serve_backends(backend));
         let names = ["a", "b", "c", "z"];
-        let ports = free_ports(names.len() * 4);
+        let ports = free_ports(names.len() * 4 + 1);
+        let spare = ports[names.len() * 4];
         let authority = Authority::new();
         let peers: Vec<Peer> = names
             .into_iter()
@@ -179,8 +192,9 @@ impl Fixture {
             root,
             peers,
             backend: backend_address,
+            spare,
         };
-        let source = fixture.source("first configuration");
+        let source = fixture.first_source();
         for peer in &fixture.peers {
             // `z` starts a cluster of its own and contacts nobody.
             let seeds: Vec<String> = fixture
@@ -209,6 +223,23 @@ impl Fixture {
         fixture
     }
 
+    /// The configuration `rift cluster init` reads and every peer starts
+    /// with: [`Fixture::source`] with a named server on peer `a`'s own node
+    /// (a peer-node), which neither starts by itself nor on a connection.
+    fn first_source(&self) -> String {
+        let server = format!(
+            "config.backends.spare = '127.0.0.1:{}'\n\
+             config.managed_servers = {{ spare = {{ node = 'a', directory = 'spare', \
+             command = {{ {:?}, '--version' }}, autostart = false, start_on_connect = false }} }}\n\
+             return config\n",
+            self.spare,
+            env!("CARGO_BIN_EXE_rift")
+        );
+        self.source("first configuration")
+            .replacen("return {", "local config = {", 1)
+            + &server
+    }
+
     /// The configuration every peer runs; `marker` makes revisions differ.
     /// Listeners, the admin and the web listener are peer sections, so each
     /// peer picks its own ports by `rift.peer`.
@@ -226,7 +257,7 @@ impl Fixture {
         format!(
             "-- {marker}\n\
              local ports = {{\n{ports}}}\n\
-             -- rift.peer is nil while `rift cluster init` reads this file.\n\
+             -- rift.peer is this peer's name, also while `rift cluster init` reads this file.\n\
              local own = ports[rift.peer] or ports.a\n\
              return {{\n\
              \x20   listeners = {{ public = '127.0.0.1:' .. own.game }},\n\
@@ -269,19 +300,15 @@ impl Fixture {
         assert!(peer.process.is_none(), "{name} runs already");
         let mut child = Self::command(&peer.directory)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let stderr = child.stderr.take().unwrap();
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let output = logs.clone();
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                output.lock().unwrap().push(line);
-            }
-        });
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        collect(stdout, logs.clone(), "out: ");
+        collect(stderr, logs.clone(), "");
         peer.process = Some(Process { child, logs });
     }
 
@@ -295,14 +322,37 @@ impl Fixture {
         let mut text = String::new();
         for peer in &self.peers {
             if let Some(process) = &peer.process {
-                let logs = process.logs.lock().unwrap();
-                let start = logs.len().saturating_sub(40);
                 text.push_str(&format!("\n--- {} ---\n", peer.name));
-                for line in &logs[start..] {
-                    text.push_str(line);
-                    text.push('\n');
-                }
+                text.push_str(&tail(&process.logs, 40));
             }
+        }
+        text
+    }
+
+    /// Every running peer's last log lines and its `GET /api/cluster`
+    /// (asked briefly: a peer that hangs must not hang the report).
+    fn diagnostics(&self) -> String {
+        let mut text = String::new();
+        for peer in &self.peers {
+            let Some(process) = &peer.process else {
+                continue;
+            };
+            let status = http_within(
+                peer.web,
+                "GET",
+                "/api/cluster",
+                None,
+                Duration::from_secs(3),
+            )
+            .map_or_else(
+                || "no answer".to_owned(),
+                |reply| format!("{} {}", reply.status, reply.body),
+            );
+            text.push_str(&format!(
+                "\n--- {} (game {}, web {}, cluster {}) ---\nGET /api/cluster: {status}\n",
+                peer.name, peer.game, peer.web, peer.cluster
+            ));
+            text.push_str(&tail(&process.logs, 80));
         }
         text
     }
@@ -408,6 +458,28 @@ impl Fixture {
     }
 }
 
+/// Append every line `pipe` prints to `logs`, prefixed with `prefix`.
+fn collect(pipe: impl Read + Send + 'static, logs: Arc<Mutex<Vec<String>>>, prefix: &'static str) {
+    thread::spawn(move || {
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { break };
+            logs.lock().unwrap().push(format!("{prefix}{line}"));
+        }
+    });
+}
+
+/// The last `count` lines of `logs`, one per line.
+fn tail(logs: &Mutex<Vec<String>>, count: usize) -> String {
+    let logs = logs.lock().unwrap_or_else(|e| e.into_inner());
+    let start = logs.len().saturating_sub(count);
+    let mut text = String::new();
+    for line in &logs[start..] {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
 /// Run `command` to completion, killing it after `limit`. Its output is
 /// read while it runs, so a full pipe never blocks it.
 fn output_within(mut command: Command, limit: Duration, what: &str) -> Output {
@@ -454,11 +526,20 @@ struct Reply {
 }
 
 fn http(port: u16, method: &str, path: &str, body: Option<&Value>) -> Option<Reply> {
+    http_within(port, method, path, body, Duration::from_secs(60))
+}
+
+/// [`http`] that waits at most `limit` for each read.
+fn http_within(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    limit: Duration,
+) -> Option<Reply> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .ok()?;
+    stream.set_read_timeout(Some(limit)).ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(10)))
         .ok()?;
@@ -797,7 +878,10 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
             .filter(|outcome| matches!(outcome, Login::Accepted(_)))
             .count();
         let described: Vec<String> = outcomes.iter().map(Login::describe).collect();
-        assert!(accepted <= 1, "two peers accepted {name}: {described:?}");
+        assert!(
+            accepted <= 1,
+            "two peers accepted {name}: {described:?}; earlier attempts: {seen:?}"
+        );
         seen.push(described);
         let duplicate = outcomes.iter().any(|outcome| {
             matches!(outcome, Login::Refused(reason) if reason.contains("already connected"))
@@ -861,11 +945,11 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
         .unwrap_or_else(|error| panic!("cluster backup: {error}"));
     assert!(backed_up["applied_index"].as_u64().is_some(), "{backed_up}");
     assert!(backup.is_file());
-    // The backup holds the deployment history: the new peer runs the last
-    // deployed revision.
-    fs::copy(
-        fixture.peer("a").directory.join("rift.lua"),
+    // Init reads the first configuration, which places a server on peer
+    // `a`'s node, as peer `z` would.
+    fs::write(
         fixture.peer("z").directory.join("rift.lua"),
+        fixture.first_source(),
     )
     .unwrap();
     let restored = fixture.run(
@@ -884,6 +968,13 @@ fn three_peers_replicate_fail_over_restore_and_drain() {
         "{}",
         String::from_utf8_lossy(&restored.stderr)
     );
+    // The backup holds the deployment history: the new peer runs the last
+    // deployed revision, which names no peer-node.
+    fs::copy(
+        fixture.peer("a").directory.join("rift.lua"),
+        fixture.peer("z").directory.join("rift.lua"),
+    )
+    .unwrap();
     fixture.start("z");
     let status = fixture.wait_joined("z");
     assert_ne!(

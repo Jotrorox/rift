@@ -337,6 +337,13 @@ pub trait Claims: Send + Sync + 'static {
     /// [`Claims::live`].
     fn subscribe(&self) -> broadcast::Receiver<ClaimChange>;
 
+    /// Whether other processes claim names in the same table (a cluster):
+    /// then every login must claim its name before a backend sees it, even
+    /// one that a single Rift passes through without reading its name.
+    fn networked(&self) -> bool {
+        false
+    }
+
     /// Claim a pending login's lowercase name.
     fn claim_name(
         &self,

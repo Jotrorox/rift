@@ -290,6 +290,10 @@ impl Claims for MemoryClaims {
             None => broadcast::channel(1).1,
         }
     }
+
+    fn networked(&self) -> bool {
+        true
+    }
 }
 
 struct MemoryRouter {

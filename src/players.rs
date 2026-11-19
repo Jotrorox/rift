@@ -339,6 +339,23 @@ impl PlayerRegistry {
             .clone()
     }
 
+    /// Whether this registry's claims are shared with other processes (a
+    /// cluster peer; see [`Claims::networked`]). Every login on such a peer
+    /// claims its name before a backend sees it, and its backends get the
+    /// login intent for clients that arrived with the transfer intent.
+    pub fn clustered(&self) -> bool {
+        self.claims().networked()
+    }
+
+    /// Whether a login must claim its name before a backend sees it:
+    /// `tracked` says whether a single Rift with this configuration reads
+    /// the login's name anyway (a network, hooks, managed servers, online
+    /// mode, ...); on a cluster peer every login does, or two peers could
+    /// both admit one name.
+    pub fn claims_before_backend(&self, tracked: bool) -> bool {
+        tracked || self.clustered()
+    }
+
     /// The peer and incarnation this registry's players belong to.
     pub fn identity(&self) -> Identity {
         self.lock().identity()

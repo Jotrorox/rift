@@ -66,6 +66,9 @@ pub struct Settings {
     pub labels: BTreeMap<String, String>,
     /// Where players reach this peer, for transfers during a drain.
     pub public_address: Option<String>,
+    /// Where bus clients and node agents reach this peer's messaging
+    /// listener; see [`Settings::bus_address`].
+    pub bus_address: Option<String>,
     /// A voter that takes no players and hands leadership away.
     pub witness: bool,
     /// The directory of `rift.lua`: Raft file, state machine, snapshots.
@@ -149,6 +152,7 @@ struct Raw {
     #[serde(default)]
     labels: BTreeMap<String, String>,
     public_address: Option<String>,
+    bus_address: Option<String>,
     #[serde(default)]
     witness: bool,
     #[serde(default)]
@@ -269,6 +273,9 @@ impl Settings {
         if let Some(address) = &raw.public_address {
             check_address(address, "public_address")?;
         }
+        if let Some(address) = &raw.bus_address {
+            check_address(address, "bus_address")?;
+        }
         let file = |value: String, key: &str| -> Result<PathBuf, String> {
             if value.trim().is_empty() || value.contains('\0') {
                 return Err(format!("{key}: expected a file path"));
@@ -286,9 +293,33 @@ impl Settings {
             seeds: raw.seeds,
             labels: raw.labels,
             public_address: raw.public_address,
+            bus_address: raw.bus_address,
             witness: raw.witness,
             directory: directory.to_path_buf(),
             node: raw.node,
+        })
+    }
+
+    /// Where bus clients reach this peer's messaging listener, which
+    /// listens on `port` (the shared `messaging.listen`): `bus_address`, else
+    /// the host of `advertise` with that port. `None` when `advertise` names
+    /// a wildcard address, so the shared settings decide as on a single
+    /// Rift (`messaging.advertise`, else the listener's own address).
+    pub fn bus_address(&self, port: u16) -> Option<String> {
+        if let Some(address) = &self.bus_address {
+            return Some(address.clone());
+        }
+        let host = host_of(&self.advertise);
+        if host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_unspecified())
+        {
+            return None;
+        }
+        Some(if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
         })
     }
 
@@ -367,6 +398,23 @@ static LOCAL_PEER: OnceLock<String> = OnceLock::new();
 /// the configuration is evaluated; later calls are ignored.
 pub fn set_local_peer(name: &str) {
     let _ = LOCAL_PEER.set(name.to_owned());
+}
+
+static PLACEMENT_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `rift cluster init`: configurations this process evaluates name the peer
+/// and accept peer-node names, but servers still placed on `local` are
+/// reported by init (which converts registered instances) instead of
+/// refused. Set once, before the configuration is evaluated.
+pub fn report_placement() {
+    PLACEMENT_REPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether configuration validation leaves the cluster placement to the
+/// caller ([`report_placement`]).
+pub fn placement_reported() -> bool {
+    PLACEMENT_REPORTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `rift.peer`: this process's peer name, `None` outside a cluster. Inside
@@ -461,6 +509,37 @@ mod tests {
         assert!(error.contains("advertise"), "{error}");
         let seed = MINIMAL.replace("eu-3.internal:7444", "eu-3.internal");
         assert!(Settings::parse(&seed, Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn the_bus_address_comes_from_the_peer() {
+        // From the advertise host and the shared messaging.listen port.
+        let settings = Settings::parse(MINIMAL, Path::new(".")).unwrap();
+        assert_eq!(settings.bus_address, None);
+        assert_eq!(settings.bus_address(7443).as_deref(), Some("10.0.0.1:7443"));
+        let ipv6 = MINIMAL.replace("10.0.0.1:7444", "[fd00::1]:7444");
+        let settings = Settings::parse(&ipv6, Path::new(".")).unwrap();
+        assert_eq!(
+            settings.bus_address(7443).as_deref(),
+            Some("[fd00::1]:7443")
+        );
+        // Set in cluster.toml, whatever the port.
+        let own = MINIMAL.replace(
+            "[labels]",
+            "bus_address = \"eu-1.bus.internal:7500\"\n[labels]",
+        );
+        let settings = Settings::parse(&own, Path::new(".")).unwrap();
+        assert_eq!(
+            settings.bus_address(7443).as_deref(),
+            Some("eu-1.bus.internal:7500")
+        );
+        let bad = MINIMAL.replace("[labels]", "bus_address = \"eu-1.bus.internal\"\n[labels]");
+        let error = Settings::parse(&bad, Path::new(".")).unwrap_err();
+        assert!(error.contains("bus_address"), "{error}");
+        // A wildcard advertise leaves it to the shared settings.
+        let wildcard = MINIMAL.replace("10.0.0.1:7444", "0.0.0.0:7444");
+        let settings = Settings::parse(&wildcard, Path::new(".")).unwrap();
+        assert_eq!(settings.bus_address(7443), None);
     }
 
     #[test]

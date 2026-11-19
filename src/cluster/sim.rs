@@ -199,6 +199,7 @@ impl Sim {
                 .collect(),
             labels: self.labels.get(&index).cloned().unwrap_or_default(),
             public_address: None,
+            bus_address: None,
             witness: false,
             directory,
             node: super::settings::NodeSettings::default(),

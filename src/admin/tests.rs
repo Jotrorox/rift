@@ -1368,3 +1368,26 @@ rift.config.service_groups.hub={template='hub',storage='disposable',port_range={
     );
     assert!(error.contains("b: node b is unreachable"), "{error}");
 }
+
+#[test]
+fn a_server_belongs_to_the_peer_whose_own_node_runs_it() {
+    let mut config = Config::from_addresses("127.0.0.1:0", "127.0.0.1:1").unwrap();
+    for (name, peer) in [("eu-1", true), ("games", false)] {
+        config.nodes.insert(
+            name.to_owned(),
+            rift::config::NodeConfig {
+                address: "10.0.0.1".into(),
+                memory_mb: None,
+                max_instances: 8,
+                min_free_disk_mb: 0,
+                labels: Default::default(),
+                token_env: String::new(),
+                peer,
+            },
+        );
+    }
+    assert_eq!(server_peer(&config, Some("eu-1")), Some("eu-1"));
+    // A `rift node` agent belongs to no peer, and neither does this host.
+    assert_eq!(server_peer(&config, Some("games")), None);
+    assert_eq!(server_peer(&config, None), None);
+}

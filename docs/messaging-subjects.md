@@ -59,7 +59,7 @@ id.
 
 | Subject | Request | Reply `data` | Needs |
 | --- | --- | --- | --- |
-| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774,"visible_to":null,"locale":"en_us"}]` | `players` |
+| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774,"visible_to":null,"locale":"en_us"}]`; on a [cluster](clustering.md) peer each player also has `peer`, the peer holding its connection | `players` |
 | `rift.players.get` | `{"target":"Alice"}` | one player, or `null` | `players` |
 | `rift.players.names` | `{}` or `{"prefix":"Al"}` | sorted names | `players` |
 | `rift.players.message` | `{"target":"Alice","text":"Hello"}` | whether the player was online | `players` |
@@ -154,7 +154,7 @@ listener is disabled.
 | `rift.control.drain` | `{"backend":"lobby","enabled":true}` | Enable/disable draining for a backend | `control` |
 | `rift.control.transfer` | `{"connection_id":123,"backend":"lobby"}` | Transfer an online player with existing protocol/access checks | `control` |
 | `rift.control.reload` | `{}` | Reload the selected configuration file | `control` |
-| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node | `control` |
+| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node; on a [cluster](clustering.md#servers-on-the-peers-own-hosts) peer also `peer` (the peer whose own node runs it, else `null`) | `control` |
 | `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling, node selection and instances | `control` |
 | `rift.control.nodes` | `{}` | [Nodes](nodes.md) with reachability, address, labels, instances, allocated memory and measured host resources | `control` |
 | `rift.control.templates` | `{}` | Templates with their server software and download cache state | `control` |

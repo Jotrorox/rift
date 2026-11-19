@@ -400,6 +400,10 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         let attached =
             rift::cluster::attach::database(&config, peer, source.as_deref(), components).await?;
         rift::cluster::install_global(attached.cluster.clone());
+        // The configuration was read before the peer-nodes were known; it
+        // gets them now, as every configuration evaluated from now on does.
+        let mut config = config;
+        rift::cluster::peer_nodes::add_to(&mut config.nodes);
         // Decision 6 for rift.lua, then deployments and templates.
         let (config, path) =
             rift::cluster::files::start(&attached.cluster, config, path, adopt_deployed).await?;

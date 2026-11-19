@@ -16,6 +16,10 @@ seeds = ["10.0.0.1:7444", "10.0.0.3:7444"]
 # Where players reach this peer directly; a peer that drains sends its
 # 1.20.5+ players to another peer's public_address.
 public_address = "eu-2.play.example.com:25565"
+# Where bus clients and node agents reach this peer's messaging listener.
+# Without it: the host of advertise with messaging.listen's port, here
+# "10.0.0.2:7443".
+# bus_address = "10.0.0.2:7443"
 
 # This peer is also a node named eu-2, with the labels "region" and "eu".
 [labels]
