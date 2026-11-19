@@ -53,6 +53,7 @@ export const DOCS = [
   page('Plugins', 'host-services', 'Host services', 'Durable state, timers, HTTP integrations and permissions for plugin code.'),
   page('Plugins', 'players-api', 'Online players API', 'Messages, titles, tab lists, kicks, broadcasts and transfers.'),
   page('Plugins', 'dialogs', 'Dialogs', 'Screens with inputs and buttons on 1.21.6+, shown by plugins through the proxy.'),
+  page('Plugins', 'menus', 'Inventory menus (design)', 'The plan for chest, hopper, dispenser and anvil screens that plugins open through the proxy.'),
   page('Plugins', 'plugins-lua', 'Lua plugins', 'Persistent plugins in their own LuaJIT state, and the JIT switch.'),
   page('Plugins', 'plugins-rust', 'Rust plugins', 'WebAssembly components with the rift-plugin crate.'),
   page('Plugins', 'plugins-c', 'C plugins', 'WebAssembly components with wasi-sdk and the C SDK.'),
