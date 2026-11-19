@@ -469,7 +469,9 @@ jobs:
     # The release profile (thin LTO, one codegen unit) links every test
     # executable slowly, so the targets are split across jobs. Together the
     # suites are `cargo test --release --all-targets` for the whole workspace.
-    timeout-minutes: 45
+    # The cluster code and tests/cluster.rs add about ten minutes to the
+    # release build; macOS integration takes about 45 minutes uncached.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
