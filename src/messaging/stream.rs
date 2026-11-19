@@ -4,12 +4,20 @@
 //! after its journal write (and `sync_data` when `sync_on_write` is enabled).
 //! Consumers use explicit acknowledgements and at-least-once redelivery. Retention
 //! can evict unacknowledged records; this is a bounded stream, not an unbounded log.
+//!
+//! In a cluster a stream handle can be routed through a [`StreamBackend`]
+//! (see [`Stream::route_through`]): every operation is then validated here
+//! and run by the backend, which forwards it to the leader's stream service
+//! (`docs/clustering.md`, "Retained streams"). Without a route, everything
+//! runs on this handle's own state, as on a single Rift.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -57,6 +65,77 @@ struct Inner {
     state: Mutex<State>,
     gate: Arc<Semaphore>,
     durable: bool,
+    /// Where operations run instead of `state`; see [`Stream::route_through`].
+    route: RwLock<Option<Route>>,
+}
+
+#[derive(Clone)]
+struct Route {
+    name: Arc<str>,
+    backend: Arc<dyn StreamBackend>,
+}
+
+/// One operation on a stream, as a [`StreamBackend`] receives it. The
+/// handle has already validated it against its own configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Publish {
+        subject: String,
+        reply: Option<String>,
+        payload: Bytes,
+    },
+    Replay {
+        from_sequence: u64,
+        limit: usize,
+    },
+    /// Create a durable consumer, or confirm an identical one; with a
+    /// scope, only while fewer than `limit` consumers' names start with it.
+    OpenConsumer {
+        name: String,
+        config: ConsumerConfig,
+        scope: Option<(String, usize)>,
+    },
+    GetConsumer {
+        name: String,
+    },
+    DeleteConsumer {
+        name: String,
+    },
+    Fetch {
+        consumer: String,
+        limit: usize,
+    },
+    Ack {
+        consumer: String,
+        sequence: u64,
+    },
+}
+
+/// What an [`Operation`] produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// `Publish`.
+    Record(Record),
+    /// `Replay`.
+    Records(Vec<Record>),
+    /// `Fetch`.
+    Deliveries(Vec<Delivery>),
+    /// Consumer operations and `Ack`.
+    Done,
+}
+
+/// The future a [`StreamBackend`] returns.
+pub type BackendFuture = Pin<Box<dyn Future<Output = Result<Outcome>> + Send>>;
+
+/// Runs the operations of routed streams elsewhere: in a cluster, on the
+/// leader's stream service.
+pub trait StreamBackend: Send + Sync + 'static {
+    /// Run `operation` on the stream configured as `stream`.
+    fn run(&self, stream: Arc<str>, operation: Operation) -> BackendFuture;
+}
+
+fn unexpected_outcome() -> Error {
+    Error::Storage("the stream service answered with an unexpected outcome".into())
 }
 
 #[derive(Clone)]
@@ -129,6 +208,7 @@ impl Stream {
                 state: Mutex::new(state),
                 gate: Arc::new(Semaphore::new(1)),
                 durable,
+                route: RwLock::new(None),
             }),
         }
     }
@@ -138,6 +218,148 @@ impl Stream {
     }
     pub fn is_durable(&self) -> bool {
         self.inner.durable
+    }
+
+    /// From now on run every operation of this handle, and of every clone
+    /// of it, through `backend` as the stream configured as `name`.
+    /// Validation against this handle's configuration stays here.
+    pub fn route_through(&self, name: &str, backend: Arc<dyn StreamBackend>) {
+        *self.inner.route.write().unwrap_or_else(|p| p.into_inner()) = Some(Route {
+            name: Arc::from(name),
+            backend,
+        });
+    }
+
+    /// Run operations on this handle's own state again.
+    pub fn clear_route(&self) {
+        *self.inner.route.write().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    /// Whether operations run through a [`StreamBackend`].
+    pub fn is_routed(&self) -> bool {
+        self.inner
+            .route
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
+    /// Empty a memory stream: no records, no consumers, sequences from 1.
+    /// A durable stream is left alone. A new cluster leader starts its
+    /// memory streams this way.
+    pub fn reset_memory(&self) {
+        if self.inner.durable {
+            return;
+        }
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        *state = State::empty(self.inner.config.clone());
+    }
+
+    /// Run `operation` through the route if there is one, else here.
+    async fn dispatch(&self, operation: Operation) -> Result<Outcome> {
+        let route = self
+            .inner
+            .route
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        match route {
+            Some(route) => route.backend.run(route.name, operation).await,
+            None => self.execute_local(operation).await,
+        }
+    }
+
+    /// Run `operation` on this handle's own state, whatever its route:
+    /// what the leader's stream service does for memory streams.
+    pub async fn execute_local(&self, operation: Operation) -> Result<Outcome> {
+        match operation {
+            Operation::Publish {
+                subject,
+                reply,
+                payload,
+            } => {
+                let message = self.check_publish(&subject, reply.as_deref(), payload)?;
+                self.publish_local(message).await.map(Outcome::Record)
+            }
+            Operation::Replay {
+                from_sequence,
+                limit,
+            } => {
+                validate_fetch(limit)?;
+                self.replay_local(from_sequence, limit)
+                    .await
+                    .map(Outcome::Records)
+            }
+            Operation::OpenConsumer {
+                name,
+                config,
+                scope,
+            } => {
+                validate_consumer(&name, &config)?;
+                self.consumer_local(name, config, scope)
+                    .await
+                    .map(|()| Outcome::Done)
+            }
+            Operation::GetConsumer { name } => {
+                self.get_consumer_local(name).await.map(|()| Outcome::Done)
+            }
+            Operation::DeleteConsumer { name } => self
+                .delete_consumer_local(name)
+                .await
+                .map(|()| Outcome::Done),
+            Operation::Fetch { consumer, limit } => {
+                validate_fetch(limit)?;
+                self.fetch_local(consumer, limit)
+                    .await
+                    .map(Outcome::Deliveries)
+            }
+            Operation::Ack { consumer, sequence } => self
+                .ack_local(consumer, sequence)
+                .await
+                .map(|()| Outcome::Done),
+        }
+    }
+
+    /// Check a publication against this stream's subjects and limits.
+    fn check_publish(&self, subject: &str, reply: Option<&str>, payload: Bytes) -> Result<Message> {
+        validate_subject(subject, false, SUBJECT_LIMIT)?;
+        if let Some(reply) = reply {
+            validate_subject(reply, false, SUBJECT_LIMIT)?;
+        }
+        if !self
+            .inner
+            .config
+            .subjects
+            .iter()
+            .any(|p| subject_matches(p, subject))
+        {
+            return Err(Error::StreamNotMatched);
+        }
+        let limit = self
+            .inner
+            .config
+            .max_payload_bytes
+            .min(self.inner.config.max_bytes);
+        if payload.len() > limit {
+            return Err(Error::PayloadTooLarge {
+                size: payload.len(),
+                limit,
+            });
+        }
+        let message = Message {
+            subject: Arc::from(subject),
+            reply: reply.map(Arc::from),
+            payload,
+            sender: None,
+        };
+        let retained_size = message_size(&message);
+        if retained_size > self.inner.config.max_bytes {
+            return Err(Error::PayloadTooLarge {
+                size: retained_size,
+                limit: self.inner.config.max_bytes,
+            });
+        }
+        Ok(message)
     }
 
     async fn run<T, F>(&self, operation: F) -> Result<T>
@@ -177,43 +399,21 @@ impl Stream {
         reply: Option<&str>,
         payload: Bytes,
     ) -> Result<Record> {
-        validate_subject(subject, false, SUBJECT_LIMIT)?;
-        if let Some(reply) = reply {
-            validate_subject(reply, false, SUBJECT_LIMIT)?;
-        }
-        if !self
-            .inner
-            .config
-            .subjects
-            .iter()
-            .any(|p| subject_matches(p, subject))
+        let message = self.check_publish(subject, reply, payload)?;
+        match self
+            .dispatch(Operation::Publish {
+                subject: message.subject.to_string(),
+                reply: message.reply.as_deref().map(str::to_owned),
+                payload: message.payload,
+            })
+            .await?
         {
-            return Err(Error::StreamNotMatched);
+            Outcome::Record(record) => Ok(record),
+            _ => Err(unexpected_outcome()),
         }
-        let limit = self
-            .inner
-            .config
-            .max_payload_bytes
-            .min(self.inner.config.max_bytes);
-        if payload.len() > limit {
-            return Err(Error::PayloadTooLarge {
-                size: payload.len(),
-                limit,
-            });
-        }
-        let message = Message {
-            subject: Arc::from(subject),
-            reply: reply.map(Arc::from),
-            payload,
-            sender: None,
-        };
-        let retained_size = message_size(&message);
-        if retained_size > self.inner.config.max_bytes {
-            return Err(Error::PayloadTooLarge {
-                size: retained_size,
-                limit: self.inner.config.max_bytes,
-            });
-        }
+    }
+
+    async fn publish_local(&self, message: Message) -> Result<Record> {
         self.run(move |state| {
             if state.next_sequence == u64::MAX {
                 return Err(Error::Storage("stream sequence exhausted".into()));
@@ -231,6 +431,19 @@ impl Stream {
 
     pub async fn replay(&self, from_sequence: u64, limit: usize) -> Result<Vec<Record>> {
         validate_fetch(limit)?;
+        match self
+            .dispatch(Operation::Replay {
+                from_sequence,
+                limit,
+            })
+            .await?
+        {
+            Outcome::Records(records) => Ok(records),
+            _ => Err(unexpected_outcome()),
+        }
+    }
+
+    async fn replay_local(&self, from_sequence: u64, limit: usize) -> Result<Vec<Record>> {
         self.run(move |state| {
             Ok(state
                 .records
@@ -263,7 +476,18 @@ impl Stream {
     /// Remove a durable consumer and its delivery state, freeing its place
     /// under `max_consumers`.
     pub async fn delete_consumer(&self, name: &str) -> Result<()> {
-        let owned = name.to_owned();
+        match self
+            .dispatch(Operation::DeleteConsumer {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            Outcome::Done => Ok(()),
+            _ => Err(unexpected_outcome()),
+        }
+    }
+
+    async fn delete_consumer_local(&self, owned: String) -> Result<()> {
         self.run(move |state| {
             if !state.consumers.contains_key(&owned) {
                 return Err(Error::ConsumerNotFound);
@@ -280,7 +504,28 @@ impl Stream {
         scope: Option<(String, usize)>,
     ) -> Result<DurableConsumer> {
         validate_consumer(name, &config)?;
-        let owned = name.to_owned();
+        match self
+            .dispatch(Operation::OpenConsumer {
+                name: name.to_owned(),
+                config,
+                scope,
+            })
+            .await?
+        {
+            Outcome::Done => Ok(DurableConsumer {
+                stream: self.clone(),
+                name: Arc::from(name),
+            }),
+            _ => Err(unexpected_outcome()),
+        }
+    }
+
+    async fn consumer_local(
+        &self,
+        owned: String,
+        config: ConsumerConfig,
+        scope: Option<(String, usize)>,
+    ) -> Result<()> {
         self.run(move |state| {
             if let Some(existing) = state.consumers.get(&owned) {
                 if existing.config != config {
@@ -312,11 +557,7 @@ impl Stream {
             };
             state.commit(Event::Consumer(owned, consumer))
         })
-        .await?;
-        Ok(DurableConsumer {
-            stream: self.clone(),
-            name: Arc::from(name),
-        })
+        .await
     }
 
     /// The most durable consumers this stream keeps.
@@ -325,7 +566,21 @@ impl Stream {
     }
 
     pub async fn get_consumer(&self, name: &str) -> Result<DurableConsumer> {
-        let owned = name.to_owned();
+        match self
+            .dispatch(Operation::GetConsumer {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            Outcome::Done => Ok(DurableConsumer {
+                stream: self.clone(),
+                name: Arc::from(name),
+            }),
+            _ => Err(unexpected_outcome()),
+        }
+    }
+
+    async fn get_consumer_local(&self, owned: String) -> Result<()> {
         self.run(move |state| {
             if state.consumers.contains_key(&owned) {
                 Ok(())
@@ -333,11 +588,7 @@ impl Stream {
                 Err(Error::ConsumerNotFound)
             }
         })
-        .await?;
-        Ok(DurableConsumer {
-            stream: self.clone(),
-            name: Arc::from(name),
-        })
+        .await
     }
 }
 
@@ -350,85 +601,110 @@ impl DurableConsumer {
     /// A fetch with no available records returns immediately with an empty vector.
     pub async fn fetch(&self, limit: usize) -> Result<Vec<Delivery>> {
         validate_fetch(limit)?;
-        let name = self.name.to_string();
-        self.stream
-            .run(move |state| {
-                let consumer = state.consumers.get(&name).ok_or(Error::ConsumerNotFound)?;
-                let now = now_millis();
-                let ack_wait = consumer.config.ack_wait.as_millis() as u64;
-                let mut result = Vec::new();
-                let mut updates = Vec::new();
-                let mut new_pending = 0usize;
-                for (&sequence, pending) in &consumer.pending {
-                    if result.len() == limit {
-                        break;
-                    }
-                    if pending.delivered_at != 0
-                        && now.saturating_sub(pending.delivered_at) < ack_wait
-                    {
-                        continue;
-                    }
-                    if let Some(record) = state.record(sequence) {
-                        let attempts = pending.attempts.saturating_add(1);
-                        result.push(Delivery {
-                            record: record.clone(),
-                            delivery_count: attempts,
-                        });
-                        updates.push((
-                            sequence,
-                            Pending {
-                                delivered_at: now,
-                                attempts,
-                            },
-                        ));
-                    }
-                }
-                let mut next_sequence = consumer.next_sequence;
-                for record in state
-                    .records
-                    .range(state.start_index(consumer.next_sequence)..)
-                {
-                    if result.len() == limit
-                        || consumer.pending.len() + new_pending >= consumer.config.max_ack_pending
-                    {
-                        break;
-                    }
-                    next_sequence = record.sequence + 1;
-                    if !subject_matches(&consumer.config.filter_subject, &record.message.subject) {
-                        continue;
-                    }
-                    result.push(Delivery {
-                        record: record.clone(),
-                        delivery_count: 1,
-                    });
-                    updates.push((
-                        record.sequence,
-                        Pending {
-                            delivered_at: now,
-                            attempts: 1,
-                        },
-                    ));
-                    new_pending += 1;
-                }
-                if !updates.is_empty() || next_sequence != consumer.next_sequence {
-                    state.commit(Event::Fetch(name, next_sequence, updates))?;
-                }
-                Ok(result)
+        match self
+            .stream
+            .dispatch(Operation::Fetch {
+                consumer: self.name.to_string(),
+                limit,
             })
-            .await
+            .await?
+        {
+            Outcome::Deliveries(deliveries) => Ok(deliveries),
+            _ => Err(unexpected_outcome()),
+        }
     }
 
     pub async fn ack(&self, sequence: u64) -> Result<()> {
-        let name = self.name.to_string();
-        self.stream
-            .run(move |state| {
-                let consumer = state.consumers.get(&name).ok_or(Error::ConsumerNotFound)?;
-                if !consumer.pending.contains_key(&sequence) {
-                    return Err(Error::InvalidAck);
-                }
-                state.commit(Event::Ack(name, sequence))
+        match self
+            .stream
+            .dispatch(Operation::Ack {
+                consumer: self.name.to_string(),
+                sequence,
             })
-            .await
+            .await?
+        {
+            Outcome::Done => Ok(()),
+            _ => Err(unexpected_outcome()),
+        }
+    }
+}
+
+impl Stream {
+    async fn fetch_local(&self, name: String, limit: usize) -> Result<Vec<Delivery>> {
+        self.run(move |state| {
+            let consumer = state.consumers.get(&name).ok_or(Error::ConsumerNotFound)?;
+            let now = now_millis();
+            let ack_wait = consumer.config.ack_wait.as_millis() as u64;
+            let mut result = Vec::new();
+            let mut updates = Vec::new();
+            let mut new_pending = 0usize;
+            for (&sequence, pending) in &consumer.pending {
+                if result.len() == limit {
+                    break;
+                }
+                if pending.delivered_at != 0 && now.saturating_sub(pending.delivered_at) < ack_wait
+                {
+                    continue;
+                }
+                if let Some(record) = state.record(sequence) {
+                    let attempts = pending.attempts.saturating_add(1);
+                    result.push(Delivery {
+                        record: record.clone(),
+                        delivery_count: attempts,
+                    });
+                    updates.push((
+                        sequence,
+                        Pending {
+                            delivered_at: now,
+                            attempts,
+                        },
+                    ));
+                }
+            }
+            let mut next_sequence = consumer.next_sequence;
+            for record in state
+                .records
+                .range(state.start_index(consumer.next_sequence)..)
+            {
+                if result.len() == limit
+                    || consumer.pending.len() + new_pending >= consumer.config.max_ack_pending
+                {
+                    break;
+                }
+                next_sequence = record.sequence + 1;
+                if !subject_matches(&consumer.config.filter_subject, &record.message.subject) {
+                    continue;
+                }
+                result.push(Delivery {
+                    record: record.clone(),
+                    delivery_count: 1,
+                });
+                updates.push((
+                    record.sequence,
+                    Pending {
+                        delivered_at: now,
+                        attempts: 1,
+                    },
+                ));
+                new_pending += 1;
+            }
+            if !updates.is_empty() || next_sequence != consumer.next_sequence {
+                state.commit(Event::Fetch(name, next_sequence, updates))?;
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn ack_local(&self, name: String, sequence: u64) -> Result<()> {
+        self.run(move |state| {
+            let consumer = state.consumers.get(&name).ok_or(Error::ConsumerNotFound)?;
+            if !consumer.pending.contains_key(&sequence) {
+                return Err(Error::InvalidAck);
+            }
+            state.commit(Event::Ack(name, sequence))
+        })
+        .await
     }
 }
 

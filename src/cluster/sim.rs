@@ -12,20 +12,24 @@ use super::{
     link::Timing,
     log_store::LogStore,
     node::{MEMBER_WITHOUT_LOG, Options, RaftTiming},
+    operations::ClusterExecutor,
     settings::Settings,
     state::{
         ApplyContext, Component, Components, Entry, EntryKind, Origin, Payload, Proposal, Reply,
     },
     transport::memory::Network,
 };
-use crate::config::ClusterConfig;
+use crate::{
+    config::ClusterConfig,
+    database::{Database, Mode},
+};
 use rusqlite::{Connection, OptionalExtension};
 use std::{
     collections::BTreeMap,
     io,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU32, Ordering},
     },
     time::Duration,
@@ -42,8 +46,8 @@ pub const TIMING: RaftTiming = RaftTiming {
 };
 const TOKEN: &str = "simulated-cluster-token";
 
-/// A test component: `kv` entries count per key, so applying an entry twice
-/// would show.
+/// A test component: `config` entries (unused until step 8) count per key,
+/// so applying an entry twice would show.
 pub struct Counter;
 
 impl Component for Counter {
@@ -52,7 +56,7 @@ impl Component for Counter {
     }
 
     fn kinds(&self) -> Vec<EntryKind> {
-        vec![EntryKind::Kv]
+        vec![EntryKind::Config]
     }
 
     fn apply(&self, db: &Connection, entry: &Entry, ctx: &mut ApplyContext) -> io::Result<Reply> {
@@ -81,8 +85,9 @@ impl Component for Counter {
     }
 }
 
+/// An entry [`Counter`] counts.
 pub fn kv(key: &str) -> Entry {
-    Entry::Kv(Payload::new(1, serde_json::json!({ "key": key })))
+    Entry::Config(Payload::new(1, serde_json::json!({ "key": key })))
 }
 
 /// What `key` counts on `cluster`'s replica.
@@ -111,16 +116,31 @@ pub fn count(cluster: &Cluster, key: &str) -> i64 {
         .unwrap()
 }
 
+/// Components of later steps for the peer with the given index, created
+/// anew at every start of it.
+pub type ExtraComponents = Arc<dyn Fn(usize) -> Vec<Arc<dyn Component>> + Send + Sync>;
+
 pub struct Sim {
     pub network: Network,
+    /// `rift.config.cluster` every peer starts with.
+    pub shared: ClusterConfig,
+    /// Registered beside [`Counter`] at every start.
+    pub components: Option<ExtraComponents>,
     root: PathBuf,
     peers: Vec<Option<Cluster>>,
+    /// The instance database of each running peer.
+    databases: Vec<Option<Arc<Database>>>,
+    /// The instance database each peer opened last, to wait until it is
+    /// closed (and its lock released) before the peer starts again.
+    released: Vec<Weak<Database>>,
 }
 
 impl Sim {
     pub fn new(count: usize) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let root = std::env::temp_dir().join(format!(
+        // Canonical: the instance database refuses paths through symlinks
+        // (macOS keeps the temporary directory behind one).
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "rift-cluster-sim-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -129,8 +149,15 @@ impl Sim {
         std::fs::create_dir_all(&root).unwrap();
         Self {
             network: Network::default(),
+            shared: ClusterConfig {
+                peer_timeout: Duration::from_secs(3),
+                ..ClusterConfig::default()
+            },
+            components: None,
             root,
             peers: (0..count).map(|_| None).collect(),
+            databases: (0..count).map(|_| None).collect(),
+            released: (0..count).map(|_| Weak::new()).collect(),
         }
     }
 
@@ -176,10 +203,21 @@ impl Sim {
     pub async fn start(&mut self, index: usize) -> io::Result<Cluster> {
         let mut components = Components::new();
         components.register(Arc::new(Counter))?;
-        let mut options = Options::new(ClusterConfig {
-            peer_timeout: Duration::from_secs(3),
-            ..ClusterConfig::default()
-        });
+        if let Some(extra) = &self.components {
+            for component in extra(index) {
+                components.register(component)?;
+            }
+        }
+        self.wait_released(index).await;
+        let settings = self.settings(index);
+        std::fs::create_dir_all(&settings.directory)?;
+        let database = Arc::new(Database::open_with(
+            &settings.default_database(),
+            Mode::Replicated,
+        )?);
+        self.released[index] = Arc::downgrade(&database);
+        let mut options = Options::new(self.shared.clone());
+        options.database = Some(database.clone());
         options.components = components;
         options.transport = Some(self.network.bind(&self.address(index)));
         options.token = Some(TOKEN.into());
@@ -188,9 +226,26 @@ impl Sim {
             ping_interval: Duration::from_millis(100),
             connect_timeout: Duration::from_millis(500),
         };
-        let cluster = Cluster::start(self.settings(index), options).await?;
+        let cluster = Cluster::start(settings, options).await?;
+        database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
         self.peers[index] = Some(cluster.clone());
+        self.databases[index] = Some(database);
         Ok(cluster)
+    }
+
+    /// The instance database of running peer `index`.
+    pub fn database(&self, index: usize) -> Arc<Database> {
+        self.databases[index].clone().expect("peer is running")
+    }
+
+    /// Wait (on the virtual clock, at most 10 s) until the instance database
+    /// peer `index` opened last is closed: its aborted tasks drop their
+    /// handles a moment after a crash.
+    async fn wait_released(&self, index: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.released[index].upgrade().is_some() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// `rift cluster init` on peer `index`, then start it.
@@ -263,6 +318,8 @@ impl Sim {
         if let Some(cluster) = self.peers[index].take() {
             cluster.shutdown().await;
         }
+        self.databases[index] = None;
+        self.wait_released(index).await;
     }
 
     pub async fn restart(&mut self, index: usize) -> Cluster {
@@ -602,3 +659,6 @@ async fn a_member_without_its_raft_file_is_refused_until_replaced() {
     .await;
     sim.shutdown().await;
 }
+
+/// The replicated instance database with real stores (step 3).
+mod database_tests;

@@ -251,6 +251,7 @@ fn mutates(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("status" | "servers" | "groups" | "nodes" | "templates") | None => false,
         Some("plugins") => args.get(1).is_some_and(|action| action == "restart"),
+        Some("cluster") => args.get(1).is_some_and(|command| command != "status"),
         Some(_) => true,
     }
 }
@@ -338,7 +339,10 @@ impl PlayerRequests {
                     .ok()
                     .filter(|request| request.acts())
                     .map(|request| (request.operation(), request.target()));
-                let result = request.and_then(|request| request.execute(&players));
+                let result = match request {
+                    Ok(request) => request.run(&players).await,
+                    Err(error) => Err(error),
+                };
                 let response = match &result {
                     Ok(data) => json!({"ok": true, "data": data}),
                     Err(error) => {
@@ -691,7 +695,21 @@ fn network(
 }
 
 /// Subjects answered from their own task rather than the serialized loop.
-const LONG_RUNNING: &[&str] = &["create", "remove", "download"];
+/// Cluster membership commands wait for commits, as long as an election.
+const LONG_RUNNING: &[&str] = &["create", "remove", "download", "cluster"];
+
+/// `rift admin cluster` commands `rift.control.cluster` runs. `backup`
+/// writes a file on the proxy host and stays with the local admin port.
+const CLUSTER_COMMANDS: &[&str] = &[
+    "status",
+    "add",
+    "promote",
+    "demote",
+    "remove",
+    "replace",
+    "leave",
+    "transfer-leader",
+];
 
 fn respond(broker: &Broker, reply: &str, command: &str, result: Result<Value, String>) {
     let response = match result {
@@ -740,6 +758,7 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
         "remove" | "start" | "stop" => &["name"],
         "download" => &["template", "refresh"],
         "plugins" => &["action", "name"],
+        "cluster" => &["command", "args"],
         _ => return Err("unknown control subject".into()),
     };
     if object.keys().any(|key| !fields.contains(&key.as_str())) {
@@ -789,6 +808,31 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
                 ("list", None) => {}
                 ("list", Some(_)) => return Err("list takes no name".into()),
                 (_, _) => args.push(name("name")?),
+            }
+        }
+        "cluster" => {
+            let command = match value.get("command") {
+                None => "status",
+                Some(command) => command
+                    .as_str()
+                    .filter(|command| CLUSTER_COMMANDS.contains(command))
+                    .ok_or("command must be one of status, add, promote, demote, remove, replace, leave or transfer-leader")?,
+            };
+            args.push(command.to_owned());
+            match value.get("args") {
+                None => {}
+                Some(Value::Array(list)) if list.len() <= 8 => {
+                    for argument in list {
+                        args.push(
+                            argument
+                                .as_str()
+                                .filter(|s| !s.is_empty() && s.len() <= 256)
+                                .ok_or("args must be nonempty strings of at most 256 bytes")?
+                                .to_owned(),
+                        );
+                    }
+                }
+                Some(_) => return Err("args must be a list of at most 8 strings".into()),
             }
         }
         "maintenance" => args.push(enabled()?),
@@ -937,6 +981,12 @@ mod tests {
                 &["stop", "lobby-1"],
             ),
             ("rift.control.servers", "{}", &["servers"]),
+            ("rift.control.cluster", "{}", &["cluster", "status"]),
+            (
+                "rift.control.cluster",
+                r#"{"command":"add","args":["eu-2","10.0.0.2:7444"]}"#,
+                &["cluster", "add", "eu-2", "10.0.0.2:7444"],
+            ),
             ("rift.control.groups", "{}", &["groups"]),
             ("rift.control.nodes", "{}", &["nodes"]),
             ("rift.control.templates", "{}", &["templates"]),
@@ -972,6 +1022,12 @@ mod tests {
                 r#"{"template":"paper","refresh":"yes"}"#,
             ),
             ("rift.control.status", r#"{"unexpected":1}"#),
+            (
+                "rift.control.cluster",
+                r#"{"command":"backup","args":["/tmp/x"]}"#,
+            ),
+            ("rift.control.cluster", r#"{"command":"add","args":[7]}"#),
+            ("rift.control.cluster", r#"{"args":"p2"}"#),
             ("rift.control.plugins", "{}"),
             ("rift.control.plugins", r#"{"action":"stop","name":"a"}"#),
             ("rift.control.plugins", r#"{"action":"restart"}"#),

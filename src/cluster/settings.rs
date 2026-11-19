@@ -35,10 +35,9 @@ pub const FILE: &str = "cluster.toml";
 pub const DEFAULT_TOKEN_ENV: &str = "RIFT_CLUSTER_TOKEN";
 /// The Raft log, vote and identity of this peer.
 pub const RAFT_FILE: &str = "rift.raft.sqlite3";
-/// The replicated state machine. Step 3 of docs/clustering.md moves it into
-/// the instance database; until then the cluster keeps its own file, since
-/// the instance database is locked by its single owner.
-pub const STATE_FILE: &str = "rift.cluster.sqlite3";
+/// The instance database, which holds the replicated state machine, when
+/// no configuration names another (`instance_database`).
+pub const DEFAULT_DATABASE: &str = "rift.sqlite3";
 /// The last snapshot this peer built or installed.
 pub const SNAPSHOT_DIRECTORY: &str = "rift.raft.snapshots";
 /// Shorter tokens are refused: the token is the only secret that keeps a
@@ -226,8 +225,9 @@ impl Settings {
         self.directory.join(RAFT_FILE)
     }
 
-    pub fn state_file(&self) -> PathBuf {
-        self.directory.join(STATE_FILE)
+    /// [`DEFAULT_DATABASE`] in this peer's directory.
+    pub fn default_database(&self) -> PathBuf {
+        self.directory.join(DEFAULT_DATABASE)
     }
 
     pub fn snapshot_directory(&self) -> PathBuf {

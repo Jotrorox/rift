@@ -3,11 +3,18 @@ use super::{
     Cluster, PeerNode,
     log_store::LogStore,
     node::Options,
+    operations::ClusterExecutor,
     settings::{self, Settings},
     state::{self, Entry, FeaturesEntry, PeerEntry},
     transport::Offline,
 };
-use crate::config::{ClusterConfig, Config};
+use crate::{
+    config::{ClusterConfig, Config},
+    database::{
+        Database, Mode, Operation,
+        operation::{MigrateOp, latest_versions},
+    },
+};
 use openraft::ServerState;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,6 +26,8 @@ use std::{
 
 pub const USAGE: &str = "Usage: rift cluster init --peer <name> [--from-backup <file>] [--config <path>]\n\
     \x20   Create a cluster whose only voter is this peer (cluster.toml beside the configuration names it).\n\
+    \x20   Its state starts as this Rift's instance database (SQLite; a PostgreSQL or MariaDB\n\
+    \x20   installation runs `rift database copy --to rift.sqlite3` first).\n\
     \x20   With --from-backup, its state starts as a `rift admin cluster backup` copy.\n\
     rift cluster recover --peer <name> --i-understand-data-loss [--config <path>]\n\
     \x20   Make this peer the only voter when the others are gone for good. Writes only\n\
@@ -98,6 +107,16 @@ async fn init(flags: Flags) -> io::Result<()> {
         .peer
         .ok_or_else(|| super::invalid(format!("rift cluster init needs --peer <name>\n{USAGE}")))?;
     let settings = load_settings(&flags.config, Some(&peer))?;
+    let config = load_config(&flags.config)?;
+    if config
+        .as_ref()
+        .is_some_and(|config| config.database.is_some())
+    {
+        return Err(super::invalid(
+            "rift cluster init: a cluster replicates SQLite; copy the instance database with `rift database copy --to rift.sqlite3`, remove database.backend from the configuration, then run this again",
+        ));
+    }
+    let database_path = instance_database(config.as_ref(), &settings);
     std::fs::create_dir_all(&settings.directory)?;
     let log = LogStore::open(&settings.raft_file())?;
     if !log.is_pristine()? || log.identity()?.raft_id.is_some() {
@@ -107,25 +126,43 @@ async fn init(flags: Flags) -> io::Result<()> {
         )));
     }
     match &flags.backup {
-        Some(backup) => state::prepare_from_backup(&settings.state_file(), backup)?,
-        None if state::has_applied(&settings.state_file())? => {
+        Some(backup) => state::prepare_from_backup(&database_path, backup)?,
+        None if state::has_applied(&database_path)? => {
             return Err(super::invalid(format!(
                 "{}: holds the state of another cluster; move it away first",
-                settings.state_file().display()
+                database_path.display()
             )));
         }
-        None => {}
+        None => {
+            // A store in a file of its own cannot be replicated: its
+            // entries move into the instance database, the first state.
+            if let Some(config) = &config {
+                let database = Database::open(&database_path)?;
+                if let Some((file, count)) =
+                    crate::extensions::storage::copy_file_store(config, &database)?
+                {
+                    println!(
+                        "rift: copied {count} entries of the extension store {} into {}; set extensions.storage.database = true, a cluster refuses the file",
+                        file.display(),
+                        database_path.display()
+                    );
+                }
+            }
+        }
     }
     let mut id = [0u8; 16];
     aws_lc_rs::rand::fill(&mut id).map_err(|_| io::Error::other("random source failed"))?;
     let cluster_id = super::hex(&id);
     log.adopt(&cluster_id, FIRST_RAFT_ID, &settings.peer)?;
     drop(log);
+    let database = Arc::new(Database::open_with(&database_path, Mode::Replicated)?);
     let mut options = Options::new(ClusterConfig::default());
+    options.database = Some(database.clone());
     options.transport = Some(Arc::new(Offline::default()));
     // Nothing is reachable, so no token is ever checked.
     options.token = Some("offline-initialization".to_owned());
     let cluster = Cluster::start(settings.clone(), options).await?;
+    database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
     let result = initialize(&cluster).await;
     cluster.shutdown().await;
     result?;
@@ -180,7 +217,85 @@ pub(crate) async fn initialize(cluster: &Cluster) -> io::Result<()> {
         .await?
         .into_result()
         .map_err(io::Error::other)?;
+    record_schemas(cluster).await?;
+    compact_first_log(cluster).await
+}
+
+/// Record every component's schema version with a `migrate` entry: a no-op
+/// for components the instance database holds already, the creation of
+/// those it does not. Peers that start later check their schema against
+/// these.
+async fn record_schemas(cluster: &Cluster) -> io::Result<()> {
+    let now = super::wall_clock_ms() / 1000;
+    for (component, version) in latest_versions() {
+        let outcome = cluster
+            .run_operation(Operation::Migrate(MigrateOp {
+                component: component.to_owned(),
+                version,
+                now,
+            }))
+            .await?;
+        if outcome.failed() {
+            return Err(io::Error::other(format!(
+                "cluster: {component} schema version {version}: {outcome:?}"
+            )));
+        }
+    }
     Ok(())
+}
+
+/// Snapshot the first state and purge the log behind it. The first state
+/// is the instance database as it was, which no log entry holds, so every
+/// peer added later must start from a snapshot, never from entry 1.
+async fn compact_first_log(cluster: &Cluster) -> io::Result<()> {
+    let raft = cluster.raft().ok_or_else(super::node::not_joined)?;
+    let applied = cluster.state().applied_index();
+    let failed = |error: String| io::Error::other(format!("cluster: {error}"));
+    raft.trigger()
+        .snapshot()
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+    raft.wait(Some(Duration::from_secs(30)))
+        .metrics(
+            |metrics| {
+                metrics
+                    .snapshot
+                    .is_some_and(|snapshot| snapshot.index >= applied)
+            },
+            "the first snapshot is built",
+        )
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+    raft.trigger()
+        .purge_log(applied)
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+    raft.wait(Some(Duration::from_secs(30)))
+        .metrics(
+            |metrics| metrics.purged.is_some_and(|purged| purged.index >= applied),
+            "the log behind the first snapshot is purged",
+        )
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+    Ok(())
+}
+
+/// The configuration beside `cluster.toml`, if there is one.
+fn load_config(path: &Path) -> io::Result<Option<Config>> {
+    match Config::load(path) {
+        Ok(config) => Ok(Some(config)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The instance database: `instance_database` of the configuration, or
+/// `rift.sqlite3` beside `cluster.toml`.
+fn instance_database(config: Option<&Config>, settings: &Settings) -> PathBuf {
+    config.map_or_else(
+        || settings.default_database(),
+        |config| config.instance_database.clone(),
+    )
 }
 
 fn recover(flags: Flags) -> io::Result<()> {
@@ -224,13 +339,21 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     settings.witness = true;
     settings::set_local_peer(&settings.peer);
     // The shared settings come from rift.lua when this host has one.
-    let shared = match Config::load(&flags.config) {
-        Ok(config) => config.cluster.unwrap_or_default(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => ClusterConfig::default(),
-        Err(error) => return Err(error),
-    };
+    let config = load_config(&flags.config)?;
+    let shared = config
+        .as_ref()
+        .and_then(|config| config.cluster.clone())
+        .unwrap_or_default();
+    // A witness holds the whole state machine: the instance database.
+    let database = Arc::new(Database::open_with(
+        &instance_database(config.as_ref(), &settings),
+        Mode::Replicated,
+    )?);
     let name = settings.peer.clone();
-    let cluster = Cluster::start(settings, Options::new(shared)).await?;
+    let mut options = Options::new(shared);
+    options.database = Some(database.clone());
+    let cluster = Cluster::start(settings, options).await?;
+    database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
     super::install_global(cluster.clone());
     log_info!("cluster: witness {name} running; Ctrl-C stops it");
     tokio::signal::ctrl_c().await?;

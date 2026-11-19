@@ -8,7 +8,7 @@
 use super::{
     PeerId, PeerNode, TypeConfig, Vote,
     link::{Links, StreamKind, remote_error},
-    snapshot,
+    operations, snapshot,
     state::{Proposal, Reply, SnapshotFile},
 };
 use bytes::Bytes;
@@ -46,6 +46,8 @@ pub enum RaftRequest {
     Repair {
         min_index: u64,
     },
+    /// An operation on the instance database for the leader to execute.
+    Operate(operations::Request),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +60,7 @@ pub enum RaftResponse {
     ReadIndex(u64),
     Admin(serde_json::Value),
     Done,
+    Operated(operations::Response),
 }
 
 /// Creates a [`PeerClient`] per replication target.

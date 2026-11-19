@@ -318,11 +318,20 @@ pub fn assert_primary_keys(connection: &Conn) -> Result<()> {
 /// each value with its type. Two replicas with the same contents have the
 /// same checksum.
 pub fn checksum(connection: &Conn) -> Result<[u8; 32]> {
+    checksum_except(connection, &[])
+}
+
+/// [`checksum`] without the tables named in `skip`: tables that record
+/// where a replica is rather than what it holds.
+pub fn checksum_except(connection: &Conn, skip: &[&str]) -> Result<[u8; 32]> {
     if connection.sqlite().is_none() {
         return Err(Error::other("checksums need a SQLite database"));
     }
     let mut hasher = Sha256::new();
     for table in tables(connection)? {
+        if skip.contains(&table.as_str()) {
+            continue;
+        }
         let key = primary_key(connection, &table)?;
         let order = if key.is_empty() {
             "rowid".to_owned()

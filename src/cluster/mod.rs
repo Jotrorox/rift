@@ -17,6 +17,11 @@
 //! - [`state`]: the replicated state machine, its entry kinds and the
 //!   [`state::Component`] registry later steps plug into.
 //! - [`network`]: openraft's RPCs over the `raft`, `snapshot` stream kinds.
+//! - [`replicated`]: the instance database as the state machine: the
+//!   `operation`, `kv`, `directory` and `migrate` entry kinds.
+//! - [`operations`]: writes to the instance database: the cluster's
+//!   executor and the leader's group-committed execution.
+//! - [`attach`]: wiring the instance database into a starting peer.
 //! - [`node`]: the [`Cluster`] handle: start, propose, reads, leadership and
 //!   its lease, leader tasks and the peer table.
 //! - [`membership`]: `rift admin cluster ...`.
@@ -29,13 +34,18 @@
 //! older one, and an unknown entry kind fails loudly instead of being
 //! misread; every entry kind also carries its own version number `v`.
 //! Snapshot and blob contents travel as raw bytes behind a small JSON header.
+pub mod attach;
+pub mod bus;
 pub mod cli;
 pub mod link;
 pub mod log_store;
 pub mod membership;
 pub mod network;
 pub mod node;
+pub mod operations;
+pub mod players;
 pub mod quic;
+pub mod replicated;
 pub mod settings;
 pub mod snapshot;
 pub mod state;
@@ -46,6 +56,7 @@ mod sim;
 
 pub use link::{Class, LinkEvent, Links, StreamKind};
 pub use node::{Cluster, Leadership, Options, PeerStatus, Role};
+pub use operations::ClusterExecutor;
 pub use settings::Settings;
 pub use state::{ApplyContext, Changes, Component, Components, Entry, EntryKind, Reply};
 

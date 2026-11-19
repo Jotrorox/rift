@@ -299,7 +299,11 @@ impl Authority {
             .migrate(store::COMPONENT, store::SCHEMA_VERSION, ops::schema_sql)
             .map_err(|e| PermError::Storage(e.to_string()))?;
         let connection = database.lock();
-        store::ensure_default(&connection, now)?;
+        // A replica writes only by applying entries; its `migrate` entry
+        // created the default group.
+        if database.mode() != crate::database::Mode::Replicated {
+            store::ensure_default(&connection, now)?;
+        }
         let core = Arc::new(Core {
             state: RwLock::new(State {
                 revision: store::revision(&connection)?,

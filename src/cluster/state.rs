@@ -32,13 +32,28 @@
 //!
 //! A snapshot is a copy of the whole database made with SQLite's online
 //! backup API, taken while apply is held, so it matches the log id it is
-//! labelled with. Installing one writes it into the live database with the
-//! backup API (SQLite swaps the pages in one transaction), reopens the
-//! writer connection, which also drops cached statements, and runs every
-//! component's [`Component::full_reload`].
+//! labelled with. Installing one pauses apply and leader execution (both
+//! need the writer), writes it into the live database through the writer
+//! with the backup API (SQLite swaps the pages in one transaction; no file
+//! is renamed or replaced, which Windows refuses while handles are open),
+//! reopens the writer and read connections, which also drops cached
+//! statements, runs every component's [`Component::full_reload`] and every
+//! apply hook of the instance database in full reload mode, and resumes.
+//!
+//! # The instance database
+//!
+//! The state machine lives in the instance database, opened in
+//! [`instance::Mode::Replicated`]: entries are applied on its writer
+//! connection, and the apply hooks of its components
+//! ([`instance::Database::on_change`]) are called while apply still holds
+//! it. The `operation`, `kv`, `directory` and `migrate` kinds are applied
+//! here, by [`super::replicated`].
 use super::{
-    LogEntry, LogId, PeerId, SnapshotMeta, StoredMembership, TypeConfig, json_error, sql_error,
+    LogEntry, LogId, PeerId, SnapshotMeta, StoredMembership, TypeConfig, json_error,
+    replicated::{self, Fire, Pending},
+    sql_error,
 };
+use crate::database::{self as instance, Conn, changeset};
 use aws_lc_rs::digest;
 use futures_util::StreamExt;
 use openraft::{
@@ -46,7 +61,7 @@ use openraft::{
     storage::{EntryResponder, RaftStateMachine},
     type_config::alias::SnapshotOf,
 };
-use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -127,10 +142,13 @@ pub enum EntryKind {
     Features,
     Migrate,
     Checksum,
+    /// Bus state besides streams: node session claims, the bus-login key
+    /// and the peers' bus addresses (`crate::cluster::bus`).
+    Bus,
 }
 
 impl EntryKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Operation,
         Self::Claim,
         Self::Kv,
@@ -142,9 +160,19 @@ impl EntryKind {
         Self::Features,
         Self::Migrate,
         Self::Checksum,
+        Self::Bus,
     ];
-    /// What the framework applies itself.
-    pub const BUILT_IN: [Self; 3] = [Self::Peer, Self::Features, Self::Checksum];
+    /// What the framework applies itself: its own kinds and those of the
+    /// instance database (see [`super::replicated`]).
+    pub const BUILT_IN: [Self; 7] = [
+        Self::Peer,
+        Self::Features,
+        Self::Checksum,
+        Self::Operation,
+        Self::Kv,
+        Self::Directory,
+        Self::Migrate,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -159,6 +187,7 @@ impl EntryKind {
             Self::Features => "features",
             Self::Migrate => "migrate",
             Self::Checksum => "checksum",
+            Self::Bus => "bus",
         }
     }
 
@@ -262,6 +291,7 @@ pub enum Entry {
     Features(FeaturesEntry),
     Migrate(Payload),
     Checksum(ChecksumEntry),
+    Bus(Payload),
 }
 
 impl Entry {
@@ -278,6 +308,7 @@ impl Entry {
             Self::Features(_) => EntryKind::Features,
             Self::Migrate(_) => EntryKind::Migrate,
             Self::Checksum(_) => EntryKind::Checksum,
+            Self::Bus(_) => EntryKind::Bus,
         }
     }
 
@@ -291,7 +322,8 @@ impl Entry {
             | Self::Stream(payload)
             | Self::Config(payload)
             | Self::Manifest(payload)
-            | Self::Migrate(payload) => Some(payload),
+            | Self::Migrate(payload)
+            | Self::Bus(payload) => Some(payload),
             Self::Peer(_) | Self::Features(_) | Self::Checksum(_) => None,
         }
     }
@@ -449,6 +481,20 @@ pub trait Component: Send + Sync + 'static {
         )))
     }
 
+    /// After the framework applied a `peer` entry without refusing it, in
+    /// the same transaction: release what belonged to an older incarnation
+    /// of the peer, or to a peer that expired or was removed. Record what
+    /// changed in `ctx.changes`; an `io::Error` stops this peer's Raft node.
+    fn peer_applied(
+        &self,
+        db: &Connection,
+        entry: &PeerEntry,
+        ctx: &mut ApplyContext,
+    ) -> io::Result<()> {
+        let _ = (db, entry, ctx);
+        Ok(())
+    }
+
     /// After every applied entry that changed something, with what changed:
     /// refresh in-memory mirrors and raise the events a local write would
     /// have raised. Runs while apply waits, so it must be quick; spawn
@@ -517,42 +563,17 @@ impl Components {
     }
 }
 
-/// Opens connections to the database the state machine lives in. The
-/// cluster's own file for now; the replicated instance database later.
-pub trait Database: Send + Sync + 'static {
-    /// A new writer connection, in WAL mode with `synchronous=NORMAL`: an
-    /// entry lost in a crash is applied again from the Raft log.
-    fn open(&self) -> io::Result<Connection>;
-    fn path(&self) -> &Path;
+/// The SQLite connection under `conn`; the state machine only lives in a
+/// SQLite file.
+pub(super) fn sqlite(conn: &Conn) -> io::Result<&Connection> {
+    conn.sqlite()
+        .ok_or_else(|| super::invalid("the cluster state needs a SQLite database"))
 }
 
-/// A plain SQLite file.
-pub struct SqliteFile {
-    path: PathBuf,
-}
-
-impl SqliteFile {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
-impl Database for SqliteFile {
-    fn open(&self) -> io::Result<Connection> {
-        let conn = Connection::open(&self.path)
-            .map_err(|error| io::Error::other(format!("{}: {error}", self.path.display())))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(sql_error)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
-        )
-        .map_err(sql_error)?;
-        Ok(conn)
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
+/// Make a SQLite file durable through a handle that may write: Windows
+/// refuses to flush a file opened read-only ("Access is denied").
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// A snapshot on disk: a complete copy of the state database.
@@ -591,44 +612,97 @@ pub struct StateMachine {
 }
 
 struct Inner {
-    db: Arc<dyn Database>,
-    conn: Mutex<Connection>,
+    /// The instance database; apply uses its writer connection.
+    db: Arc<instance::Database>,
     components: Components,
     snapshots: PathBuf,
     applied: watch::Sender<u64>,
     changes: broadcast::Sender<Changes>,
     diverged: AtomicBool,
+    /// A snapshot or repair copy is being installed.
+    installing: AtomicBool,
+    /// This peer's `operation` entries that are proposed but not applied
+    /// yet, which the leader executes new operations on top of. Changed only
+    /// while holding the writer.
+    pending: Mutex<Pending>,
 }
 
 impl StateMachine {
+    /// The state machine in `db`, which must be a SQLite file opened in
+    /// [`instance::Mode::Replicated`].
     pub fn open(
-        db: Arc<dyn Database>,
+        db: Arc<instance::Database>,
         components: Components,
         snapshots: PathBuf,
     ) -> io::Result<Self> {
-        let conn = db.open()?;
-        prepare(&conn)?;
+        if db.mode() != instance::Mode::Replicated {
+            return Err(super::invalid(format!(
+                "cluster: the instance database {} must be opened for replication",
+                db.label()
+            )));
+        }
+        let applied = {
+            let conn = db.lock();
+            let conn = sqlite(&conn)?;
+            prepare(conn)?;
+            applied_log_id(conn)?.map_or(0, |log_id| log_id.index)
+        };
         fs::create_dir_all(&snapshots).map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", snapshots.display()))
         })?;
-        let applied = applied_log_id(&conn)?.map_or(0, |log_id| log_id.index);
         let (applied, _) = watch::channel(applied);
         let (changes, _) = broadcast::channel(1024);
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
-                conn: Mutex::new(conn),
                 components,
                 snapshots,
                 applied,
                 changes,
                 diverged: AtomicBool::new(false),
+                installing: AtomicBool::new(false),
+                pending: Mutex::new(Pending::default()),
             }),
         })
     }
 
     pub fn components(&self) -> &Components {
         &self.inner.components
+    }
+
+    /// The instance database the state machine lives in.
+    pub fn database(&self) -> &Arc<instance::Database> {
+        &self.inner.db
+    }
+
+    /// Whether a snapshot or repair copy is being installed: logins should
+    /// wait (docs/clustering.md, "Snapshots and log purging").
+    pub fn is_installing(&self) -> bool {
+        self.inner.installing.load(Ordering::SeqCst)
+    }
+
+    /// Run `work` on the writer with this peer's pending `operation`
+    /// entries: how the leader executes operations without an apply in
+    /// between.
+    pub(super) fn with_writer<T>(
+        &self,
+        work: impl FnOnce(&mut Conn, &mut Pending) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let mut conn = self.inner.db.lock();
+        let mut pending = self.inner.pending.lock().unwrap();
+        work(&mut conn, &mut pending)
+    }
+
+    /// Forget a pending `operation` entry that will not be applied (its
+    /// proposal failed).
+    pub(super) fn forget_pending(&self, origin: &Origin) {
+        let _conn = self.inner.db.lock();
+        self.inner.pending.lock().unwrap().remove(origin);
+    }
+
+    /// Whether this peer has pending `operation` entries.
+    pub(super) fn has_pending(&self) -> bool {
+        !self.inner.pending.lock().unwrap().is_empty()
     }
 
     /// The index of the last applied entry (0 before the first).
@@ -668,8 +742,8 @@ impl StateMachine {
 
     /// Read the state under the writer lock. Keep it short: apply waits.
     pub fn read<T>(&self, read: impl FnOnce(&Connection) -> io::Result<T>) -> io::Result<T> {
-        let conn = self.inner.conn.lock().unwrap();
-        read(&conn)
+        let conn = self.inner.db.lock();
+        read(sqlite(&conn)?)
     }
 
     pub fn peers(&self) -> io::Result<Vec<PeerRow>> {
@@ -743,16 +817,24 @@ impl StateMachine {
                 format!("{}: already exists", path.display()),
             ));
         }
-        let conn = self.inner.conn.lock().unwrap();
-        let applied = applied_log_id(&conn)?.map_or(0, |log_id| log_id.index);
-        conn.backup(rusqlite::MAIN_DB, path, rusqlite::backup::NO_PROGRESS)
+        let applied = {
+            let conn = self.inner.db.lock();
+            let conn = sqlite(&conn)?;
+            let applied = applied_log_id(conn)?.map_or(0, |log_id| log_id.index);
+            conn.backup(rusqlite::MAIN_DB, path, rusqlite::backup::NO_PROGRESS)
+                .map_err(sql_error)?;
+            applied
+        };
+        // A plain rollback-journal file, readable without `-wal` or `-shm`.
+        let copy = Connection::open(path).map_err(sql_error)?;
+        copy.execute_batch("PRAGMA journal_mode=DELETE;")
             .map_err(sql_error)?;
         Ok(applied)
     }
 
     /// Hash every table (by primary key) and every component's extra state.
     pub fn checksum_now(&self) -> io::Result<String> {
-        let conn = self.inner.conn.lock().unwrap();
+        let conn = self.inner.db.lock();
         self.state_hash(&conn)
     }
 
@@ -767,12 +849,19 @@ impl StateMachine {
     }
 
     fn apply_one(&self, entry: &LogEntry) -> io::Result<Reply> {
-        let mut conn = self.inner.conn.lock().unwrap();
-        let (reply, changes) = self.apply_entry(&mut conn, entry)?;
+        let conn = self.inner.db.lock();
+        let mut fires = Vec::new();
+        let (reply, changes) = self.apply_entry(&conn, entry, &mut fires)?;
+        // Committed: the instance database's hooks run while apply still
+        // holds the writer, as after a local write.
+        for fire in &fires {
+            self.inner.db.fire(&conn, &fire.change());
+        }
         if let Some(changes) = changes {
             if !changes.is_empty() {
+                let sql = sqlite(&conn)?;
                 for component in &self.inner.components.all {
-                    component.after_apply(&conn, &changes);
+                    component.after_apply(sql, &changes);
                 }
             }
             let _ = self.inner.changes.send(changes);
@@ -789,18 +878,24 @@ impl StateMachine {
         Ok(reply)
     }
 
+    /// Apply `entry` in one transaction on the writer `conn`. The instance
+    /// database's hooks the entry calls for go to `fires`, for after commit.
     fn apply_entry(
         &self,
-        conn: &mut Connection,
+        conn: &Conn,
         entry: &LogEntry,
+        fires: &mut Vec<Fire>,
     ) -> io::Result<(Reply, Option<Changes>)> {
         let index = entry.log_id.index;
-        if applied_log_id(conn)?.is_some_and(|applied| applied.index >= index) {
+        let sql = sqlite(conn)?;
+        if applied_log_id(sql)?.is_some_and(|applied| applied.index >= index) {
             // Already in the database: a restart before openraft learned of
             // the apply, or a repair from a newer copy.
             return Ok((Reply::Ok(serde_json::Value::Null), None));
         }
-        let mut tx = conn.transaction().map_err(sql_error)?;
+        // The components of the instance database use `conn` inside this
+        // transaction, so it is opened through the shared handle.
+        let mut tx = sql.unchecked_transaction().map_err(sql_error)?;
         let previous_time: i64 = tx
             .query_row(
                 "SELECT time_ms FROM cluster_applied WHERE id = 1",
@@ -845,10 +940,17 @@ impl StateMachine {
                             )),
                             _ => {
                                 let mut savepoint = tx.savepoint().map_err(sql_error)?;
-                                let reply = self.dispatch(&savepoint, &proposal.entry, &mut ctx)?;
+                                let reply = self.dispatch(
+                                    conn,
+                                    &savepoint,
+                                    &proposal.entry,
+                                    &mut ctx,
+                                    fires,
+                                )?;
                                 if reply.is_err() {
                                     savepoint.rollback().map_err(sql_error)?;
                                     ctx.changes = Changes::new(index, Some(proposal.entry.kind()));
+                                    fires.clear();
                                 }
                                 savepoint.commit().map_err(sql_error)?;
                                 reply
@@ -860,6 +962,10 @@ impl StateMachine {
                         reply
                     }
                 };
+                if let (Entry::Operation(_), Some(origin)) = (&proposal.entry, &proposal.origin) {
+                    // Applied or refused, it is no longer in flight.
+                    self.inner.pending.lock().unwrap().remove(origin);
+                }
                 (reply, Some(ctx.changes))
             }
         };
@@ -887,14 +993,39 @@ impl StateMachine {
         Ok((reply, changes))
     }
 
+    /// Apply one proposal's entry inside its savepoint. `conn` is the
+    /// writer, `db` the same connection inside the savepoint.
     fn dispatch(
         &self,
+        conn: &Conn,
         db: &Connection,
         entry: &Entry,
         ctx: &mut ApplyContext,
+        fires: &mut Vec<Fire>,
     ) -> io::Result<Reply> {
         match entry {
-            Entry::Peer(peer) => apply_peer(db, peer, ctx),
+            Entry::Operation(payload) => {
+                let (reply, conflict) = replicated::apply_operation(conn, db, payload, ctx, fires)?;
+                if conflict && !self.inner.diverged.swap(true, Ordering::SeqCst) {
+                    log_error!(
+                        "cluster: entry {} does not apply to this replica, which diverged; it stops taking logins and repairs from the leader",
+                        ctx.index
+                    );
+                }
+                Ok(reply)
+            }
+            Entry::Kv(payload) => replicated::apply_kv(conn, payload, ctx, fires),
+            Entry::Directory(payload) => replicated::apply_directory(conn, payload, ctx, fires),
+            Entry::Migrate(payload) => replicated::apply_migrate(conn, payload, ctx, fires),
+            Entry::Peer(peer) => {
+                let reply = apply_peer(db, peer, ctx)?;
+                if !reply.is_err() {
+                    for component in &self.inner.components.all {
+                        component.peer_applied(db, peer, ctx)?;
+                    }
+                }
+                Ok(reply)
+            }
             Entry::Features(features) => {
                 db.execute(
                     "INSERT INTO cluster_features (id, kinds, settings) VALUES (1, ?1, ?2)
@@ -909,7 +1040,7 @@ impl StateMachine {
                 Ok(Reply::Ok(serde_json::Value::Null))
             }
             Entry::Checksum(ChecksumEntry::Mark { .. }) => {
-                let hash = self.state_hash(db)?;
+                let hash = self.state_hash(conn)?;
                 db.execute(
                     "INSERT OR REPLACE INTO cluster_checksums (idx, hash) VALUES (?1, ?2)",
                     params![index_sql(ctx.index)?, hash],
@@ -957,26 +1088,14 @@ impl StateMachine {
         }
     }
 
-    fn state_hash(&self, db: &Connection) -> io::Result<String> {
+    /// Every table by primary key ([`changeset::checksum_except`]), then
+    /// every component's extra state.
+    fn state_hash(&self, conn: &Conn) -> io::Result<String> {
+        let tables = changeset::checksum_except(conn, UNCHECKED_TABLES)
+            .map_err(|error| io::Error::other(format!("cluster checksum: {error}")))?;
         let mut context = digest::Context::new(&digest::SHA256);
-        let mut tables = Vec::new();
-        {
-            let mut statement = db
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-                .map_err(sql_error)?;
-            let names = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(sql_error)?;
-            for name in names {
-                tables.push(name.map_err(sql_error)?);
-            }
-        }
-        for table in tables {
-            if UNCHECKED_TABLES.contains(&table.as_str()) {
-                continue;
-            }
-            hash_table(db, &table, &mut context)?;
-        }
+        context.update(&tables);
+        let db = sqlite(conn)?;
         for component in &self.inner.components.all {
             component.checksum(db, &mut context)?;
         }
@@ -1001,28 +1120,43 @@ impl StateMachine {
             ));
         }
         let index = incoming.map_or(0, |log_id| log_id.index);
-        let mut conn = self.inner.conn.lock().unwrap();
-        let current = applied_log_id(&conn)?.map_or(0, |log_id| log_id.index);
+        // Holding the writer pauses apply and leader execution until the
+        // new state is in place and every mirror reloaded.
+        let mut conn = self.inner.db.lock();
+        let current = applied_log_id(sqlite(&conn)?)?.map_or(0, |log_id| log_id.index);
         if meta.is_none() && index < current {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("repair copy is at entry {index}, this replica at {current}"),
             ));
         }
-        conn.restore(rusqlite::MAIN_DB, file, rusqlite::backup::NO_PROGRESS)
-            .map_err(sql_error)?;
-        // A fresh connection: no statement cached against the old schema.
-        let fresh = self.inner.db.open()?;
-        prepare(&fresh)?;
-        *conn = fresh;
-        for component in &self.inner.components.all {
-            component.full_reload(&conn).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("component {} reload: {error}", component.name()),
-                )
-            })?;
-        }
+        self.inner.installing.store(true, Ordering::SeqCst);
+        let installed = (|| -> io::Result<()> {
+            // Into the live file through the writer: nothing is renamed or
+            // replaced, so open read connections (and Windows) do not mind.
+            conn.sqlite_mut()
+                .ok_or_else(|| super::invalid("the cluster state needs a SQLite database"))?
+                .restore(rusqlite::MAIN_DB, file, rusqlite::backup::NO_PROGRESS)
+                .map_err(sql_error)?;
+            // Fresh connections: no statement cached against the old state.
+            self.inner.db.reopen(&mut conn)?;
+            prepare(sqlite(&conn)?)?;
+            // Whatever this peer had in flight belongs to the old state.
+            self.inner.pending.lock().unwrap().clear();
+            let sql = sqlite(&conn)?;
+            for component in &self.inner.components.all {
+                component.full_reload(sql).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("component {} reload: {error}", component.name()),
+                    )
+                })?;
+            }
+            self.inner.db.reload_all_on(&conn);
+            Ok(())
+        })();
+        self.inner.installing.store(false, Ordering::SeqCst);
+        installed?;
         drop(conn);
         self.inner.applied.send_replace(index);
         let mut changes = Changes::new(index, None);
@@ -1066,7 +1200,7 @@ impl StateMachine {
         .map_err(json_error)?;
         let temporary = self.inner.snapshots.join("current.json.tmp");
         fs::write(&temporary, pointer)?;
-        fs::File::open(&temporary)?.sync_all()?;
+        sync_file(&temporary)?;
         fs::rename(temporary, self.inner.snapshots.join("current.json"))?;
         for old in fs::read_dir(&self.inner.snapshots)? {
             let old = old?;
@@ -1087,9 +1221,10 @@ impl StateMachine {
     /// Build a snapshot file of the current state now. It also becomes
     /// this peer's current snapshot.
     pub(crate) fn build_snapshot_file(&self) -> io::Result<SnapshotOf<TypeConfig, SnapshotFile>> {
-        let conn = self.inner.conn.lock().unwrap();
-        let last_log_id = applied_log_id(&conn)?;
-        let last_membership = applied_membership(&conn)?;
+        let guard = self.inner.db.lock();
+        let conn = sqlite(&guard)?;
+        let last_log_id = applied_log_id(conn)?;
+        let last_membership = applied_membership(conn)?;
         let name = match last_log_id {
             Some(log_id) => format!(
                 "{}-{}-{}.sqlite3",
@@ -1102,9 +1237,22 @@ impl StateMachine {
         let _ = fs::remove_file(&temporary);
         conn.backup(rusqlite::MAIN_DB, &temporary, rusqlite::backup::NO_PROGRESS)
             .map_err(sql_error)?;
-        drop(conn);
-        fs::File::open(&temporary)?.sync_all()?;
-        fs::rename(temporary, &path)?;
+        drop(guard);
+        {
+            // A rollback-journal file: opening it never creates `-wal` and
+            // `-shm` files beside it, which would keep it busy on Windows.
+            let copy = Connection::open(&temporary).map_err(sql_error)?;
+            copy.execute_batch("PRAGMA journal_mode=DELETE;")
+                .map_err(sql_error)?;
+        }
+        sync_file(&temporary)?;
+        if path.is_file() {
+            // The same log id holds the same state; the file may be open
+            // for a transfer, and Windows refuses to replace an open file.
+            fs::remove_file(&temporary)?;
+        } else {
+            fs::rename(temporary, &path)?;
+        }
         let meta = SnapshotMeta {
             last_log_id,
             last_membership,
@@ -1160,7 +1308,13 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         };
         let kept = self.inner.snapshots.join(name);
         if snapshot.path != kept {
-            fs::rename(snapshot.path.as_path(), &kept)?;
+            if kept.is_file() {
+                // Already here under its name (and maybe open for a
+                // transfer, which Windows would not let a rename replace).
+                fs::remove_file(snapshot.path.as_path())?;
+            } else {
+                fs::rename(snapshot.path.as_path(), &kept)?;
+            }
         }
         self.keep_snapshot(meta, &kept)
     }
@@ -1312,7 +1466,7 @@ fn inspect(file: &Path) -> io::Result<Option<LogId>> {
     applied_log_id(&conn)
 }
 
-fn applied_log_id(conn: &Connection) -> io::Result<Option<LogId>> {
+pub(super) fn applied_log_id(conn: &Connection) -> io::Result<Option<LogId>> {
     let text: Option<String> = conn
         .query_row(
             "SELECT log_id FROM cluster_applied WHERE id = 1",
@@ -1337,7 +1491,7 @@ fn applied_membership(conn: &Connection) -> io::Result<StoredMembership> {
     serde_json::from_str(&text).map_err(json_error)
 }
 
-fn stored_reply(db: &Connection, origin: &Origin) -> io::Result<Option<Reply>> {
+pub(super) fn stored_reply(db: &Connection, origin: &Origin) -> io::Result<Option<Reply>> {
     let text: Option<String> = db
         .query_row(
             "SELECT reply FROM cluster_proposals WHERE peer = ?1 AND incarnation = ?2 AND serial = ?3",
@@ -1350,7 +1504,7 @@ fn stored_reply(db: &Connection, origin: &Origin) -> io::Result<Option<Reply>> {
         .transpose()
 }
 
-fn store_reply(db: &Connection, origin: &Origin, reply: &Reply) -> io::Result<()> {
+pub(super) fn store_reply(db: &Connection, origin: &Origin, reply: &Reply) -> io::Result<()> {
     let serial = index_sql(origin.serial)?;
     let incarnation = index_sql(origin.incarnation)?;
     db.execute(
@@ -1403,6 +1557,14 @@ fn apply_peer(db: &Connection, entry: &PeerEntry, ctx: &mut ApplyContext) -> io:
                 .map_err(sql_error)?
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1);
+            // Connection ids carry the peer's id in 8 bits
+            // (`crate::players::identity`), and ids are never reused.
+            let max = i64::from(crate::players::identity::MAX_PEER);
+            if next > max {
+                return Ok(Reply::err(format!(
+                    "cannot add peer {name}: raft ids are never reused and at most {max} can be assigned in one cluster; start a new cluster from a backup (`rift cluster init --from-backup`) to assign ids from 1 again"
+                )));
+            }
             db.execute(
                 "INSERT INTO cluster_peers (name, raft_id, incarnation, address, public_address, labels, witness, version, kinds, expired, since_ms)
                  VALUES (?1, ?2, 0, ?3, NULL, '{}', ?4, '', '[]', 0, ?5)",
@@ -1430,15 +1592,15 @@ fn apply_peer(db: &Connection, entry: &PeerEntry, ctx: &mut ApplyContext) -> io:
             kinds,
             ..
         } => {
-            let existing: Option<(i64, i64)> = db
+            let existing: Option<(i64, i64, i64)> = db
                 .query_row(
-                    "SELECT raft_id, incarnation FROM cluster_peers WHERE name = ?1",
+                    "SELECT raft_id, incarnation, expired FROM cluster_peers WHERE name = ?1",
                     [name],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(sql_error)?;
-            let Some((stored_id, stored_incarnation)) = existing else {
+            let Some((stored_id, stored_incarnation, stored_expired)) = existing else {
                 return Ok(Reply::err(format!("peer {name} is not a member")));
             };
             if u64::try_from(stored_id).ok() != Some(*raft_id) {
@@ -1447,7 +1609,10 @@ fn apply_peer(db: &Connection, entry: &PeerEntry, ctx: &mut ApplyContext) -> io:
                 )));
             }
             let incarnation_sql = index_sql(*incarnation)?;
-            if incarnation_sql <= stored_incarnation {
+            // A peer the leader expired joins again with the incarnation it
+            // still runs as, once it hears from the cluster again.
+            let rejoins = incarnation_sql == stored_incarnation && stored_expired != 0;
+            if incarnation_sql <= stored_incarnation && !rejoins {
                 return Ok(Reply::err(format!(
                     "peer {name}: incarnation {incarnation} is not newer than {stored_incarnation}"
                 )));
@@ -1560,78 +1725,6 @@ fn peer_rows(conn: &Connection) -> io::Result<Vec<PeerRow>> {
     Ok(peers)
 }
 
-/// Feed one table into `context`: its name, then every row ordered by the
-/// primary key (or all columns), each value tagged with its type.
-fn hash_table(db: &Connection, table: &str, context: &mut digest::Context) -> io::Result<()> {
-    let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-    let mut keys: Vec<(i64, String)> = Vec::new();
-    let mut columns: Vec<String> = Vec::new();
-    {
-        let mut info = db
-            .prepare(&format!("PRAGMA table_info({quoted})"))
-            .map_err(sql_error)?;
-        let rows = info
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
-            })
-            .map_err(sql_error)?;
-        for row in rows {
-            let (column, key) = row.map_err(sql_error)?;
-            let quoted_column = format!("\"{}\"", column.replace('"', "\"\""));
-            if key > 0 {
-                keys.push((key, quoted_column.clone()));
-            }
-            columns.push(quoted_column);
-        }
-    }
-    keys.sort();
-    let order: Vec<String> = if keys.is_empty() {
-        columns
-    } else {
-        keys.into_iter().map(|(_, column)| column).collect()
-    };
-    context.update(b"table\0");
-    context.update(table.as_bytes());
-    context.update(b"\0");
-    let order = if order.is_empty() {
-        String::new()
-    } else {
-        format!(" ORDER BY {}", order.join(", "))
-    };
-    let mut statement = db
-        .prepare(&format!("SELECT * FROM {quoted}{order}"))
-        .map_err(sql_error)?;
-    let count = statement.column_count();
-    let mut rows = statement.query([]).map_err(sql_error)?;
-    while let Some(row) = rows.next().map_err(sql_error)? {
-        context.update(b"row");
-        for column in 0..count {
-            match row.get_ref(column).map_err(sql_error)? {
-                ValueRef::Null => context.update(&[0]),
-                ValueRef::Integer(value) => {
-                    context.update(&[1]);
-                    context.update(&value.to_le_bytes());
-                }
-                ValueRef::Real(value) => {
-                    context.update(&[2]);
-                    context.update(&value.to_bits().to_le_bytes());
-                }
-                ValueRef::Text(bytes) => {
-                    context.update(&[3]);
-                    context.update(&(bytes.len() as u64).to_le_bytes());
-                    context.update(bytes);
-                }
-                ValueRef::Blob(bytes) => {
-                    context.update(&[4]);
-                    context.update(&(bytes.len() as u64).to_le_bytes());
-                    context.update(bytes);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn index_sql(value: u64) -> io::Result<i64> {
     i64::try_from(value).map_err(|_| super::invalid("value out of range"))
 }
@@ -1694,6 +1787,8 @@ mod tests {
         assert!(components.register(Arc::new(Peers)).is_err());
         assert!(components.supported().contains(&EntryKind::Claim));
         assert!(components.supported().contains(&EntryKind::Checksum));
-        assert!(!components.supported().contains(&EntryKind::Kv));
+        // The instance database's kinds are built in.
+        assert!(components.supported().contains(&EntryKind::Kv));
+        assert!(!components.supported().contains(&EntryKind::Stream));
     }
 }

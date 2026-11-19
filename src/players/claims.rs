@@ -287,6 +287,20 @@ impl ClaimTable {
         record
     }
 
+    /// The table holding exactly `records`, as a replica stored them: keys
+    /// are unique, and so are the UUIDs of claims that the table granted.
+    pub fn from_records(records: impl IntoIterator<Item = ClaimRecord>) -> Self {
+        let mut table = Self::default();
+        for record in records {
+            if let Some(uuid) = record.uuid {
+                table.by_uuid.insert(uuid, record.key.clone());
+                table.players += 1;
+            }
+            table.by_key.insert(record.key.clone(), record);
+        }
+        table
+    }
+
     /// Every live claim, by lowercase name.
     pub fn live(&self) -> impl Iterator<Item = &ClaimRecord> {
         self.by_key.values()

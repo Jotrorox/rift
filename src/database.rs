@@ -533,6 +533,14 @@ impl Conn {
             Backend::Postgres(_) | Backend::Mariadb(_) => None,
         }
     }
+
+    /// The SQLite connection, mutably (for the backup API's restore).
+    pub(crate) fn sqlite_mut(&mut self) -> Option<&mut Connection> {
+        match &mut self.0 {
+            Backend::Sqlite(connection) => Some(connection),
+            Backend::Postgres(_) | Backend::Mariadb(_) => None,
+        }
+    }
 }
 
 /// An open transaction; it derefs to its [`Conn`].
@@ -746,24 +754,74 @@ impl Database {
         database.prepare(true)?;
         if mode == Mode::Replicated {
             for _ in 0..READERS {
-                let reader = Connection::open_with_flags(
-                    &path,
-                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(|e| database.error(e))?;
-                reader
-                    .busy_timeout(Duration::from_secs(2))
-                    .map_err(|e| database.error(e))?;
-                reader
-                    .execute_batch("PRAGMA query_only=ON;")
-                    .map_err(|e| database.error(e))?;
-                database
-                    .readers
-                    .push(Mutex::new(Conn(Backend::Sqlite(reader))));
+                let reader = database.reader(&path)?;
+                database.readers.push(Mutex::new(reader));
             }
             changeset::assert_primary_keys(&database.lock()).map_err(|e| database.error(e))?;
         }
         Ok(database)
+    }
+
+    /// A read connection of a replicated database at `path`.
+    fn reader(&self, path: &Path) -> io::Result<Conn> {
+        let reader = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| self.error(e))?;
+        reader
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|e| self.error(e))?;
+        reader
+            .execute_batch("PRAGMA query_only=ON;")
+            .map_err(|e| self.error(e))?;
+        Ok(Conn(Backend::Sqlite(reader)))
+    }
+
+    /// Replace the writer of a replicated database, which the caller holds
+    /// as `writer`, and its read connections with fresh ones after the
+    /// file's contents were replaced through the writer (a snapshot install
+    /// with the backup API): no statement cached against the old contents
+    /// survives. The file itself is never renamed or replaced, so this works
+    /// while other handles to it are open (which Windows requires). A read
+    /// connection still in use after a short wait is left as it is; SQLite
+    /// prepares its statements again when it sees the new schema.
+    pub fn reopen(&self, writer: &mut Conn) -> io::Result<()> {
+        let path = match (&self.path, self.mode) {
+            (Some(path), Mode::Replicated) => path.clone(),
+            _ => return Err(self.error("only a replicated SQLite file is reopened")),
+        };
+        let fresh = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| self.error(e))?;
+        fresh
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|e| self.error(e))?;
+        fresh
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            )
+            .map_err(|e| self.error(e))?;
+        *writer = Conn(Backend::Sqlite(fresh));
+        for reader in &self.readers {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let guard = loop {
+                match reader.try_lock() {
+                    Ok(guard) => break Some(guard),
+                    Err(TryLockError::Poisoned(error)) => break Some(error.into_inner()),
+                    Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(TryLockError::WouldBlock) => break None,
+                }
+            };
+            if let Some(mut guard) = guard {
+                *guard = self.reader(&path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Open an existing SQLite file read-only, without locking, checking or
@@ -1091,12 +1149,25 @@ impl Database {
     /// when the component is new) into `latest`; it runs in one transaction
     /// with the version update (see [`migrate_component`]). A database
     /// written by a newer Rift is refused.
+    ///
+    /// A [`Mode::Replicated`] database is only checked: a cluster changes a
+    /// schema by applying a `migrate` entry on every peer at the same index,
+    /// so a component that is not at `latest` yet is an error here.
     pub fn migrate(
         &self,
         component: &str,
         latest: u32,
         upgrade: impl FnOnce(Dialect, u32) -> String,
     ) -> io::Result<()> {
+        if self.mode == Mode::Replicated {
+            let version = version(&self.read(), component).map_err(|e| self.error(e))?;
+            if version == latest {
+                return Ok(());
+            }
+            return Err(self.error(format!(
+                "{component} is at schema version {version}, this Rift needs {latest}; in a cluster the leader migrates it once every peer supports that version"
+            )));
+        }
         let mut connection = self.lock();
         let version = version(&connection, component).map_err(|e| self.error(e))?;
         if version == latest {

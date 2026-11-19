@@ -89,6 +89,18 @@ impl MessageScript {
     }
 }
 
+/// Subscribe as `subscription` says, with its cluster scope.
+fn subscribe(broker: &Broker, subscription: &MessagingSubscription) -> Result<Subscription, Error> {
+    broker.subscribe_with(
+        &subscription.subject,
+        subscription.queue.as_deref(),
+        crate::messaging::SubscribeOptions {
+            scope: subscription.scope,
+            client: false,
+        },
+    )
+}
+
 /// Register before advertising readiness. Dropping the run future aborts its
 /// child workers and releases subscriptions; bounded Lua jobs finish naturally.
 /// The script update channel preserves subscriptions and queued messages on reload.
@@ -111,9 +123,7 @@ impl MessageHandler {
             .into_iter()
             .flat_map(|config| &config.subscriptions)
             .map(|subscription| {
-                broker
-                    .subscribe(&subscription.subject, subscription.queue.as_deref())
-                    .map(|receiver| (subscription.clone(), receiver))
+                subscribe(&broker, subscription).map(|receiver| (subscription.clone(), receiver))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let (update, scripts) = watch::channel(script);
@@ -148,7 +158,7 @@ impl MessageHandler {
                         Ok(message) => message,
                         Err(Error::SlowConsumer) => {
                             log_warn!("messaging Lua subscription {} exceeded its queue; dropped pending messages and resubscribing", settings.subject);
-                            match broker.subscribe(&settings.subject, settings.queue.as_deref()) {
+                            match subscribe(&broker, &settings) {
                                 Ok(receiver) => subscription = receiver,
                                 Err(error) => {
                                     log_error!("messaging Lua subscription ended: {error}");

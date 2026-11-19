@@ -186,6 +186,12 @@ rift admin cluster replace eu-3                      # after a peer lost its dis
   A peer that comes back with an empty Raft file under a name that is still a
   member is refused, because it could vote twice in one term. `replace`
   removes and re-adds it under a new id.
+- Raft ids are never reused, and a cluster assigns at most 255 of them:
+  connection ids carry the peer's id in 8 bits (see
+  [incarnations](#incarnations-and-connection-ids)). Every `add` of a new
+  name and every `replace` uses one; `add` refuses once 255 were assigned.
+  A cluster that used them up starts again from a backup with
+  `rift cluster init --from-backup`, which assigns ids from 1.
 - A peer's own settings (its name, listen address, certificate, key, CA,
   token variable and the addresses of other peers to contact first) live in
   a small per-host file, `cluster.toml` beside `rift.lua`, or the equivalent
@@ -199,7 +205,7 @@ Every log entry is one of a small number of kinds, each versioned:
 | Entry | Applied as |
 | --- | --- |
 | `operation` | A changeset produced by the leader executing typed operations, with each operation's result (see [writes](#writes-to-the-instance-database)) |
-| `claim` | Player name and UUID claims and releases, node session claims |
+| `claim` | Player name and UUID claims and releases |
 | `kv` | Key-value mutations, applied with their quota checks, returning a result |
 | `directory` | Player directory upserts (name, last seen, language) |
 | `stream` | Appends to retained streams and consumer acknowledgements |
@@ -209,6 +215,7 @@ Every log entry is one of a small number of kinds, each versioned:
 | `features` | The set of entry kinds and settings every member supports |
 | `migrate` | Upgrade one component's schema to a version every member supports |
 | `checksum` | A hash of the state machine at this index, compared by every peer |
+| `bus` | Node session claims and releases, the bus-login key, the peers' bus addresses (see [step 5 notes](#step-5-notes)) |
 
 Rules for every kind:
 
@@ -891,11 +898,9 @@ What the cluster core does differently from the text above, and why:
 - **Encoding.** Log entries, Raft messages and handshakes are JSON: a newer
   peer reads an older peer's entries, and an unknown kind fails loudly. Each
   entry kind carries its own version `v`.
-- **The state machine's file.** Until step 3 replicates the instance
-  database, the state machine is its own file, `rift.cluster.sqlite3` beside
-  `rift.lua`: the instance database is locked by its single owner. The state
-  machine takes its connections from a `Database` trait, so step 3 hands in
-  the instance database without other changes.
+- **The state machine's file.** Step 2 kept the state machine in a file of
+  its own, `rift.cluster.sqlite3`. Since step 3 it lives in the instance
+  database (see [step 3 notes](#step-3-notes)); that file is gone.
 - **Log purging.** openraft purges only entries a snapshot covers. A peer
   therefore builds a snapshot once its log passes 64 MiB (or when a member
   needs one) and openraft purges behind it, keeping 10,000 entries for
@@ -933,6 +938,150 @@ What the cluster core does differently from the text above, and why:
 - **Peer certificates** are used both ways, so each must name the host of
   its `advertise` address and allow server and client authentication.
 - `rift.control.cluster` and `rift.events.cluster` come with the bus (step 5).
+
+### Step 3 notes
+
+- **One database.** The state machine is the instance database, opened in
+  replicated mode (WAL, `synchronous=NORMAL`, one writer and a pool of read
+  connections). Entries are applied on the writer; the apply hooks of the
+  stores run after each entry commits, while apply still holds the writer.
+  `cluster_applied`, the stored results of proposals and the other
+  `cluster_*` tables are tables of the instance database.
+- **Startup order.** `cluster::attach::database` opens the database, starts
+  the peer with it, installs the cluster's executor and waits until the
+  replica holds the cluster's state at this build's schema; only then do the
+  stores open. A new peer waits there until a member adds it and it has
+  installed a snapshot.
+- **Schemas.** In a cluster a store never migrates when it opens; it checks
+  that its schema is the one this build writes. `rift cluster init` records
+  every component's version with a `migrate` entry (creating what the
+  database lacks). Each peer announces the schema versions it can run
+  against as features (`schema:<component>:<version>`), and the leader
+  proposes a `migrate` entry once a committed `features` entry lists the new
+  version, so every member supports it.
+- **The first state is not in the log.** It is the instance database as
+  `rift cluster init` found it, so init builds a snapshot and purges the log
+  behind it: every peer added later starts from a snapshot.
+- **Hot paths.** `kv` and `directory` entries carry the operation, which every
+  peer executes when the entry applies; they bypass the leader's batches.
+  They touch tables no batch touches, so their order relative to batches in
+  flight does not matter. A `migrate` entry waits until no batch is in flight.
+- **Group commit.** The leader queues the operations it receives and takes
+  everything queued into one entry; while entries are in flight it executes
+  the next batch on top of their changesets (`capture_on`). An entry carries
+  the term it was computed in, so a leader that lost and regained leadership
+  never appends a batch computed against an older state. A new leader first
+  waits until it applied everything committed before its term; outcomes of
+  operations that committed under the old leader are then found in the
+  replica, which is how a retry gets the stored outcome.
+- **Snapshot install while serving** happens under the writer, which pauses
+  apply and leader execution. The snapshot is written into the live file
+  through the writer with the backup API, so no file is renamed or replaced
+  while handles are open (Windows refuses that); the writer and read
+  connections are then reopened and every hook runs in full reload mode.
+  The permission authority's reload first raises the events of the
+  revisions it missed, then reloads; join and leave events come with
+  presence (step 4), and `StateMachine::is_installing` tells logins to wait.
+- **Leader-only writes** such as startup recovery of half-done creations
+  still run on every peer at startup until step 7 moves them to the leader;
+  they go through the leader like any other write.
+- **File-backed key-value stores** are refused in a cluster;
+  `rift cluster init` copies their entries into the instance database.
+
+### Step 5 notes
+
+The bus (`src/cluster/bus*`) differs from the text above as follows:
+
+- **Node session claims are `bus` entries, not `claim` entries.** One
+  component applies each entry kind, and the `claim` kind belongs to player
+  presence. A `bus` entry claims `node.<name>` for `(peer, incarnation,
+  session)`; the claim applied last holds the node. A peer closes its own
+  session of a node only once that session's claim had applied and another
+  peer's claim applied after it, so two quick reconnects never close the
+  newer session. A claim counts while its peer runs that incarnation and has
+  not expired.
+- **The bus-login key is a `bus` entry too.** `rift cluster init` moves
+  `local/instance-key` into it and removes the file. A cluster that has no
+  key yet takes the key of the first peer that attaches its bus, so the
+  tokens of the peer that was the single Rift stay valid. Every peer derives
+  and checks tokens from the replicated key; without a cluster the file is
+  used as before.
+- **Bus addresses.** Each peer records its messaging address and certificate
+  name in a `bus` entry; `RIFT_BUS_ADDRESSES` lists every live peer, this
+  peer first. When the peers' certificate names differ, `RIFT_BUS_SERVER_NAME`
+  is left unset and clients verify each address for its own host. Node agents
+  get the list as repeated `--controller` flags.
+- **Federation** sends frames to a peer in batches on the `bus` stream, each
+  batch answered before the next one goes, which keeps them in order. A
+  peer's queue holds at most 16,384 frames or 32 MiB; an overflow or a failed
+  batch drops frames, counted in `rift_cluster_bus_dropped_total`, and the
+  peer then gets this peer's whole interest again. Peers that do not apply
+  `bus` entries (witnesses) are not federated.
+- **Retained streams.** Delivery state (pending records, redelivery deadlines,
+  delivery counts) stays in the leader's memory; the replicated state holds
+  the records, the consumers and, per consumer, an acknowledged floor and the
+  acknowledgements above it. A new leader starts each consumer at its floor
+  and skips acknowledged records, so pending records are delivered again
+  with a delivery count starting at 1. An acknowledgement that reaches a new
+  leader for a record it has not delivered is accepted while the record is
+  retained, matches the consumer and is unacknowledged, since the previous
+  leader may have delivered it. Records that file-backed streams held before
+  `rift cluster init` are not carried into the cluster.
+- **The permission change log** (`rift.perms-changes`) stays a stream of each
+  peer: every peer appends each permission revision when its permission
+  store commits or applies it, so the records are the same on every peer once
+  the permission store is replicated (step 3). Consumer positions on it are
+  per peer.
+- **Scopes for subscriptions**: `messaging.subscriptions[].scope` and
+  `rift.subscribe(subject, { queue = ..., scope = "local" }, fn)` in
+  `rift.lua`, and `scope` in plugin Lua (`rift.subscribe`). WebAssembly
+  plugins keep `cluster` scope: a scoped `subscribe` in `wit/rift-plugin.wit`
+  needs the C, Go and Rust SDKs regenerated and is left for later.
+
+### Steps 4 and 6 notes
+
+Presence and routed player actions live in `src/cluster/players/`, on top
+of seams that a single Rift fills with its in-process implementations
+(`src/players/`, `src/extensions/players/routing.rs`,
+`src/service_state.rs`). Where they differ from the text above:
+
+- **Claim entries are batches.** One `claim` entry carries the operations a
+  peer collected while its previous entry was in flight, and its result is
+  one outcome per operation. The claims are a table of the replicated
+  database (`cluster_claims`), so they survive restarts, travel in
+  snapshots and are part of every checksum. A login's claim is refused
+  when its holder is not the current, unexpired incarnation of a member, so
+  a claim proposed just before the leader expired its peer cannot land
+  after the expiry. `peer removed` releases the claims of every peer that
+  is no member any more.
+- **Rejoining keeps the incarnation.** `peer joined` with the incarnation a
+  peer already announced is accepted once that incarnation was expired;
+  any other repeat is still refused.
+- **Contact means a lease.** A follower counts as in contact with the
+  leader only while the leader answers its probes (on the `presence`
+  stream) and still holds its lease. A peer that reaches a leader cut off
+  from the majority therefore fences itself too.
+- **Catching up** means: this peer has not yet applied an index the leader
+  had applied more than a second ago, has not joined with its current
+  incarnation, `claim` entries are not enabled yet, or its replica
+  diverged. Logins wait with `login.unavailable` meanwhile.
+- **Expired peers stay quiet.** An expired peer sends no player attributes
+  until it has joined again and claimed its players anew, and a peer that
+  claimed a player never announces them once their claim is lost: other
+  peers never list a player twice. When two peers' attributes name one
+  player anyway, the claim decides which record the roster keeps.
+- **Expiry and stop holds.** The leader's maintenance loop expires peers;
+  applying `peer expired` records the servers the expired peer's players
+  were on, held back from idle stops until `partition_grace` has passed
+  (`Presence::stop_holds`, for the leader tasks of step 7).
+- **Context reports** that a backend sends to a peer which does not hold
+  the player go to the holding peer over the `player` stream; that peer
+  accepts them as it would a local report. Writes and console commands
+  that a backend makes on behalf of a player (`actor_uuid`) are still
+  checked against the peer the backend's client is connected to.
+- **Expected arrivals need no routing:** the session's own peer publishes
+  the player's permissions and records the arrival before it forwards the
+  connection.
 
 ## Decisions
 

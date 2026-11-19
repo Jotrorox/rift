@@ -240,11 +240,14 @@ impl RegistryState {
         });
     }
 
+    /// Announce one of this peer's players, unless their claim is lost:
+    /// another peer lists them now.
     fn publish_player(&mut self, uuid: &[u8; 16]) {
         self.publish(|state| {
             state
                 .players
                 .get(uuid)
+                .filter(|_| !state.lost.contains(uuid))
                 .map(|player| AttributeChange::Upsert(Attributes::of(player)))
         });
     }
@@ -834,6 +837,7 @@ impl PlayerRegistry {
 
     /// Every one of this peer's players, for a peer that (re)connects or
     /// missed an update: later changes continue from its sequence number.
+    /// Players whose claim somebody else holds now are left out.
     pub fn full_resync(&self) -> AttributeUpdate {
         let state = self.lock();
         let identity = state.identity();
@@ -841,7 +845,14 @@ impl PlayerRegistry {
             peer: identity.peer,
             incarnation: identity.incarnation,
             sequence: state.sequence,
-            body: UpdateBody::Resync(state.players.values().map(Attributes::of).collect()),
+            body: UpdateBody::Resync(
+                state
+                    .players
+                    .iter()
+                    .filter(|(uuid, _)| !state.lost.contains(*uuid))
+                    .map(|(_, player)| Attributes::of(player))
+                    .collect(),
+            ),
         }
     }
 
@@ -874,7 +885,9 @@ impl PlayerRegistry {
             UpdateBody::Resync(players) => {
                 changed |= state.remove_peer_players(peer);
                 for attributes in players {
-                    if state.players.contains_key(&attributes.uuid) {
+                    if state.players.contains_key(&attributes.uuid)
+                        || !self.takes(state, peer, &attributes)
+                    {
                         continue;
                     }
                     state
@@ -893,7 +906,9 @@ impl PlayerRegistry {
                 for change in changes {
                     match change {
                         AttributeChange::Upsert(attributes) => {
-                            if !state.players.contains_key(&attributes.uuid) {
+                            if !state.players.contains_key(&attributes.uuid)
+                                && self.takes(state, peer, &attributes)
+                            {
                                 state
                                     .remote
                                     .insert(attributes.uuid, attributes.into_player(peer));
@@ -921,6 +936,22 @@ impl PlayerRegistry {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }
         outcome
+    }
+
+    /// Whether attributes from `peer` may take the roster record of their
+    /// player: unless another peer lists the player, whose claim then
+    /// decides (a peer that was cut off may still list a player who logged
+    /// in elsewhere meanwhile).
+    fn takes(&self, state: &RegistryState, peer: u16, attributes: &Attributes) -> bool {
+        match state.remote.get(&attributes.uuid) {
+            Some(existing) if existing.peer != peer => self
+                .claims()
+                .live()
+                .iter()
+                .find(|record| record.uuid == Some(attributes.uuid))
+                .is_some_and(|record| record.holder.peer == peer),
+            _ => true,
+        }
     }
 
     /// Record that this peer's player `uuid` lost their claim to another

@@ -28,6 +28,12 @@ pub struct Config {
     /// `host:port` of the proxy's messaging listener (`RIFT_BUS_ADDRESS`).
     #[serde(default)]
     pub address: String,
+    /// Every address of the proxy's bus, such as the peers of a Rift
+    /// cluster (`RIFT_BUS_ADDRESSES`). The client tries `address` first and
+    /// then these in turn, and moves on to the next one when a connection
+    /// is lost.
+    #[serde(default)]
+    pub addresses: Vec<String>,
     /// The name the proxy's certificate is verified against
     /// (`RIFT_BUS_SERVER_NAME`).
     #[serde(default)]
@@ -78,6 +84,7 @@ impl Config {
     ) -> Self {
         Self {
             address: address.into(),
+            addresses: Vec::new(),
             server_name: server_name.into(),
             ca: ca.into(),
             token_env: token_env.into(),
@@ -104,7 +111,8 @@ impl Config {
     }
 
     /// Fill unset connection fields from the environment: `address` from
-    /// `RIFT_BUS_ADDRESS`, `server_name` from `RIFT_BUS_SERVER_NAME` (else the
+    /// `RIFT_BUS_ADDRESS`, `addresses` from `RIFT_BUS_ADDRESSES` (whose first
+    /// entry also stands in for a missing `RIFT_BUS_ADDRESS`), `server_name` from `RIFT_BUS_SERVER_NAME` (else the
     /// host of `address`), `ca` from `RIFT_BUS_CERT`, `server` from
     /// `RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`, and the token
     /// variable `RIFT_BUS_TOKEN`. Set fields win.
@@ -122,6 +130,21 @@ impl Config {
             }
         };
         fill(&mut self.address, "RIFT_BUS_ADDRESS");
+        if self.addresses.is_empty()
+            && let Some(list) = variable("RIFT_BUS_ADDRESSES")
+        {
+            self.addresses = list
+                .split(',')
+                .map(str::trim)
+                .filter(|address| !address.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        if self.address.is_empty()
+            && let Some(first) = self.addresses.first()
+        {
+            self.address = first.clone();
+        }
         fill(&mut self.server_name, "RIFT_BUS_SERVER_NAME");
         if self.server_name.is_empty()
             && let Some((host, _)) = self.address.rsplit_once(':')
@@ -295,6 +318,14 @@ mod tests {
         assert_eq!(filled.group.as_deref(), Some("lobby"));
         assert_eq!(filled.token_env, "RIFT_BUS_TOKEN");
         assert!(filled.check_complete().is_ok());
+        assert!(filled.addresses.is_empty());
+        // In a cluster every peer is listed.
+        let cluster = template.clone().with_variables(|name| match name {
+            "RIFT_BUS_ADDRESSES" => Some("10.0.0.2:7443, 10.0.0.3:7443,".to_owned()),
+            _ => None,
+        });
+        assert_eq!(cluster.address, "10.0.0.2:7443");
+        assert_eq!(cluster.addresses, ["10.0.0.2:7443", "10.0.0.3:7443"]);
         // Configured values win; without either, the error names both.
         let explicit = Config::new("a:1", "a", "ca.pem", "T", "fixed")
             .with_variables(|name| variables.get(name).map(|value| (*value).to_owned()));

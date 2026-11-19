@@ -371,9 +371,16 @@ async fn start(args: Vec<String>) -> io::Result<()> {
     };
     if let Some(peer) = peer {
         let source = path.as_deref().map(fs::read).transpose()?;
-        let options = rift::cluster::Options::from_config(&config, source.as_deref())?;
-        let cluster = rift::cluster::Cluster::start(peer, options).await?;
-        rift::cluster::install_global(cluster);
+        // The replicated instance database first: the peer starts on it and
+        // its executor is installed before `serve` opens the stores.
+        let attached = rift::cluster::attach::database(
+            &config,
+            peer,
+            source.as_deref(),
+            rift::cluster::Components::new(),
+        )
+        .await?;
+        rift::cluster::install_global(attached.cluster);
     }
     runtime::serve(config, path).await
 }

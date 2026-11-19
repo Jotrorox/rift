@@ -2020,7 +2020,15 @@ fn bus_addresses(config: &Config, bound: SocketAddr) -> Vec<String> {
         };
         SocketAddr::new(ip, bound.port()).to_string()
     });
-    vec![address]
+    let mut addresses = vec![address];
+    if let Some(cluster) = rift::cluster::global() {
+        for other in rift::cluster::bus::other_addresses(cluster) {
+            if !addresses.contains(&other) {
+                addresses.push(other);
+            }
+        }
+    }
+    addresses
 }
 
 /// Where instances reach the bus; see [`bus_addresses`].
@@ -3112,16 +3120,21 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     } else {
         (config, None)
     };
-    let persistent = source.is_some() || !config.service_groups.is_empty();
+    // A cluster peer attached its replicated instance database before.
+    let attached = rift::cluster::attach::attached_database();
+    let persistent = source.is_some() || !config.service_groups.is_empty() || attached.is_some();
     let (config, instance_store, permissions, restored_ports) = blocking(move || {
         let mut config = config;
         if persistent {
             // One database, one owner: the instance registry and the
             // permission store share the connection. A standby waits here
             // until the owning Rift stops.
-            let database = Arc::new(rift::database::Database::connect(
-                &config.database_location(),
-            )?);
+            let database = match attached {
+                Some(database) => database,
+                None => Arc::new(rift::database::Database::connect(
+                    &config.database_location(),
+                )?),
+            };
             // The upgrade reads fields that validation rejects, so it runs
             // before anything validates the configuration.
             let permissions =

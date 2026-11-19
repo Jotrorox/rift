@@ -40,7 +40,8 @@ use crate::{config::InstanceMessaging, messaging::quic};
 pub const TOKEN_PREFIX: &str = "ri1.";
 /// The key file, relative to the configuration directory.
 pub const KEY_FILE: &str = "local/instance-key";
-const KEY_BYTES: usize = 32;
+/// The length of the key tokens are derived from.
+pub const KEY_BYTES: usize = 32;
 /// The certificate file Rift writes into each instance directory.
 pub const CERTIFICATE_FILE: &str = "rift-bus.pem";
 
@@ -55,6 +56,9 @@ pub struct Bus {
     /// by commas; clients that know only `RIFT_BUS_ADDRESS` keep working.
     pub fallback_addresses: Vec<String>,
     /// `RIFT_BUS_SERVER_NAME`, the name the certificate is verified for.
+    /// Empty when the addresses carry their own names (the peers of a
+    /// cluster with certificates for different hosts): the variable is then
+    /// left unset and clients verify each address for its own host.
     pub server_name: String,
     /// The messaging certificate (PEM), written to [`CERTIFICATE_FILE`].
     pub certificate: String,
@@ -71,7 +75,9 @@ struct Registered {
 /// [`quic::DynamicIdentities::authenticate`]) and the process supervisor
 /// (which hands each process its [`Logins::environment`]).
 pub struct Logins {
-    key: [u8; KEY_BYTES],
+    /// In a cluster, replaced by the key in the replicated state; see
+    /// [`Logins::set_key`].
+    key: RwLock<[u8; KEY_BYTES]>,
     bus: RwLock<Option<Bus>>,
     registered: RwLock<HashMap<String, Registered>>,
     revoked: broadcast::Sender<String>,
@@ -93,11 +99,24 @@ impl Logins {
     /// Logins under `key`, for tests and configurations without a file.
     pub fn with_key(key: [u8; KEY_BYTES]) -> Self {
         Self {
-            key,
+            key: RwLock::new(key),
             bus: RwLock::new(None),
             registered: RwLock::default(),
             revoked: broadcast::channel(64).0,
         }
+    }
+
+    /// The key tokens are derived from.
+    pub fn key(&self) -> [u8; KEY_BYTES] {
+        *self.key.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Derive and check tokens from `key` from now on: a cluster peer uses
+    /// the key in the replicated state instead of its own file
+    /// (`docs/clustering.md`, "Bus logins"). Tokens derived from another key
+    /// stop authenticating; sessions already open stay.
+    pub fn set_key(&self, key: [u8; KEY_BYTES]) {
+        *self.key.write().unwrap_or_else(PoisonError::into_inner) = key;
     }
 
     /// Set where instances reach the bus, once it is bound.
@@ -121,8 +140,8 @@ impl Logins {
     }
 
     fn mac(&self, name: &str, generation: u64) -> Hmac<Sha256> {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC accepts any key length");
+        let key = self.key();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
         mac.update(b"rift-instance-login/1\0");
         mac.update(&(name.len() as u64).to_be_bytes());
         mac.update(name.as_bytes());
@@ -201,14 +220,17 @@ impl Logins {
                     .collect();
                 variables.push(("RIFT_BUS_ADDRESSES".to_owned(), all.join(",")));
             }
-            variables.extend([
-                ("RIFT_BUS_ADDRESS".to_owned(), bus.address),
-                ("RIFT_BUS_SERVER_NAME".to_owned(), bus.server_name),
-                (
-                    "RIFT_BUS_TOKEN".to_owned(),
-                    self.token(name, registered.generation),
-                ),
-            ]);
+            variables.push(("RIFT_BUS_ADDRESS".to_owned(), bus.address));
+            // Empty when the peers of a cluster have certificates for
+            // different names: clients then verify each address for its own
+            // host.
+            if !bus.server_name.is_empty() {
+                variables.push(("RIFT_BUS_SERVER_NAME".to_owned(), bus.server_name));
+            }
+            variables.push((
+                "RIFT_BUS_TOKEN".to_owned(),
+                self.token(name, registered.generation),
+            ));
             if let Some(directory) = directory {
                 let path = std::path::absolute(directory.join(CERTIFICATE_FILE))
                     .unwrap_or_else(|_| directory.join(CERTIFICATE_FILE));
@@ -369,6 +391,12 @@ fn load_key(path: &Path) -> io::Result<[u8; KEY_BYTES]> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_key(path),
         Err(error) => Err(error),
     }
+}
+
+/// The key in the file at `path`, without creating it: what `rift cluster
+/// init` moves into the replicated state.
+pub fn read_key_file(path: &Path) -> io::Result<[u8; KEY_BYTES]> {
+    read_key(path)
 }
 
 fn read_key(path: &Path) -> io::Result<[u8; KEY_BYTES]> {

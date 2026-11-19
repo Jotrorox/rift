@@ -164,10 +164,12 @@ listener is disabled.
 | `rift.control.stop` | `{"name":"lobby-1"}` | Request an unused managed server stop and pause automatic wake | `control` |
 | `rift.control.download` | `{"template":"paper","refresh":false}` | Download (or with `refresh`, update) a template's server software | `control` |
 | `rift.control.plugins` | `{"action":"list"}`, or `{"action":"status"\|"logs"\|"restart","name":"hello-lua"}` | [Plugins](plugin-operations.md) with state, restarts and calls; one plugin; its last 200 log lines; or restart a persistent plugin (accepted asynchronously) | `control` |
+| `rift.control.cluster` | `{}` (status), or `{"command":"add","args":["eu-2","10.0.0.2:7444"]}` with `command` one of `status`, `add`, `promote`, `demote`, `remove`, `replace`, `leave`, `transfer-leader` | The same data and commands as [`rift admin cluster`](clustering.md#operating-a-cluster); membership commands run on the leader. `backup` writes a file on the proxy host and is only available through `rift admin` | `control` |
 
-Control requests are serialized, except `create`, `remove` and `download`:
+Control requests are serialized, except `create`, `remove`, `download` and
+`cluster`:
 
-- These three run alongside other control requests, at most 16 at once. Rift
+- These run alongside other control requests, at most 16 at once. Rift
   still applies instance changes one at a time.
 - They reply when the operation finishes, which can include a first-time
   download of up to 15 minutes. Use a request timeout long enough for
@@ -203,6 +205,7 @@ like their other host calls.
 | `rift.events.plugins` | Persistent plugins starting, failing, restarting and stopping, and operator restarts, as described in [plugins](plugin-operations.md) |
 | `rift.events.servers` | Changes to what backends report about themselves (see [server state](#server-state)) |
 | `rift.events.lifecycle` | `ready` and `draining` |
+| `rift.events.cluster` | In a [cluster](clustering.md): `{"event":"leader","term":4,"leader":"eu-2","peer":"eu-1"}` when this peer sees a new leader or term; `{"event":"membership","voters":[…],"learners":[…]}` after a membership change; `{"event":"peer_added"\|"peer_joined"\|"peer_expired","name":"eu-3","incarnation":7}` and `{"event":"peer_removed","name":"eu-3"}` as the peer table changes. Every peer publishes these to its own subscribers (`applied` scope), so each subscriber gets one copy |
 
 These are ephemeral events; query status to get current state.
 

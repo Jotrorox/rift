@@ -109,19 +109,31 @@ function api.every(name, every_ms, callback)
     jobs[name] = { every_ms = every_ms, run = callback }
 end
 
--- rift.subscribe(subject, [queue,] function(message) ... end): a
--- messaging.subscriptions entry whose messages go to this function instead
--- of on_message.
+-- rift.subscribe(subject, [queue | { queue = ..., scope = ... },]
+-- function(message) ... end): a messaging.subscriptions entry whose messages
+-- go to this function instead of on_message. In a cluster, scope = "local"
+-- hears only this peer's messages on user subjects ("cluster" is the default).
 function api.subscribe(subject, queue, callback)
     configuring()
     if callback == nil then callback, queue = queue, nil end
+    local scope
+    if type(queue) == "table" then
+        local options = queue
+        for key in pairs(options) do
+            if key ~= "queue" and key ~= "scope" then
+                error("rift.subscribe options take queue and scope, not " .. tostring(key))
+            end
+        end
+        queue, scope = options.queue, options.scope
+    end
     if type(subject) ~= "string" or (queue ~= nil and type(queue) ~= "string")
+        or (scope ~= nil and type(scope) ~= "string")
         or type(callback) ~= "function" then
-        error("rift.subscribe expects a subject, an optional queue group and a function")
+        error("rift.subscribe expects a subject, an optional queue group or options table and a function")
     end
     if subscriptions[subject] then error("duplicate rift.subscribe subject: " .. subject) end
     subscriptions[subject] = callback
-    subjects[#subjects + 1] = { subject = subject, queue = queue }
+    subjects[#subjects + 1] = { subject = subject, queue = queue, scope = scope }
 end
 
 local function extensions(version)

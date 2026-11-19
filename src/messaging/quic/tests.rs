@@ -962,6 +962,95 @@ async fn node_logins_change_while_the_server_runs() {
     server.shutdown().await;
 }
 
+/// What a cluster sees of node sessions: every one that opens and closes,
+/// and closing one that a newer session on another peer replaced.
+#[tokio::test]
+async fn node_sessions_are_observed_and_closed_when_replaced_elsewhere() {
+    #[derive(Default)]
+    struct Seen(std::sync::Mutex<Vec<(String, u64, bool)>>);
+    impl NodeSessionObserver for Seen {
+        fn opened(&self, name: &str, session: u64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), session, true));
+        }
+        fn closed(&self, name: &str, session: u64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), session, false));
+        }
+    }
+    let (server_tls, client_tls) = configs();
+    let logins = NodeLogins::default();
+    logins
+        .replace(vec![Identity {
+            name: "node.a".into(),
+            token: "node-a-test-only-long-random-token".into(),
+            publish: vec!["rift.node.a.state".into()],
+            subscribe: vec!["rift.node.a.cmd".into()],
+            control: false,
+            players: false,
+        }])
+        .unwrap();
+    let seen = Arc::new(Seen::default());
+    logins.set_observer(seen.clone());
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity()],
+            nodes: logins.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let agent = Client::connect(
+        server.local_addr().unwrap(),
+        "localhost",
+        client_tls,
+        "node-a-test-only-long-random-token",
+    )
+    .await
+    .unwrap();
+    let session = {
+        let seen = seen.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{:?}", *seen);
+        assert_eq!((seen[0].0.as_str(), seen[0].2), ("node.a", true));
+        seen[0].1
+    };
+    // Another session id is not this one: nothing happens.
+    logins.close_replaced("node.a", session + 1000);
+    agent.subscribe("rift.node.a.cmd", None).await.unwrap();
+    logins.close_replaced("node.a", session);
+    let closed = tokio::time::timeout(Duration::from_secs(5), agent.connection().closed())
+        .await
+        .expect("the replaced session should close");
+    match closed {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(
+                &close.reason[..],
+                b"replaced by a newer session of this node"
+            );
+        }
+        other => panic!("unexpected close: {other}"),
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !seen
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, id, opened)| *id == session && !opened)
+    {
+        assert!(std::time::Instant::now() < deadline, "close not observed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn failover_clients_move_to_the_next_address_and_subscribe_again() {
     let (server_tls, client_tls) = configs();

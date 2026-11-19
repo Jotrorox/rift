@@ -8,6 +8,9 @@
 //!   so the caller reads its own write. Followers and learners forward to the
 //!   leader; retries reuse the proposal's serial, so a proposal applies at
 //!   most once even across leader changes.
+//! - [`Cluster::run_operation`] / [`Cluster::run_in_term`] (in
+//!   [`super::operations`]): a write to the instance database, executed by
+//!   the leader; the database's executor calls it for every write.
 //! - [`Cluster::read_barrier`]: a linearizable read: afterwards the local
 //!   replica holds every entry committed before the call.
 //! - [`Cluster::on_leader_gain`] / [`Cluster::on_leader_loss`]: work that
@@ -40,11 +43,13 @@ use super::{
     link::{self, Hello, Links, StreamKind, remote_error},
     log_store::{LocalIdentity, LogStore},
     network::{NetworkFactory, RaftRequest, RaftResponse},
+    operations::Queue,
+    replicated,
     settings::Settings,
     snapshot,
     state::{
-        ChecksumEntry, Components, Database, Entry, EntryKind, FeaturesEntry, Origin, PeerEntry,
-        PeerRow, Proposal, Reply, SnapshotFile, SqliteFile, StateMachine,
+        ChecksumEntry, Components, Entry, EntryKind, FeaturesEntry, Origin, PeerEntry, PeerRow,
+        Proposal, Reply, SnapshotFile, StateMachine,
     },
     transport::{BoxFuture, Transport, stopped},
 };
@@ -117,8 +122,10 @@ pub struct Options {
     pub shared: ClusterConfig,
     /// Components applying the entry kinds of later steps.
     pub components: Components,
-    /// The state machine database; default: `rift.cluster.sqlite3`.
-    pub database: Option<Arc<dyn Database>>,
+    /// The instance database the state machine lives in, opened in
+    /// [`crate::database::Mode::Replicated`]; default: `rift.sqlite3` in the
+    /// peer's directory.
+    pub database: Option<Arc<crate::database::Database>>,
     /// Default: QUIC on `listen`, mutual TLS against the cluster CA.
     pub transport: Option<Arc<dyn Transport>>,
     /// Default: the variable `token_env` names.
@@ -293,6 +300,8 @@ pub(super) struct Inner {
     identity: RwLock<LocalIdentity>,
     incarnation: u64,
     serial: AtomicU64,
+    /// Operations for this peer to execute while it leads.
+    pub(super) operations: Queue,
     start: tokio::sync::Mutex<()>,
     /// One membership change at a time.
     pub(super) membership: tokio::sync::Mutex<()>,
@@ -303,7 +312,7 @@ pub(super) struct Inner {
     members: Mutex<Option<LogId>>,
     measurements: Mutex<Measurements>,
     last_repair: Mutex<Option<Instant>>,
-    stop: watch::Sender<bool>,
+    pub(super) stop: watch::Sender<bool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -344,23 +353,29 @@ impl Cluster {
         }
         let incarnation = log.next_incarnation()?;
         identity.incarnation = incarnation;
-        let database: Arc<dyn Database> = match options.database {
+        let database = match options.database {
             Some(database) => database,
-            None => Arc::new(SqliteFile::new(settings.state_file())),
+            None => Arc::new(crate::database::Database::open_with(
+                &settings.default_database(),
+                crate::database::Mode::Replicated,
+            )?),
         };
-        let supported: Vec<String> = options
+        // The entry kinds this build applies, and the schema versions it
+        // runs against (see `replicated::schema_feature`).
+        let mut supported: Vec<String> = options
             .components
             .supported()
             .into_iter()
             .map(|kind| kind.name().to_owned())
             .collect();
+        supported.extend(replicated::schema_features());
         let state =
             StateMachine::open(database, options.components, settings.snapshot_directory())?;
         if identity.raft_id.is_none() && state.applied_index() > 0 {
             return Err(super::invalid(format!(
                 "{} is empty, but {} holds the state of a cluster; this peer lost its Raft file: move the state away and have a member run `rift admin cluster replace {}`",
                 log.path().display(),
-                settings.state_file().display(),
+                state.database().label(),
                 settings.peer
             )));
         }
@@ -404,6 +419,7 @@ impl Cluster {
                 identity: RwLock::new(identity),
                 incarnation,
                 serial: AtomicU64::new(0),
+                operations: Queue::new(),
                 start: tokio::sync::Mutex::new(()),
                 membership: tokio::sync::Mutex::new(()),
                 leadership,
@@ -573,6 +589,16 @@ impl Cluster {
             .map(|(reply, _)| reply)
     }
 
+    /// A new `(peer, incarnation, serial)` for a proposal or operation of
+    /// this peer: what makes its retries idempotent.
+    pub(crate) fn next_origin(&self) -> Origin {
+        Origin {
+            peer: self.inner.settings.peer.clone(),
+            incarnation: self.inner.incarnation,
+            serial: self.inner.serial.fetch_add(1, Ordering::Relaxed) + 1,
+        }
+    }
+
     /// Propose and also return the entry's log index.
     pub async fn propose_entry(&self, entry: Entry, term: Option<u64>) -> io::Result<(Reply, u64)> {
         let kind = entry.kind();
@@ -585,11 +611,7 @@ impl Cluster {
             ));
         }
         let proposal = Proposal {
-            origin: Some(Origin {
-                peer: self.inner.settings.peer.clone(),
-                incarnation: self.inner.incarnation,
-                serial: self.inner.serial.fetch_add(1, Ordering::Relaxed) + 1,
-            }),
+            origin: Some(self.next_origin()),
             time_ms: 0,
             term,
             entry,
@@ -756,7 +778,7 @@ impl Cluster {
     }
 
     /// On the leader: the index a linearizable read must wait for.
-    async fn local_read_index(&self) -> Result<u64, ExecuteError> {
+    pub(super) async fn local_read_index(&self) -> Result<u64, ExecuteError> {
         let raft = self
             .raft()
             .ok_or_else(|| ExecuteError::Fatal(not_joined()))?;
@@ -1193,10 +1215,12 @@ impl Cluster {
         let watcher = self.clone();
         let maintenance = self.clone();
         let announcer = self.clone();
+        let leader = self.clone();
         let mut tasks = self.inner.tasks.lock().unwrap();
         tasks.push(tokio::spawn(async move { watcher.watch().await }));
         tasks.push(tokio::spawn(async move { maintenance.maintain().await }));
         tasks.push(tokio::spawn(async move { announcer.announce().await }));
+        tasks.push(tokio::spawn(async move { leader.lead().await }));
         Ok(())
     }
 
@@ -1389,6 +1413,9 @@ impl Cluster {
             }
             if let Err(error) = self.checksum(term).await {
                 log_warn!("cluster: checksum: {error}");
+            }
+            if let Err(error) = self.migrate_schemas(term).await {
+                log_warn!("cluster: schema migration: {error}");
             }
             if self.inner.settings.witness {
                 self.hand_off().await;
@@ -1648,6 +1675,9 @@ impl Cluster {
                 Err(ExecuteError::Retry(_)) => RaftResponse::NotLeader { leader: None },
                 Err(ExecuteError::Fatal(error)) => return Err(error.to_string()),
             },
+            RaftRequest::Operate(request) => {
+                RaftResponse::Operated(self.serve_operation(request).await)
+            }
             RaftRequest::ReadIndex => match self.local_read_index().await {
                 Ok(index) => RaftResponse::ReadIndex(index),
                 Err(ExecuteError::NotLeader(leader)) => RaftResponse::NotLeader { leader },

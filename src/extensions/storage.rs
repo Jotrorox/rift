@@ -1207,6 +1207,64 @@ pub(super) fn prepare_shared(database: &Database) -> io::Result<()> {
     database.migrate(SHARED_COMPONENT, SHARED_VERSION, shared_sql)
 }
 
+/// The file of a store `config` keeps in a file of its own
+/// (`extensions.storage.path`), if it does. A cluster cannot replicate such
+/// a store (docs/clustering.md, "Key-value stores and other local files").
+pub(crate) fn file_target(config: &crate::config::Config) -> Option<&Path> {
+    let storage = config.extensions.as_ref()?.storage.as_ref()?;
+    match &storage.target {
+        Target::File(path) => Some(path),
+        Target::Database => None,
+    }
+}
+
+/// `rift cluster init`: copy every entry of the file-backed store `config`
+/// names into `extension_entries` of `database`, which then becomes the
+/// cluster's first state. Returns the file and the number of entries, or
+/// `None` without such a store (or file).
+pub(crate) fn copy_file_store(
+    config: &crate::config::Config,
+    database: &Database,
+) -> io::Result<Option<(PathBuf, usize)>> {
+    let Some(storage) = config.extensions.as_ref().and_then(|s| s.storage.as_ref()) else {
+        return Ok(None);
+    };
+    let Target::File(path) = &storage.target else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let store = Store::open(Some(storage), None)?;
+    let entries: Vec<KvEntry> = store
+        .memory()
+        .entries
+        .iter()
+        .map(|(key, value)| KvEntry {
+            key: key.clone(),
+            value: Some(value.clone()),
+        })
+        .collect();
+    prepare_shared(database)?;
+    for chunk in entries.chunks(1024) {
+        let op = KvOp::Mutate {
+            quotas: storage.quotas.clone(),
+            expect: Vec::new(),
+            changes: chunk.to_vec(),
+        };
+        match database.run(Operation::Kv(op))? {
+            Outcome::Kv(KvOutcome::Applied { .. }) => {}
+            other => {
+                return Err(shared_error(
+                    database,
+                    format!("copying {}: {other:?}", path.display()),
+                ));
+            }
+        }
+    }
+    Ok(Some((path.clone(), entries.len())))
+}
+
 /// The store's schema component in the instance database and the version
 /// this Rift writes.
 pub fn schema_versions() -> Vec<(&'static str, u32)> {

@@ -99,6 +99,14 @@ struct NodeLoginsInner {
     /// logins must not repeat. Set when the server binds.
     fixed: std::sync::RwLock<Vec<Identity>>,
     revoked: tokio::sync::broadcast::Sender<String>,
+    /// Sessions a newer session of the same node on another cluster peer
+    /// replaced: `(principal, session id)`.
+    replaced: tokio::sync::broadcast::Sender<(String, u64)>,
+    /// Told about every node session that opens or closes; see
+    /// [`NodeSessionObserver`].
+    observer: std::sync::RwLock<Option<Arc<dyn NodeSessionObserver>>>,
+    /// Session ids, unique across every server that shares this set.
+    next_session: AtomicU64,
 }
 
 impl Default for NodeLogins {
@@ -107,8 +115,22 @@ impl Default for NodeLogins {
             identities: std::sync::RwLock::default(),
             fixed: std::sync::RwLock::default(),
             revoked: tokio::sync::broadcast::channel(256).0,
+            replaced: tokio::sync::broadcast::channel(256).0,
+            observer: std::sync::RwLock::default(),
+            next_session: AtomicU64::new(1),
         }))
     }
+}
+
+/// Watches the sessions of node principals, so a cluster can make a node's
+/// session unique across its peers (`docs/clustering.md`, "Node sessions").
+/// Called while the server holds no lock; implementations must not block.
+pub trait NodeSessionObserver: Send + Sync + 'static {
+    /// Node principal `name` opened session `session` here; an older session
+    /// of it on this server was closed.
+    fn opened(&self, name: &str, session: u64);
+    /// Session `session` of `name` ended.
+    fn closed(&self, name: &str, session: u64);
 }
 
 impl std::fmt::Debug for NodeLogins {
@@ -162,6 +184,28 @@ impl NodeLogins {
             let _ = self.0.revoked.send(name.clone());
         }
         Ok(revoked)
+    }
+
+    /// Report every node session that opens or closes to `observer` from
+    /// now on.
+    pub fn set_observer(&self, observer: Arc<dyn NodeSessionObserver>) {
+        *write(&self.0.observer) = Some(observer);
+    }
+
+    /// Stop reporting node sessions.
+    pub fn clear_observer(&self) {
+        *write(&self.0.observer) = None;
+    }
+
+    /// Close session `session` of node principal `name`, if it is still
+    /// open: a newer session of the node opened on another cluster peer.
+    /// The agent sees "replaced by a newer session of this node".
+    pub fn close_replaced(&self, name: &str, session: u64) {
+        let _ = self.0.replaced.send((name.to_owned(), session));
+    }
+
+    fn observer(&self) -> Option<Arc<dyn NodeSessionObserver>> {
+        read(&self.0.observer).clone()
     }
 
     /// Bind time: remember the fixed identities and check the set against them.
@@ -520,8 +564,30 @@ impl Server {
                 }
             })
         };
+        // And for a node whose newer session opened on another cluster peer.
+        let node_replacer = {
+            let mut replacements = context.auth.nodes.0.replaced.subscribe();
+            let context = context.clone();
+            tokio::spawn(async move {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match replacements.recv().await {
+                        Ok((name, session)) => context.replace_node(&name, session),
+                        // A replacement that was missed is announced again
+                        // by the next session change of that node.
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => return,
+                    }
+                }
+            })
+        };
         // Dropped with the accept loop, also when it is aborted.
-        let revokers = AbortOnDrop(revoker.into_iter().chain([node_revoker]).collect());
+        let revokers = AbortOnDrop(
+            revoker
+                .into_iter()
+                .chain([node_revoker, node_replacer])
+                .collect(),
+        );
         let task = tokio::spawn(async move {
             let _revokers = revokers;
             let mut tasks = JoinSet::new();
@@ -666,6 +732,21 @@ impl Context {
         }
     }
 
+    /// Close session `session` of node principal `name`, which a newer
+    /// session on another cluster peer replaced.
+    fn replace_node(&self, name: &str, session: u64) {
+        let removed = {
+            let mut sessions = self.node_sessions.lock().unwrap_or_else(|e| e.into_inner());
+            match sessions.get(name) {
+                Some((id, _)) if *id == session => sessions.remove(name),
+                _ => None,
+            }
+        };
+        if let Some((_, connection)) = removed {
+            connection.close(4u32.into(), b"replaced by a newer session of this node");
+        }
+    }
+
     /// After missed revocations, close every node session that did not log
     /// in as a fixed identity: which tokens changed is unknown, and agents
     /// reconnect on their own.
@@ -731,7 +812,12 @@ impl Context {
     /// closing an older one: after a silent network drop the agent must be
     /// able to reconnect before the old connection's idle timeout.
     fn claim_node_session(self: &Arc<Self>, name: &str, connection: &Connection) -> NodeSession {
-        let id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .auth
+            .nodes
+            .0
+            .next_session
+            .fetch_add(1, Ordering::Relaxed);
         let previous = self
             .node_sessions
             .lock()
@@ -739,6 +825,9 @@ impl Context {
             .insert(name.to_owned(), (id, connection.clone()));
         if let Some((_, previous)) = previous {
             previous.close(4u32.into(), b"replaced by a newer session of this node");
+        }
+        if let Some(observer) = self.auth.nodes.observer() {
+            observer.opened(name, id);
         }
         NodeSession {
             context: self.clone(),
@@ -780,16 +869,21 @@ struct NodeSession {
 }
 impl Drop for NodeSession {
     fn drop(&mut self) {
-        let mut sessions = self
-            .context
-            .node_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if sessions
-            .get(&self.name)
-            .is_some_and(|(id, _)| *id == self.id)
         {
-            sessions.remove(&self.name);
+            let mut sessions = self
+                .context
+                .node_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if sessions
+                .get(&self.name)
+                .is_some_and(|(id, _)| *id == self.id)
+            {
+                sessions.remove(&self.name);
+            }
+        }
+        if let Some(observer) = self.context.auth.nodes.observer() {
+            observer.closed(&self.name, self.id);
         }
     }
 }

@@ -717,6 +717,18 @@ fn a_replicated_database_uses_wal_and_read_connections() {
             .query_row("PRAGMA synchronous", params![], |r| r.get(0))
             .unwrap();
         assert_eq!(synchronous, 1, "NORMAL");
+        // A replica does not migrate when a component opens: it checks.
+        assert!(Store::new(database.clone()).is_err());
+        for (component, version) in operation::latest_versions() {
+            let outcome = database
+                .run(Operation::Migrate(MigrateOp {
+                    component: component.into(),
+                    version,
+                    now: NOW,
+                }))
+                .unwrap();
+            assert!(!outcome.failed(), "{component}: {outcome:?}");
+        }
         let store = Store::new(database.clone()).unwrap();
         store
             .set_node_schedule("node1", NodeSchedule::Cordoned)

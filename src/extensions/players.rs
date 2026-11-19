@@ -1653,7 +1653,94 @@ impl Players {
                     None => WireResult::Error("this peer runs no extensions".into()),
                 }
             }
+            WireBody::Contexts {
+                uuid,
+                server,
+                contexts,
+            } => {
+                let contexts = match rift_permissions::ContextSet::from_pairs(contexts) {
+                    Ok(contexts) => contexts,
+                    Err(error) => return WireResult::Error(error.to_string()),
+                };
+                match self.permissions.report_contexts(
+                    rift_permissions::Uuid::from_bytes(uuid),
+                    &server,
+                    contexts,
+                ) {
+                    Ok(accepted) => WireResult::Sent(accepted),
+                    Err(error) => WireResult::Error(error.to_string()),
+                }
+            }
         }
+    }
+
+    /// The peer holding player `uuid` and the incarnation to address, when
+    /// it is another peer: from the player's attributes, else from the
+    /// claims (a login whose attributes have not arrived yet).
+    fn owner(&self, uuid: &[u8; 16]) -> Option<(u16, u64)> {
+        if let Some(remote) = self.roster.remote_by_uuid(uuid) {
+            return Some((remote.player.peer, remote.incarnation));
+        }
+        let own = self.roster.identity();
+        if !own.is_clustered() {
+            return None;
+        }
+        Claims::live(&*self.roster.claims())
+            .into_iter()
+            .find(|record| record.uuid == Some(*uuid) && record.holder.peer != own.peer)
+            .map(|record| (record.holder.peer, record.holder.incarnation))
+    }
+
+    /// The backend of player `uuid` when another peer holds them.
+    pub fn remote_server(&self, uuid: &[u8; 16]) -> Option<String> {
+        self.roster
+            .remote_by_uuid(uuid)
+            .map(|remote| remote.player.server)
+    }
+
+    /// Hand permission contexts that backend `server` reported to the peer
+    /// holding player `uuid`, and wait for its answer: whether it accepted
+    /// them (the player is on `server` there). `None` when no other peer
+    /// holds the player.
+    pub async fn route_contexts(
+        &self,
+        uuid: [u8; 16],
+        server: &str,
+        contexts: &rift_permissions::ContextSet,
+    ) -> Option<Result<bool, String>> {
+        let (peer, incarnation) = self.owner(&uuid)?;
+        let request = WireRequest {
+            incarnation,
+            body: WireBody::Contexts {
+                uuid,
+                server: server.to_owned(),
+                contexts: contexts
+                    .iter()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+            },
+        };
+        Some(match self.router().deliver(peer, request).await {
+            Ok(WireResult::Sent(accepted)) => Ok(accepted),
+            Ok(WireResult::Stale) => Ok(false),
+            Ok(WireResult::Error(reason)) => Err(reason),
+            Ok(other) => Err(format!("unexpected answer to a context report: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        })
+    }
+
+    /// [`Players::route_contexts`] for a blocking worker thread of the
+    /// runtime, such as the permission bus's request handlers. `None` as
+    /// well when called outside a runtime.
+    pub fn route_contexts_blocking(
+        &self,
+        uuid: [u8; 16],
+        server: &str,
+        contexts: &rift_permissions::ContextSet,
+    ) -> Option<Result<bool, String>> {
+        self.owner(&uuid)?;
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        runtime.block_on(self.route_contexts(uuid, server, contexts))
     }
 
     /// Queue `action` for this peer's session `connection` of player `uuid`.

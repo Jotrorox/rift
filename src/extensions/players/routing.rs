@@ -62,6 +62,14 @@ pub enum WireBody {
         plugin: Option<String>,
         context: Context,
     },
+    /// Permission contexts that the backend `server` reported for a player
+    /// of the receiving peer through the peer its bus client is connected
+    /// to. Answered with whether the receiving peer accepted them.
+    Contexts {
+        uuid: [u8; 16],
+        server: String,
+        contexts: Vec<(String, String)>,
+    },
 }
 
 /// The answer to a [`WireRequest`].
