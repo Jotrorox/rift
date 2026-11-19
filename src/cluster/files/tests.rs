@@ -252,7 +252,10 @@ async fn audit_records_are_replicated_once() {
                 .is_ok_and(|records| !records.is_empty())
         })
         .await;
-        assert_eq!(net.state(index).audit_records().unwrap(), [record.clone()]);
+        assert_eq!(
+            net.state(index).audit_records().unwrap(),
+            std::slice::from_ref(&record)
+        );
     }
     net.shutdown().await;
 }

@@ -1956,7 +1956,7 @@ async fn idle_stop_in_cluster<B: ProcessBackend>(
                     .is_some_and(|timeout| state.last_activity.elapsed() >= timeout)
         }
     };
-    if !idle(&mut *lock(&server.state)) {
+    if !idle(&mut lock(&server.state)) {
         return;
     }
     let agreed = coordinator.may_stop(&server.name).await;
@@ -1966,7 +1966,7 @@ async fn idle_stop_in_cluster<B: ProcessBackend>(
             // Asked again only after another idle period.
             state.last_activity = Instant::now();
             false
-        } else if idle(&mut *state) {
+        } else if idle(&mut state) {
             state.phase = Phase::Stopping;
             state.recover = false;
             state.retry_at = None;

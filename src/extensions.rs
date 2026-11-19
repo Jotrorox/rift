@@ -1967,9 +1967,7 @@ impl ExtensionSession {
     /// Players the replicated registry puts on each server, in a cluster;
     /// `None` on a single Rift. Read before the host is locked.
     fn registry_counts(&self) -> Option<BTreeMap<String, usize>> {
-        if self.runtime.host.lock().unwrap().network.is_none() {
-            return None;
-        }
+        self.runtime.host.lock().unwrap().network.as_ref()?;
         Some(self.runtime.players.roster().server_counts())
     }
 

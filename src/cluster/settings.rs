@@ -306,7 +306,7 @@ pub fn with_peer<T>(name: &str, work: impl FnOnce() -> T) -> T {
     let name: &'static str = {
         let mut names = PEER_NAMES.lock().unwrap_or_else(|e| e.into_inner());
         match names.get(name) {
-            Some(known) => *known,
+            Some(known) => known,
             None => {
                 let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
                 names.insert(leaked);

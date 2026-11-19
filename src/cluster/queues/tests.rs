@@ -146,7 +146,7 @@ fn head(peer: &str, id: u64) -> Option<TicketRef> {
 
 #[tokio::test(start_paused = true)]
 async fn players_on_three_peers_queue_and_enter_in_network_order() {
-    let mut net = Net::form(3, 3, 2).await;
+    let net = Net::form(3, 3, 2).await;
     let leader = net.sim.leader().await;
     let (a, b) = ((leader + 1) % 3, (leader + 2) % 3);
     let (name_a, name_b) = (net.sim.name(a), net.sim.name(b));
