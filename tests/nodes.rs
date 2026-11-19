@@ -203,6 +203,8 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
                 .into_owned()]),
             forwarding_secret: Some("node secret".into()),
             forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
+            local_templates: None,
+            any_program: false,
         })
         .unwrap()
     }
