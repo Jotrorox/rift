@@ -48,6 +48,22 @@ of one IPv4 address or IPv6 /64, so a single host cannot hold every slot of
 
 It limits open connections; `rate_limit` limits how fast new ones arrive.
 
+## In a cluster
+
+In a [cluster](clustering.md#what-stays-per-peer) of several proxies, these
+limits stay **per peer**: each peer counts only the connections it accepts.
+
+- `rate_limit` and `login_rate_limit` buckets, including the global ones,
+  apply to each peer separately. Three peers behind DNS round robin together
+  admit up to three times `global_per_second`; divide the value by the number
+  of peers if it is meant for the whole network.
+- `limits.max_connections` and `limits.max_connections_per_address` cap the
+  open connections of one peer. A client can hold that many on each peer it
+  reaches.
+- They protect one process. The cap on players in the whole network is
+  `cluster.max_players`, which the cluster enforces when a login's claim
+  applies, and [queues](queues.md#in-a-cluster) count capacity network-wide.
+
 ## Run behind a load balancer
 
 When players reach Rift through TCPShield, Cloudflare Spectrum, HAProxy or a

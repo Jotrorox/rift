@@ -137,7 +137,22 @@ rift.config.plugins.jobs = {
 ```
 
 Each job requires `every_ms` and a `run` function. Its context contains `job`
-(and `api_version`) and no player identity. Return nil.
+(and `api_version`) and no player identity. Return nil. `rift.every(name,
+every_ms, [{ scope = "peer" },] fn)` adds the same entry.
+
+In a [cluster](clustering.md) of several proxies every peer runs the same
+configuration, so every peer schedules every job. A job's optional `scope`
+decides where its ticks run:
+
+| `scope` | Ticks run on |
+| --- | --- |
+| `"cluster"` (default) | The leader only. Before each tick a peer checks that it leads and holds the leader lease; when leadership moves, the job moves with it. |
+| `"peer"` | Every peer, as on a single Rift. Use it for work about the peer itself, such as its own players. |
+
+Without a cluster the scope changes nothing. A leader that loses its lease
+mid-tick can still finish that tick while the next leader starts; work that
+must never overlap takes a [lease](#leases-in-a-cluster) and carries its
+token.
 
 | Limit | Value |
 | --- | --- |
@@ -166,6 +181,38 @@ and excluding the same job name in a new generation.
 
 Schedules are process-local and do not survive downtime or promise exactly-once
 execution; use idempotent external operations.
+
+### Leases in a cluster
+
+Inside callbacks and jobs, `rift.cluster` hands out named leases that at most
+one peer of a [cluster](clustering.md) holds at a time:
+
+```lua
+rift.every("sweep", 30000, function(ctx)
+    local token = rift.cluster.lease("sweep", 60000)   -- nil while another peer holds it
+    if not token then return end
+    rift.publish("sweeper.run", tostring(token))   -- the receiver refuses older tokens
+end)
+```
+
+| Function | Returns |
+| --- | --- |
+| `rift.cluster.lease(name, ttl_ms)` | A fencing token, or nil while another peer holds the lease. Asking again while holding it extends it and returns the same token. |
+| `rift.cluster.renew(name, token, ttl_ms)` | Whether this peer still held the lease with `token` (and extended it). False once it ran out or another peer took it. |
+| `rift.cluster.release(name, token)` | Whether the lease was held with `token` and is now free. |
+| `rift.cluster.is_leader()` | Whether this peer leads right now. Advisory: it can change a moment later. |
+| `rift.cluster.peer()` | This peer's name; nil without a cluster. |
+
+- Leases are decided through the cluster's replicated log, so two peers never
+  hold one at the same time. `ttl_ms` is 100 to 3600000 and runs on the
+  leader's clock. A lease also ends when its peer expires or restarts.
+- The token grows with every grant of that lease and never goes back, across
+  leader changes and restarts. Pass it to whatever the work changes, and let
+  that side refuse a token lower than one it has seen: a holder that lost
+  its lease without noticing then cannot overwrite a newer holder's work.
+- The configuration script's leases are its own; each plugin has its own as
+  well, so two plugins may use the same name.
+- Without a cluster a lease is always granted.
 
 ## HTTP integrations
 

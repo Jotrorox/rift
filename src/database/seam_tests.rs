@@ -108,6 +108,27 @@ fn operations() -> Vec<Operation> {
         Operation::Instances(InstanceOp::ForgetMovedServer {
             name: "lobby".into(),
         }),
+        Operation::Instances(InstanceOp::SetServerState {
+            name: "lobby".into(),
+            state: crate::instance_store::ServerState {
+                phase: "running".into(),
+                last_error: Some("an earlier start failed".into()),
+                automatic: true,
+                restart_attempts: 2,
+            },
+        }),
+        Operation::Instances(InstanceOp::SetServerState {
+            name: "games-5".into(),
+            state: crate::instance_store::ServerState {
+                phase: "stopped".into(),
+                last_error: None,
+                automatic: false,
+                restart_attempts: 0,
+            },
+        }),
+        Operation::Instances(InstanceOp::PruneServerStates {
+            keep: vec!["lobby".into()],
+        }),
         write(PermBody::Change {
             change: PermChange::CreateGroup {
                 name: "vip".into(),

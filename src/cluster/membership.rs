@@ -312,16 +312,24 @@ impl Cluster {
         }
     }
 
-    /// Step 2 part of a drain: leadership moves away from the peer.
+    /// Drain a peer (docs/clustering.md, "Rolling restarts"): leadership
+    /// moves away from it, and the peer itself is asked to drain as on
+    /// SIGTERM: it stops taking logins, its players' claims are released as
+    /// their sessions end, and its bus clients reconnect to other peers.
     async fn leave(&self, name: &str) -> Result<Value, String> {
         let id = self
             .member_id(name)
             .ok_or_else(|| format!("{name} is not a member"))?;
         if Some(id) == self.raft_id() {
-            let target = self.transfer_to(None).await?;
-            return Ok(json!({"leaving": name, "leadership": target}));
+            let leadership = self.transfer_to(None).await?;
+            let draining = super::leader::drain_here();
+            return Ok(json!({"leaving": name, "leadership": leadership, "draining": draining}));
         }
-        Ok(json!({"leaving": name, "leadership": "elsewhere already"}))
+        let draining = match super::leader::Coordination::ask_to_leave(self, name).await {
+            Ok(()) => json!(true),
+            Err(error) => json!(format!("{name} was not asked to drain: {error}")),
+        };
+        Ok(json!({"leaving": name, "leadership": "elsewhere already", "draining": draining}))
     }
 
     async fn transfer_to(&self, name: Option<&str>) -> Result<Value, String> {

@@ -2031,19 +2031,34 @@ fn bus_addresses(config: &Config, bound: SocketAddr) -> Vec<String> {
     addresses
 }
 
-/// Where instances reach the bus; see [`bus_addresses`].
-fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+/// The name the messaging certificate is verified for.
+fn bus_server_name(config: &Config) -> String {
     let messaging = config.messaging.as_ref().expect("listening");
-    let mut addresses = bus_addresses(config, bound);
-    let address = addresses.remove(0);
-    let server_name = messaging.advertise_server_name.clone().unwrap_or_else(|| {
+    messaging.advertise_server_name.clone().unwrap_or_else(|| {
         messaging
             .advertise
             .as_deref()
             .and_then(|advertise| advertise.rsplit_once(':'))
             .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
             .unwrap_or_else(|| "localhost".to_owned())
-    });
+    })
+}
+
+/// Where bus clients reach this peer, as a cluster announces it: the
+/// preferred address of [`bus_addresses`] and its certificate's name.
+fn bus_address(config: &Config, bound: SocketAddr) -> rift::cluster::bus::BusAddress {
+    rift::cluster::bus::BusAddress {
+        address: bus_addresses(config, bound).remove(0),
+        server_name: bus_server_name(config),
+    }
+}
+
+/// Where instances reach the bus; see [`bus_addresses`].
+fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+    let messaging = config.messaging.as_ref().expect("listening");
+    let mut addresses = bus_addresses(config, bound);
+    let address = addresses.remove(0);
+    let server_name = bus_server_name(config);
     let path = messaging
         .certificate
         .as_ref()
@@ -2132,6 +2147,7 @@ type NodeChange = Option<Vec<rift::messaging::quic::Identity>>;
 /// whether it came from a signal, the website, or an API client.
 async fn reconfigure(
     operation: crate::control::Operation,
+    actor: &str,
     app: &crate::web::App,
     snapshot: &Arc<Snapshot>,
     services: &crate::web::Services,
@@ -2147,8 +2163,15 @@ async fn reconfigure(
         .ok_or_else(|| Error::conflict("no configuration source available"))?;
     let path_for_prepare = path.clone();
     let active_config = snapshot.config.clone();
+    let actor = actor.to_owned();
     let candidate = tokio::task::spawn_blocking(move || {
-        control::prepare_with_instances(&path_for_prepare, &active, operation, &active_config)
+        control::prepare_with_instances(
+            &path_for_prepare,
+            &active,
+            operation,
+            &active_config,
+            &actor,
+        )
     })
     .await
     .map_err(Error::invalid)??;
@@ -2191,8 +2214,10 @@ async fn reconfigure(
         .map_err(Error::invalid)??;
     }
     // A named server whose node or backend the configuration changed since
-    // `rift admin move` follows the configuration again.
+    // `rift admin move` follows the configuration again. In a cluster the
+    // leader forgets the moves; the other peers follow its write.
     if next.config.moved_servers != snapshot.config.moved_servers
+        && rift::cluster::leader::runs_here()
         && let Some(store) = snapshot.instance_store.clone()
     {
         for name in snapshot.config.moved_servers.keys() {
@@ -2210,7 +2235,7 @@ async fn reconfigure(
     Ok((Arc::new(next), prepared, node_change))
 }
 
-type InstanceResult = Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error>;
+pub(crate) type InstanceResult = Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error>;
 
 /// Keep the transaction and its replies owned until completion, even after
 /// shutdown starts or the requesting client disconnects.
@@ -2244,7 +2269,7 @@ impl InstanceChange {
 
 /// Serialized by the same control queue as configuration reloads. Build and
 /// validate a complete candidate before changing process ownership or routing.
-async fn change_instance(
+pub(crate) async fn change_instance(
     operation: crate::control::Operation,
     snapshot: &Arc<Snapshot>,
 ) -> InstanceResult {
@@ -2974,11 +2999,13 @@ fn instance_event(snapshot: &Snapshot, response: &serde_json::Value) {
     crate::messaging_runtime::emit(&snapshot.messaging, "rift.events.instances", event);
 }
 
-/// Run filesystem provisioning work off the async runtime.
-async fn blocking<T: Send + 'static>(
+/// Run filesystem provisioning work off the async runtime. A leader task's
+/// term goes along, so the writes it makes there carry it too.
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(work)
+    let term = rift::cluster::leader::current_term();
+    tokio::task::spawn_blocking(move || rift::cluster::leader::with_thread_term(term, work))
         .await
         .map_err(io::Error::other)?
 }
@@ -3004,7 +3031,7 @@ fn seal_forwarding_secret(
 }
 
 /// Instance changes keep the active source, revision and bound sockets.
-fn instance_snapshot(config: Config, snapshot: &Arc<Snapshot>) -> io::Result<Snapshot> {
+pub(crate) fn instance_snapshot(config: Config, snapshot: &Arc<Snapshot>) -> io::Result<Snapshot> {
     let mut next = Snapshot::new(config, Some(snapshot))?;
     next.source = snapshot.source.clone();
     next.revision = snapshot.revision.clone();
@@ -3122,6 +3149,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     };
     // A cluster peer attached its replicated instance database before.
     let attached = rift::cluster::attach::attached_database();
+    let cluster = rift::cluster::global().cloned();
+    // Only a cluster's leader recovers and makes configuration-derived
+    // writes, once it leads (see `crate::cluster_runtime::lead`).
+    let recover = cluster.is_none();
     let persistent = source.is_some() || !config.service_groups.is_empty() || attached.is_some();
     let (config, instance_store, permissions, restored_ports) = blocking(move || {
         let mut config = config;
@@ -3139,8 +3170,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             // before anything validates the configuration.
             let permissions =
                 rift::permissions::Authority::open(database.clone(), &config.permissions)?;
-            if let Some(applied) =
-                permissions.migrate_once(|| rift::extensions::upgrade_nodes(&config))?
+            if recover
+                && let Some(applied) =
+                    permissions.migrate_once(|| rift::extensions::upgrade_nodes(&config))?
                 && applied.ops > 0
             {
                 log_info!(
@@ -3150,7 +3182,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 );
             }
             let store = Arc::new(rift::instance_store::Store::new(database)?);
-            store.restore(&mut config)?;
+            store.restore_with(&mut config, recover)?;
             let ports = store.reserve_restored_ports(&config)?;
             Ok((config, Some(store), Arc::new(permissions), ports))
         } else {
@@ -3159,7 +3191,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     })
     .await?;
-    let permission_sweeper = permissions.spawn_sweeper();
+    // A cluster's leader sweeps (see `crate::cluster_runtime::lead`).
+    let permission_sweeper = cluster.is_none().then(|| permissions.spawn_sweeper());
     let mut initial = Snapshot::first(config, permissions)?;
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
@@ -3172,8 +3205,18 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         )?;
         initial.instance_store = Some(store);
     }
-    initial.prune_groups();
-    initial.prune_nodes();
+    // A cluster coordinates its managed servers before their workers
+    // launch: only the leader's act.
+    let coordinated = match (&cluster, &initial.instance_store) {
+        (Some(cluster), Some(store)) => {
+            Some(crate::cluster_runtime::prepare(cluster, &initial, store)?)
+        }
+        _ => None,
+    };
+    if cluster.is_none() {
+        initial.prune_groups();
+        initial.prune_nodes();
+    }
     let admin_secret = initial
         .config
         .admin
@@ -3252,6 +3295,28 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         crate::messaging_runtime::NetworkRequests::new(initial.messaging.clone())?;
     let server_states = crate::messaging_runtime::ServerStates::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
+    // This peer's players and bus join the cluster before any login.
+    let mut peer = match (&cluster, coordinated) {
+        (Some(cluster), Some(coordinated)) => {
+            let bound = messaging_server
+                .as_ref()
+                .map(|server| server.local_addr().map_err(io::Error::other))
+                .transpose()?;
+            let address = bound.map(|bound| bus_address(&initial.config, bound));
+            Some(
+                crate::cluster_runtime::attach(
+                    cluster,
+                    coordinated,
+                    &initial,
+                    logins.clone(),
+                    address,
+                    messaging_server.is_some(),
+                )
+                .await?,
+            )
+        }
+        _ => None,
+    };
     initial.addresses = Arc::new(
         initial
             .listener_addresses
@@ -3274,10 +3339,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
     let mut background = JoinSet::new();
-    // With the bus listening, a reload may add nodes later.
+    // With the bus listening, a reload may add nodes later. In a cluster
+    // the leader fences and reconciles them (`cluster_runtime::lead`).
     if messaging_server.is_some() {
         background.spawn(snapshot.nodes.listen()?);
-        background.spawn(reconcile_nodes(receiver.clone()));
+        if peer.is_none() {
+            background.spawn(reconcile_nodes(receiver.clone()));
+        }
     }
     let (admin_commands, mut admin_requests) = mpsc::channel(16);
     background.spawn(permission_bus);
@@ -3290,7 +3358,44 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(network_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(server_states.run(receiver.clone()));
-    background.spawn(crate::backups::schedule(receiver.clone()));
+    // Instance changes that followers hand to this peer while it leads, and
+    // `rift admin cluster leave` naming this peer.
+    let (forwarded_instances, mut forwarded_requests) =
+        mpsc::channel::<(control::Operation, admin::Reply)>(8);
+    let (leave, mut leaving) = mpsc::channel::<()>(1);
+    match &peer {
+        Some(peer) => {
+            crate::cluster_runtime::lead(&peer.cluster, receiver.clone());
+            let sender = forwarded_instances.clone();
+            peer.coordination
+                .set_instance_handler(Arc::new(move |request: serde_json::Value| {
+                    let sender = sender.clone();
+                    let answer: rift::managed::CoordinatorFuture<
+                        Result<serde_json::Value, String>,
+                    > = Box::pin(async move {
+                        let operation = crate::cluster_runtime::decode_instance(&request)
+                            .ok_or("unknown instance request")?;
+                        let (reply, answer) = tokio::sync::oneshot::channel();
+                        sender
+                            .send((operation, reply))
+                            .await
+                            .map_err(|_| "the leader is shutting down".to_owned())?;
+                        answer
+                            .await
+                            .map_err(|_| "the leader is shutting down".to_owned())?
+                    });
+                    answer
+                }));
+            let leave = leave.clone();
+            peer.coordination.set_leave_handler(Arc::new(move || {
+                let _ = leave.try_send(());
+            }));
+        }
+        // Scheduled backups belong to the leader in a cluster.
+        None => {
+            background.spawn(crate::backups::schedule(receiver.clone()));
+        }
+    }
     // Keep visibility rules current as permissions change.
     background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
@@ -3381,6 +3486,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 let change = instance_change.take().unwrap();
                 let result = result.unwrap_or_else(|error| Err(control::Error::invalid(error)));
                 let response = match result {
+                    // The cluster leader ran it; its write reaches this peer
+                    // through the registry, like any other.
+                    Ok((_, response)) if response["forwarded"] == true || response["unchanged"] == true => Ok(response),
+                    // What the leader wrote, followed here: no event of its own.
+                    Ok((next, response)) if response["synced"] == true => {
+                        publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                        continue;
+                    }
                     Ok((next, response)) => {
                         publish(&mut snapshot, next, &current, &mut health, &metrics).await;
                         instance_event(&snapshot, &response);
@@ -3388,9 +3501,34 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     }
                     Err(error) => Err(error),
                 };
+                if response.as_ref().is_ok_and(|response| response["unchanged"] == true) {
+                    continue;
+                }
                 change.respond(response);
                 continue;
             }
+            // A cluster peer follows the registry the leader writes.
+            update = next_update(&mut peer), if instance_change.is_none() => {
+                let Some(update) = update else { continue };
+                let (mut instances, mut moved) = (None, None);
+                let mut pending = Some(update);
+                while let Some(update) = pending.take() {
+                    match update {
+                        crate::cluster_runtime::Update::Instances(ready) => instances = Some(ready),
+                        crate::cluster_runtime::Update::Moved(entries) => moved = Some(entries),
+                    }
+                    pending = peer.as_mut().and_then(|peer| peer.updates.try_recv().ok());
+                }
+                let active = snapshot.clone();
+                instance_change = Some(InstanceChange {
+                    task: tokio::spawn(crate::cluster_runtime::follow(active, instances, moved)),
+                    reply: None,
+                    admin_reply: None,
+                });
+                continue;
+            }
+            Some((operation, reply)) = forwarded_requests.recv(), if instance_change.is_none() => (operation, None, Some(reply), "cluster".to_owned()),
+            Some(()) = leaving.recv() => break,
             // Leave later mutations in their bounded queues until this
             // transaction has published its snapshot. Signals stay pollable.
             Some(command) = requests.recv(), if instance_change.is_none() => (command.operation, Some(command.reply), None, command.actor),
@@ -3410,7 +3548,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 break;
             }
             _ = scaling_check.tick(), if instance_change.is_none() => {
-                match scaler.next(&snapshot, Instant::now()) {
+                // In a cluster only the leader scales, with the reservations
+                // the other peers reported.
+                let remote = match &peer {
+                    Some(peer) if peer.coordination.acting_term().is_none() => continue,
+                    Some(peer) => peer.coordination.remote_reservations(),
+                    None => BTreeMap::new(),
+                };
+                match scaler.next_with(&snapshot, &remote, Instant::now()) {
                     Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
                     Some(crate::scaling::Change::Start(name)) => {
                         if let Err(error) = snapshot.managed.request_scale_start(&name) {
@@ -3450,8 +3595,31 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 | control::Operation::MoveInstance(_)
         ) {
             let active = snapshot.clone();
+            let task = match &peer {
+                None => tokio::spawn(async move { change_instance(operation, &active).await }),
+                // The leader decides in its term; a follower asks the leader.
+                Some(peer) => {
+                    let coordination = peer.coordination.clone();
+                    match coordination.acting_term() {
+                        Some(term) => tokio::spawn(rift::cluster::leader::in_term(
+                            term,
+                            crate::cluster_runtime::leader_change(
+                                coordination,
+                                operation,
+                                actor,
+                                active,
+                            ),
+                        )),
+                        None => tokio::spawn(crate::cluster_runtime::forward_change(
+                            coordination,
+                            operation,
+                            active,
+                        )),
+                    }
+                }
+            };
             instance_change = Some(InstanceChange {
-                task: tokio::spawn(async move { change_instance(operation, &active).await }),
+                task,
                 reply,
                 admin_reply,
             });
@@ -3462,7 +3630,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             control::Operation::Rollback { .. } => "rollback",
             _ => "save",
         };
-        let result = reconfigure(operation, &app, &snapshot, &services).await;
+        let result = reconfigure(operation, &actor, &app, &snapshot, &services).await;
         let mut applied_without_plugins = false;
         let response = match result {
             Ok((next, prepared, node_change)) => {
@@ -3496,7 +3664,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 if was_online && let Some(warning) = crate::check::offline_mode(&snapshot.config) {
                     log_warn!("{warning}");
                 }
-                snapshot.prune_groups();
+                // A configuration-derived write: the leader's in a cluster.
+                if rift::cluster::leader::runs_here() {
+                    snapshot.prune_groups();
+                }
                 services.commit(&snapshot.config, prepared, &app);
                 // Reconfiguration always reads a source; never record an empty one.
                 if let Some(source) = snapshot.source.as_deref()
@@ -3589,7 +3760,16 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             message: "proxy shutting down".into(),
         }));
     }
+    forwarded_requests.close();
+    while let Ok((_, reply)) = forwarded_requests.try_recv() {
+        let _ = reply.send(Err("the cluster leader is shutting down".into()));
+    }
     stop.send_replace(true);
+    // A cluster peer stops taking logins with its listeners, and hands the
+    // leadership to another voter before its sessions drain.
+    if let Some(peer) = &peer {
+        peer.hand_over().await;
+    }
     rift::software::cancel_downloads();
     crate::messaging_runtime::emit(
         &snapshot.messaging,
@@ -3598,7 +3778,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     );
     log_info!("draining {} connections", metrics.active.get());
     extension_jobs.shutdown().await;
-    permission_sweeper.abort();
+    if let Some(sweeper) = permission_sweeper {
+        sweeper.abort();
+    }
     if let Some(task) = message_task {
         task.abort();
         let _ = task.await;
@@ -3647,10 +3829,25 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     } else {
         snapshot.managed.shutdown().await;
     }
+    // The sessions are gone and their claims released: leave the cluster.
+    if let Some(peer) = peer.take() {
+        peer.shutdown().await;
+    }
     log_info!("shutdown complete");
     match failure {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// The next change a cluster peer follows (see `cluster_runtime::follow`);
+/// never on a single Rift.
+async fn next_update(
+    peer: &mut Option<crate::cluster_runtime::Peer>,
+) -> Option<crate::cluster_runtime::Update> {
+    match peer {
+        Some(peer) => peer.updates.recv().await,
+        None => std::future::pending().await,
     }
 }
 

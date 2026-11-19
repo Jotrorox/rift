@@ -23,6 +23,7 @@ mod admission;
 mod backups;
 mod bungee_runtime;
 mod check;
+mod cluster_runtime;
 mod control;
 mod cordon;
 mod database_cli;
@@ -259,6 +260,7 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                 let mut report = check::strict(&config, &path);
                 check::agents(&config, &mut report).await;
                 check::cluster(&config, &path, &mut report);
+                check::cluster_peers(&config, &path, &mut report).await;
                 for note in &report.notes {
                     println!("rift: strict: {note}");
                 }
@@ -283,6 +285,13 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         }
         return Ok(());
     }
+    // A cluster peer whose rift.lua matches no deployed revision starts
+    // only with --adopt-deployed (docs/clustering.md, decision 6).
+    let adopt_deployed = args.iter().any(|arg| arg == "--adopt-deployed");
+    let args: Vec<String> = args
+        .into_iter()
+        .filter(|arg| arg != "--adopt-deployed")
+        .collect();
     // A cluster.toml beside the configuration makes this Rift a cluster
     // peer (docs/clustering.md); without one nothing below is touched.
     let peer = match args.as_slice() {
@@ -373,14 +382,16 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         let source = path.as_deref().map(fs::read).transpose()?;
         // The replicated instance database first: the peer starts on it and
         // its executor is installed before `serve` opens the stores.
-        let attached = rift::cluster::attach::database(
-            &config,
-            peer,
-            source.as_deref(),
-            rift::cluster::Components::new(),
-        )
-        .await?;
-        rift::cluster::install_global(attached.cluster);
+        // Presence, the bus and the other steps' components, registered
+        // before the peer starts; `serve` attaches them.
+        let components = rift::cluster::attach::cluster_components(Some(&config))?;
+        let attached =
+            rift::cluster::attach::database(&config, peer, source.as_deref(), components).await?;
+        rift::cluster::install_global(attached.cluster.clone());
+        // Decision 6 for rift.lua, then deployments and templates.
+        let (config, path) =
+            rift::cluster::files::start(&attached.cluster, config, path, adopt_deployed).await?;
+        return runtime::serve(config, path).await;
     }
     runtime::serve(config, path).await
 }

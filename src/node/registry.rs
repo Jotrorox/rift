@@ -19,6 +19,14 @@ use crate::{
 /// The controller's own version, which its agents should run too.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How long an agent may take to acknowledge a fence.
+const FENCE_WAIT: Duration = Duration::from_secs(10);
+
+/// On a cluster peer: the term in which this process may send node control
+/// commands, `Some` only while it leads the cluster with a lease
+/// (docs/clustering.md, "Leader exclusivity").
+pub type ActingTerm = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
 /// Node agents known to this controller. Cheap to clone; every clone shares
 /// the same observations.
 #[derive(Clone)]
@@ -43,6 +51,10 @@ struct Inner {
     observed: Mutex<BTreeMap<String, Observed>>,
     reconnected: Mutex<BTreeSet<String>>,
     wake: Notify,
+    /// Set on a cluster peer ([`Nodes::set_cluster`]).
+    cluster: RwLock<Option<ActingTerm>>,
+    /// The term each agent acknowledged a fence for.
+    fenced: Mutex<BTreeMap<String, u64>>,
 }
 
 #[derive(Debug)]
@@ -104,7 +116,55 @@ impl Nodes {
             observed: Mutex::new(BTreeMap::new()),
             reconnected: Mutex::new(BTreeSet::new()),
             wake: Notify::new(),
+            cluster: RwLock::new(None),
+            fenced: Mutex::new(BTreeMap::new()),
         }))
+    }
+
+    /// Make these agents the nodes of a cluster peer: control commands go
+    /// out only while `acting` returns a term, tagged with it, and only to
+    /// agents fenced for that term (see [`Nodes::fence`]); an agent without
+    /// [`protocol::feature::FENCE`] gets none. Inspection commands (logs,
+    /// console, files, trees and reads) still go out from any peer.
+    pub fn set_cluster(&self, acting: ActingTerm) {
+        *self.0.cluster.write().unwrap_or_else(|e| e.into_inner()) = Some(acting);
+    }
+
+    fn acting(&self) -> Option<ActingTerm> {
+        read(&self.0.cluster).clone()
+    }
+
+    /// Whether these are the nodes of a cluster peer.
+    pub fn clustered(&self) -> bool {
+        read(&self.0.cluster).is_some()
+    }
+
+    /// The term `node`'s agent acknowledged a fence for, if any.
+    pub fn fenced_term(&self, node: &str) -> Option<u64> {
+        lock(&self.0.fenced).get(node).copied()
+    }
+
+    /// Fence `node`'s agent for `term`: from its acknowledgement on, it
+    /// refuses control commands of every lower term, so a deposed leader
+    /// can no longer start or stop anything there. Done once per term.
+    pub async fn fence(&self, node: &str, term: u64) -> io::Result<()> {
+        if self.fenced_term(node) == Some(term) {
+            return Ok(());
+        }
+        self.check_reachable(node)?;
+        if !self.supports(node, protocol::feature::FENCE) {
+            return Err(unfenceable(node));
+        }
+        let payload = protocol::encode(&Command::Fence { term }, Some(term))?;
+        let reply = self.send(node, payload, FENCE_WAIT).await?;
+        if reply["term"].as_u64() != Some(term) {
+            return Err(io::Error::other(format!(
+                "node {node} answered the fence for term {term} with {reply}"
+            )));
+        }
+        lock(&self.0.fenced).insert(node.to_owned(), term);
+        log_info!("node {node} fenced for cluster term {term}");
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -253,6 +313,9 @@ impl Nodes {
             if let Some(warning) = mismatch(&observed_state(&self.0.observed, node)) {
                 log_warn!("node {node}: {warning}");
             }
+            if self.clustered() && !self.supports(node, protocol::feature::FENCE) {
+                log_warn!("{}", unfenceable(node));
+            }
             lock(&self.0.reconnected).insert(node.to_owned());
             self.0.wake.notify_one();
         }
@@ -378,23 +441,62 @@ impl Nodes {
         Ok(())
     }
 
-    /// Send one command and wait for the agent's reply.
+    /// Send one command and wait for the agent's reply. On a cluster peer
+    /// a control command needs this peer to lead: it carries the leader's
+    /// term and goes only to an agent fenced for it.
     pub async fn request(
         &self,
         node: &str,
         command: &Command,
         wait: Duration,
     ) -> io::Result<Value> {
+        let acting = self.acting();
+        if acting.is_some() && command.is_inspection() {
+            // Node states reach only the leader, so another peer cannot
+            // tell whether the agent is online; the bus answers for it.
+            self.check_configured(node)?;
+        } else {
+            self.check_reachable(node)?;
+        }
+        let term = match acting {
+            Some(acting) if !command.is_inspection() => {
+                let term = acting().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "node {node}: only the cluster leader sends control commands, and this peer does not lead (or its lease ran out)"
+                        ),
+                    )
+                })?;
+                self.fence(node, term).await?;
+                Some(term)
+            }
+            _ => None,
+        };
+        let payload = protocol::encode(command, term)?;
+        self.send(node, payload, wait).await
+    }
+
+    fn check_configured(&self, node: &str) -> io::Result<()> {
         if !self.configured(node) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("unknown node {node:?}"),
             ));
         }
+        Ok(())
+    }
+
+    fn check_reachable(&self, node: &str) -> io::Result<()> {
+        self.check_configured(node)?;
         if !self.online(node) {
             return Err(unreachable(node));
         }
-        let payload = serde_json::to_vec(command)?;
+        Ok(())
+    }
+
+    /// Send one encoded command and wait for the agent's reply.
+    async fn send(&self, node: &str, payload: Vec<u8>, wait: Duration) -> io::Result<Value> {
         if payload.len() > protocol::MAX_MESSAGE {
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
@@ -575,6 +677,16 @@ pub fn server_requirements(server: &ManagedServer) -> Vec<Requirement> {
         server.messaging.is_some(),
         server.isolation.mode,
         server.memory_limit.map(Into::into),
+    )
+}
+
+/// An agent too old to be fenced, which a cluster sends no control command.
+fn unfenceable(node: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "node {node} runs an agent without fencing, so a cluster sends it no control commands; upgrade rift on that node to {VERSION}"
+        ),
     )
 }
 

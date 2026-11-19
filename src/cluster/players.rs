@@ -104,6 +104,12 @@ impl Presence {
         self.stop_holds().contains_key(server)
     }
 
+    /// Why this peer refuses logins now (not joined yet, catching up,
+    /// fenced, ...); `None` while it admits them.
+    pub fn held_back(&self) -> Option<String> {
+        self.shared.held_back()
+    }
+
     /// Stop every task [`attach`] started, before the cluster shuts down:
     /// no more proposals, attributes, service states or fencing. The
     /// registry keeps its claims handle, which then refuses every claim.
@@ -184,6 +190,13 @@ pub async fn attach(
         claims.clone(),
         process_identity,
     ));
+    // A registry admits by default, and the fence task decides only from
+    // its first tick on: until then, no login may claim anything with an
+    // incarnation that has not joined yet.
+    shared.hold_back(
+        crate::players::Admission::CatchingUp,
+        "attached; the admission is not decided yet",
+    );
     // Before anything that mints holders or attributes.
     shared.install_identity();
     let (raft_claims, batcher) = RaftClaims::new(cluster.clone(), claims);

@@ -9,7 +9,7 @@ use super::{
     transport::Offline,
 };
 use crate::{
-    config::{ClusterConfig, Config},
+    config::Config,
     database::{
         Database, Mode, Operation,
         operation::{MigrateOp, latest_versions},
@@ -147,8 +147,18 @@ async fn init(flags: Flags) -> io::Result<()> {
                         database_path.display()
                     );
                 }
+                // Servers on this host become servers on this peer's node.
+                let store = crate::instance_store::Store::new(Arc::new(database))?;
+                for converted in store.convert_local_instances(config, &settings.peer)? {
+                    print_converted(&settings.peer, &converted);
+                }
             }
         }
+    }
+    if let Some(config) = &config
+        && let Err(error) = config.check_cluster_placement()
+    {
+        println!("rift: change the configuration before starting this peer: {error}");
     }
     let mut id = [0u8; 16];
     aws_lc_rs::rand::fill(&mut id).map_err(|_| io::Error::other("random source failed"))?;
@@ -156,14 +166,40 @@ async fn init(flags: Flags) -> io::Result<()> {
     log.adopt(&cluster_id, FIRST_RAFT_ID, &settings.peer)?;
     drop(log);
     let database = Arc::new(Database::open_with(&database_path, Mode::Replicated)?);
-    let mut options = Options::new(ClusterConfig::default());
+    let shared = config
+        .as_ref()
+        .and_then(|config| config.cluster.clone())
+        .unwrap_or_default();
+    let mut options = Options::new(shared);
+    // The same components as every peer, so the first features entry
+    // enables their entry kinds.
+    options.components = super::attach::cluster_components(config.as_ref())?;
     options.database = Some(database.clone());
     options.transport = Some(Arc::new(Offline::default()));
     // Nothing is reachable, so no token is ever checked.
     options.token = Some("offline-initialization".to_owned());
     let cluster = Cluster::start(settings.clone(), options).await?;
     database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));
-    let result = initialize(&cluster).await;
+    let mut result = initialize(&cluster).await;
+    if result.is_ok() {
+        // Bus-login tokens this Rift issued stay valid on every peer.
+        result = match super::bus::import_key(&cluster, &flags.config).await {
+            Ok(true) => {
+                println!(
+                    "rift: moved the bus-login key into the cluster; every peer derives tokens from it"
+                );
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    if result.is_ok() {
+        // Deployment history, audit trail and template folders.
+        result = super::files::import(&cluster, &flags.config)
+            .await
+            .map(|summary| println!("rift: moved into the cluster: {summary:?}"));
+    }
     cluster.shutdown().await;
     result?;
     println!(
@@ -280,6 +316,30 @@ async fn compact_first_log(cluster: &Cluster) -> io::Result<()> {
     Ok(())
 }
 
+/// Say where an instance that moved to `peer`'s node keeps its files.
+fn print_converted(peer: &str, converted: &crate::instance_store::ConvertedInstance) {
+    let root = converted
+        .from
+        .to_str()
+        .zip(converted.to.to_str())
+        .and_then(|(from, to)| from.strip_suffix(to))
+        .map(|root| root.trim_end_matches(['/', '\\']).to_owned())
+        .filter(|root| !root.is_empty());
+    match root {
+        Some(root) => println!(
+            "rift: instance {} now runs on node {peer}; run that node's agent with --root {root} to keep its folder {}",
+            converted.name,
+            converted.from.display()
+        ),
+        None => println!(
+            "rift: instance {} now runs on node {peer}, in {} below that node's --root; move its folder {} there",
+            converted.name,
+            converted.to.display(),
+            converted.from.display()
+        ),
+    }
+}
+
 /// The configuration beside `cluster.toml`, if there is one.
 fn load_config(path: &Path) -> io::Result<Option<Config>> {
     match Config::load(path) {
@@ -351,6 +411,8 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     )?);
     let name = settings.peer.clone();
     let mut options = Options::new(shared);
+    // A witness applies every entry kind a player-serving peer applies.
+    options.components = super::attach::cluster_components(config.as_ref())?;
     options.database = Some(database.clone());
     let cluster = Cluster::start(settings, options).await?;
     database.set_executor(Arc::new(ClusterExecutor::new(&cluster)));

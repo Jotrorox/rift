@@ -106,6 +106,8 @@ pub enum StreamKind {
     Bus = 4,
     /// Reservations and stop vetoes.
     Load = 5,
+    /// Queue tickets for the leader's queue service, and its turns.
+    Queue = 6,
     /// Snapshot chunks.
     Snapshot = 16,
     /// Template and file contents by SHA-256.
@@ -113,12 +115,13 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Raft,
         Self::Presence,
         Self::Player,
         Self::Bus,
         Self::Load,
+        Self::Queue,
         Self::Snapshot,
         Self::Blob,
     ];
@@ -137,6 +140,7 @@ impl StreamKind {
             Self::Player => "player",
             Self::Bus => "bus",
             Self::Load => "load",
+            Self::Queue => "queue",
             Self::Snapshot => "snapshot",
             Self::Blob => "blob",
         }
@@ -297,6 +301,9 @@ struct ClusterIdentity {
 struct Inner {
     transport: Arc<dyn Transport>,
     identity: Identity,
+    /// The shared-configuration hash handshakes present from now on: it
+    /// starts as [`Identity::config_hash`] and follows reloads.
+    config_hash: RwLock<String>,
     key: hmac::Key,
     secret_proofs: BTreeMap<String, String>,
     timing: Timing,
@@ -343,6 +350,7 @@ impl Links {
         let links = Self {
             inner: Arc::new(Inner {
                 transport,
+                config_hash: RwLock::new(identity.config_hash.clone()),
                 identity,
                 key,
                 secret_proofs,
@@ -380,6 +388,25 @@ impl Links {
             raft_id,
             incarnation,
         };
+    }
+
+    /// The hash of the shared sections of this peer's evaluated
+    /// configuration, presented in handshakes from now on (after a reload).
+    pub fn set_config_hash(&self, hash: &str) {
+        *self
+            .inner
+            .config_hash
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = hash.to_owned();
+    }
+
+    /// The shared-configuration hash this peer presents.
+    pub fn config_hash(&self) -> String {
+        self.inner
+            .config_hash
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_admission(&self, admission: Admission) {
@@ -781,7 +808,7 @@ impl Links {
             incarnation: cluster.incarnation,
             version: identity.version.clone(),
             kinds: identity.kinds.clone(),
-            config_hash: identity.config_hash.clone(),
+            config_hash: self.config_hash(),
             proof: hex(proof.as_ref()),
             secrets: self.inner.secret_proofs.clone(),
         }
@@ -858,6 +885,21 @@ impl Links {
         let admission = self.inner.admission.read().unwrap().clone();
         if let Some(admission) = admission {
             admission(hello)?;
+        }
+        // Not a refusal: during a deployment the peers reload one after the
+        // other. `rift admin cluster` names the sections that differ.
+        let ours = self.config_hash();
+        if class == Class::Control
+            && !ours.is_empty()
+            && !hello.config_hash.is_empty()
+            && ours != hello.config_hash
+        {
+            log_info!(
+                "cluster: {} evaluates the shared configuration sections differently (hash {}, this peer {}); `rift admin cluster` shows which sections",
+                hello.name,
+                short(&hello.config_hash),
+                short(&ours)
+            );
         }
         Ok(())
     }
@@ -1167,6 +1209,11 @@ fn unknown(peer: &str) -> io::Error {
         io::ErrorKind::NotFound,
         format!("peer {peer}: no known address"),
     )
+}
+
+/// The first 12 characters of a hash, for logs.
+fn short(hash: &str) -> &str {
+    hash.get(..12).unwrap_or(hash)
 }
 
 #[cfg(test)]

@@ -140,20 +140,20 @@ pub struct Options {
 
 impl Options {
     /// The options for a peer running `config`: its `cluster` section, the
-    /// hash of its source text (every peer runs the same `rift.lua`) and the
-    /// shared secrets whose equality handshakes check: the forwarding
+    /// hash of the shared sections of the evaluated configuration
+    /// ([`super::files::shared`]; the configuration component replaces it
+    /// with one that knows the configuration's directory once attached) and
+    /// the shared secrets whose equality handshakes check: the forwarding
     /// secret and the node tokens, as far as this environment holds them.
-    pub fn from_config(config: &crate::config::Config, source: Option<&[u8]>) -> io::Result<Self> {
+    /// `_source`, the text of `rift.lua`, is no longer hashed.
+    pub fn from_config(config: &crate::config::Config, _source: Option<&[u8]>) -> io::Result<Self> {
         if config.database.is_some() {
             return Err(super::invalid(
                 "cluster: database.backend = \"postgres\" or \"mariadb\" cannot be combined with cluster.toml; a cluster replicates SQLite",
             ));
         }
         let mut options = Self::new(config.cluster.clone().unwrap_or_default());
-        if let Some(source) = source {
-            let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, source);
-            options.config_hash = super::hex(digest.as_ref());
-        }
+        options.config_hash = super::files::shared::of_config(config, None).hash;
         if let Some(variable) = config
             .forwarding
             .as_ref()
@@ -931,6 +931,7 @@ impl Cluster {
             "diverged": self.inner.state.is_diverged(),
             "membership_changing": self.membership_changing(),
             "peers": peers,
+            "configuration": super::files::status(self),
         })
     }
 
@@ -1008,6 +1009,8 @@ impl Cluster {
                 "rift_cluster_operations_total{{kind=\"{kind}\",outcome=\"{outcome}\"}} {count}\n"
             ));
         }
+        drop(measurements);
+        text.push_str(&super::files::render_metrics(self));
         text
     }
 

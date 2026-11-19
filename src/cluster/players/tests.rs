@@ -146,12 +146,23 @@ impl Net {
         }
     }
 
+    /// Wait until peer `index` admits players; the panic says why it did
+    /// not.
     async fn open(&self, index: usize) {
         let roster = self.players(index).roster().clone();
-        until(Duration::from_secs(20), move || {
-            roster.admission() == Admission::Open
-        })
-        .await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while roster.admission() != Admission::Open {
+            assert!(
+                Instant::now() < deadline,
+                "peer {index} does not admit players: {:?}, {}",
+                roster.admission(),
+                self.presences
+                    .get(&index)
+                    .and_then(Presence::held_back)
+                    .unwrap_or_else(|| "no reason recorded (not attached?)".to_owned())
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn crash(&mut self, index: usize) {

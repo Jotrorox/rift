@@ -661,8 +661,10 @@ impl Executor for ClusterExecutor {
             }
             None => None,
         };
+        // A leader task's write carries the term it was decided in.
+        let term = super::leader::current_term();
         block_on(&self.runtime, async move {
-            cluster.operate(operation, None, limit).await
+            cluster.operate(operation, term, limit).await
         })
     }
 }

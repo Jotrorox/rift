@@ -14,7 +14,7 @@ use crate::plugins::{
     },
     services::Services,
 };
-use crate::{messaging::SubscriptionScope, text::Text};
+use crate::{cluster::queues::jobs::Scope, messaging::SubscriptionScope, text::Text};
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -393,6 +393,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
     rift.raw_set("servers", servers(lua, state)?)?;
     rift.raw_set("timers", timers(lua, state)?)?;
     rift.raw_set("background", background(lua, state)?)?;
+    rift.raw_set("cluster", cluster(lua, state)?)?;
     messaging(lua, &rift, state)?;
     super::http::install(lua, &rift, state, spec.manifest.capabilities.network)?;
 
@@ -564,11 +565,34 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(
             lua,
             state,
-            move |_, (name, every_ms, callback): (Value, Value, Value)| {
-                let (Value::String(name), Value::Function(callback)) = (name, callback) else {
+            move |_, (name, every_ms, options, callback): (Value, Value, Value, Value)| {
+                // `rift.every(name, ms, fn)` or `rift.every(name, ms, { scope = ... }, fn)`.
+                let (options, callback) = match (options, callback) {
+                    (Value::Function(callback), Value::Nil) => (None, callback),
+                    (Value::Table(options), Value::Function(callback)) => (Some(options), callback),
+                    _ => {
+                        return Err(runtime(
+                            "rift.every expects a job name, an interval in milliseconds, optional options and a function",
+                        ));
+                    }
+                };
+                let Value::String(name) = name else {
                     return Err(runtime(
                         "rift.every expects a job name, an interval in milliseconds and a function",
                     ));
+                };
+                let scope = match options {
+                    None => Scope::default(),
+                    Some(options) => {
+                        for pair in options.pairs::<Value, Value>() {
+                            let (key, _) = pair?;
+                            if !matches!(&key, Value::String(key) if key.as_bytes().as_ref() == b"scope") {
+                                return Err(runtime("rift.every options take scope only"));
+                            }
+                        }
+                        let scope: Option<String> = options.get("scope")?;
+                        Scope::parse(scope.as_deref()).map_err(runtime)?
+                    }
                 };
                 let name = name.to_str()?.to_owned();
                 if !crate::extensions::token(&name) {
@@ -593,7 +617,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
                     )));
                 }
                 jobs.insert(name.clone());
-                let handle = every.services.timers().every(ms);
+                let handle = every.services.timers().every_scoped(ms, scope);
                 every.timers.borrow_mut().insert(
                     handle,
                     Timer {
@@ -1349,6 +1373,68 @@ fn timers(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             }
             Ok(timers.services.timers().cancel(handle))
         })?,
+    )?;
+    Ok(api)
+}
+
+/// `rift.cluster`: `lease(name, ttl_ms)` returns a fencing token or nil while
+/// another peer holds the lease, `renew(name, token, ttl_ms)` and
+/// `release(name, token)` return whether they took effect, `is_leader()`
+/// (advisory) and `peer()` (nil without a cluster). The lease calls wait for
+/// the cluster's answer.
+fn cluster(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
+    fn ttl(ttl_ms: i64) -> mlua::Result<u64> {
+        u64::try_from(ttl_ms)
+            .map_err(|_| runtime("lease ttl must be a positive number of milliseconds"))
+    }
+    let api = lua.create_table()?;
+    let services = state.services.clone();
+    api.raw_set(
+        "lease",
+        function(lua, state, move |_, (name, ttl_ms): (String, i64)| {
+            services
+                .cluster()
+                .lease(&name, ttl(ttl_ms)?)
+                .map(|token| token.map(|token| i64::try_from(token).unwrap_or(i64::MAX)))
+                .map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "renew",
+        function(
+            lua,
+            state,
+            move |_, (name, token, ttl_ms): (String, i64, i64)| {
+                let Ok(token) = u64::try_from(token) else {
+                    return Ok(false);
+                };
+                services
+                    .cluster()
+                    .renew(&name, token, ttl(ttl_ms)?)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "release",
+        function(lua, state, move |_, (name, token): (String, i64)| {
+            let Ok(token) = u64::try_from(token) else {
+                return Ok(false);
+            };
+            services.cluster().release(&name, token).map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "is_leader",
+        function(lua, state, move |_, ()| Ok(services.cluster().is_leader()))?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "peer",
+        function(lua, state, move |_, ()| Ok(services.cluster().peer()))?,
     )?;
     Ok(api)
 }

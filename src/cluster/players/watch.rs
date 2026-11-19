@@ -89,6 +89,8 @@ pub struct Shared {
     outboxes: Mutex<BTreeMap<String, mpsc::UnboundedSender<presence::Outbound>>>,
     contact: Mutex<Contact>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Why logins are refused right now; `None` while they are admitted.
+    held_back: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -117,7 +119,50 @@ impl Shared {
                 observed: VecDeque::new(),
             }),
             tasks: Mutex::default(),
+            held_back: Mutex::default(),
         }
+    }
+
+    /// Refuse logins with `admission` (never [`Admission::Open`]) because
+    /// of `reason`, which [`Shared::held_back`] reports.
+    pub(super) fn hold_back(&self, admission: Admission, reason: impl Into<String>) {
+        let reason = reason.into();
+        {
+            let mut held = self
+                .held_back
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if held.as_deref() != Some(reason.as_str()) {
+                log_debug!("cluster: {} refuses logins: {reason}", self.cluster.name());
+                *held = Some(reason);
+            }
+        }
+        if self.registry.admission() != admission {
+            self.registry.set_admission(admission);
+        }
+    }
+
+    /// Admit logins.
+    fn admit(&self) {
+        let was = self
+            .held_back
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if was.is_some() {
+            log_debug!("cluster: {} admits logins", self.cluster.name());
+        }
+        if self.registry.admission() != Admission::Open {
+            self.registry.set_admission(Admission::Open);
+        }
+    }
+
+    /// Why this peer refuses logins now, `None` while it admits them.
+    pub(super) fn held_back(&self) -> Option<String> {
+        self.held_back
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Whether this peer has its identity, so that it may mint holders and
@@ -409,12 +454,15 @@ pub async fn fence(shared: Arc<Shared>) {
     // peer that comes back sees its own expiry before it admits anybody.
     let mut resumed = true;
     let mut target: Option<u64> = None;
-    shared.registry.set_admission(Admission::CatchingUp);
+    shared.hold_back(Admission::CatchingUp, "starting");
     loop {
         tokio::time::sleep(every).await;
         let was_ready = shared.is_ready();
         if !shared.install_identity() {
-            shared.registry.set_admission(Admission::CatchingUp);
+            shared.hold_back(
+                Admission::CatchingUp,
+                "no identity yet: this peer has no usable raft id",
+            );
             continue;
         }
         if !was_ready {
@@ -429,9 +477,12 @@ pub async fn fence(shared: Arc<Shared>) {
                 );
                 now
             });
-            shared.registry.set_admission(Admission::Fenced {
-                message: message.clone(),
-            });
+            shared.hold_back(
+                Admission::Fenced {
+                    message: message.clone(),
+                },
+                "fenced: no contact with a leader holding its lease",
+            );
             if !disconnected && now.saturating_duration_since(since) >= config.partition_grace {
                 disconnected = true;
                 log_warn!(
@@ -463,13 +514,26 @@ pub async fn fence(shared: Arc<Shared>) {
             if target.is_none() {
                 target = shared.leader_applied();
             }
+            let applied = shared.cluster.state().applied_index();
             match target {
-                Some(index) if shared.cluster.state().applied_index() >= index => {
+                Some(index) if applied >= index => {
                     resumed = false;
                     target = None;
                 }
-                _ => {
-                    shared.registry.set_admission(Admission::CatchingUp);
+                Some(index) => {
+                    shared.hold_back(
+                        Admission::CatchingUp,
+                        format!(
+                            "catching up: applied {applied}, the leader had applied {index} when contact started"
+                        ),
+                    );
+                    continue;
+                }
+                None => {
+                    shared.hold_back(
+                        Admission::CatchingUp,
+                        "no answer from a leader holding its lease yet",
+                    );
                     continue;
                 }
             }
@@ -481,7 +545,10 @@ pub async fn fence(shared: Arc<Shared>) {
             .is_some_and(|row| row.expired && row.incarnation == incarnation)
         {
             shared.withheld.store(true, Ordering::Release);
-            shared.registry.set_admission(Admission::CatchingUp);
+            shared.hold_back(
+                Admission::CatchingUp,
+                format!("expired with incarnation {incarnation}; joining again"),
+            );
             if shared.rejoin().await {
                 reclaim = true;
             }
@@ -508,14 +575,31 @@ pub async fn fence(shared: Arc<Shared>) {
         // Claims cannot be proposed before a committed features entry
         // enables them.
         let claims = shared.cluster.is_enabled(EntryKind::Claim).unwrap_or(false);
-        let admission =
-            if !joined || !claims || shared.behind() || shared.cluster.state().is_diverged() {
-                Admission::CatchingUp
-            } else {
-                Admission::Open
-            };
-        if shared.registry.admission() != admission {
-            shared.registry.set_admission(admission);
+        let reason = if !joined {
+            Some(match &own {
+                None => "not in the peer table yet".to_owned(),
+                Some(row) => format!(
+                    "has not joined with incarnation {incarnation} yet (the peer table has incarnation {}{})",
+                    row.incarnation,
+                    if row.expired { ", expired" } else { "" }
+                ),
+            })
+        } else if !claims {
+            Some("claim entries are not enabled by a committed features entry yet".to_owned())
+        } else if shared.behind() {
+            Some(format!(
+                "no probe answered yet, or more than {} ms behind the leader (applied {})",
+                CATCH_UP.as_millis(),
+                shared.cluster.state().applied_index()
+            ))
+        } else if shared.cluster.state().is_diverged() {
+            Some("the replica diverged".to_owned())
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => shared.hold_back(Admission::CatchingUp, reason),
+            None => shared.admit(),
         }
     }
 }

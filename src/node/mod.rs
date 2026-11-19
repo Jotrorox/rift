@@ -7,6 +7,7 @@
 //! registry both live in the controller process.
 pub mod agent;
 pub mod backup;
+pub mod fence;
 mod files;
 mod host;
 pub mod protocol;
@@ -16,6 +17,6 @@ pub mod transfer;
 
 pub use files::Remote;
 pub use registry::{
-    DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities, server_requirements,
-    token, usage,
+    ActingTerm, DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities,
+    server_requirements, token, usage,
 };

@@ -24,8 +24,15 @@
 //! - [`attach`]: wiring the instance database into a starting peer.
 //! - [`node`]: the [`Cluster`] handle: start, propose, reads, leadership and
 //!   its lease, leader tasks and the peer table.
+//! - [`leader`]: the work that runs once in the network: term-tagged
+//!   leader tasks, the coordination of managed servers and the `load`
+//!   stream.
 //! - [`membership`]: `rift admin cluster ...`.
 //! - [`cli`]: `rift cluster init|recover` and `rift witness`.
+//! - [`queues`]: network-wide server queues served by the leader, and the
+//!   plugin-facing cluster API: named leases and job scopes.
+//! - [`files`]: configuration deployments, the operator audit trail,
+//!   shared-section hashes, template manifests and the blob store.
 //!
 //! # Encoding
 //!
@@ -37,6 +44,8 @@
 pub mod attach;
 pub mod bus;
 pub mod cli;
+pub mod files;
+pub mod leader;
 pub mod link;
 pub mod log_store;
 pub mod membership;
@@ -44,6 +53,7 @@ pub mod network;
 pub mod node;
 pub mod operations;
 pub mod players;
+pub mod queues;
 pub mod quic;
 pub mod replicated;
 pub mod settings;

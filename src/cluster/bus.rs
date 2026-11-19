@@ -549,11 +549,20 @@ async fn follow_addresses(state: Arc<BusState>, logins: Arc<Logins>, own: Option
     }
 }
 
-/// Whether `peer` runs a bus: it applies `bus` entries. Witnesses do not.
-fn runs_bus(links: &super::Links, peer: &str) -> bool {
-    links
+/// Whether `peer` runs a bus: it applies `bus` entries and is no witness
+/// (a witness applies them too, but takes no bus clients).
+fn runs_bus(cluster: &Cluster, peer: &str) -> bool {
+    let applies = cluster
+        .links()
         .hello(peer)
-        .is_some_and(|hello| hello.kinds.iter().any(|kind| kind == EntryKind::Bus.name()))
+        .is_some_and(|hello| hello.kinds.iter().any(|kind| kind == EntryKind::Bus.name()));
+    applies
+        && !cluster
+            .state()
+            .peers()
+            .unwrap_or_default()
+            .iter()
+            .any(|row| row.name == peer && row.witness)
 }
 
 /// Feed link changes to the federation and the broker.
@@ -565,7 +574,7 @@ async fn follow_links(cluster: Cluster, broker: Broker, federation: Arc<PeerFede
         let up: BTreeSet<String> = links
             .statuses()
             .into_iter()
-            .filter(|status| status.up && runs_bus(&links, &status.name))
+            .filter(|status| status.up && runs_bus(&cluster, &status.name))
             .map(|status| status.name)
             .collect();
         for peer in federation.peer_names() {
@@ -583,7 +592,7 @@ async fn follow_links(cluster: Cluster, broker: Broker, federation: Arc<PeerFede
     loop {
         match events.recv().await {
             Ok(LinkEvent::Up(peer)) => {
-                if runs_bus(&links, &peer) {
+                if runs_bus(&cluster, &peer) {
                     federation.up(&peer, &broker);
                 }
             }

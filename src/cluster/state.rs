@@ -145,10 +145,13 @@ pub enum EntryKind {
     /// Bus state besides streams: node session claims, the bus-login key
     /// and the peers' bus addresses (`crate::cluster::bus`).
     Bus,
+    /// Named leases of plugins with fencing tokens
+    /// (`crate::cluster::queues::leases`).
+    Lease,
 }
 
 impl EntryKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Operation,
         Self::Claim,
         Self::Kv,
@@ -161,6 +164,7 @@ impl EntryKind {
         Self::Migrate,
         Self::Checksum,
         Self::Bus,
+        Self::Lease,
     ];
     /// What the framework applies itself: its own kinds and those of the
     /// instance database (see [`super::replicated`]).
@@ -188,6 +192,7 @@ impl EntryKind {
             Self::Migrate => "migrate",
             Self::Checksum => "checksum",
             Self::Bus => "bus",
+            Self::Lease => "lease",
         }
     }
 
@@ -292,6 +297,7 @@ pub enum Entry {
     Migrate(Payload),
     Checksum(ChecksumEntry),
     Bus(Payload),
+    Lease(Payload),
 }
 
 impl Entry {
@@ -309,6 +315,7 @@ impl Entry {
             Self::Migrate(_) => EntryKind::Migrate,
             Self::Checksum(_) => EntryKind::Checksum,
             Self::Bus(_) => EntryKind::Bus,
+            Self::Lease(_) => EntryKind::Lease,
         }
     }
 
@@ -323,7 +330,8 @@ impl Entry {
             | Self::Config(payload)
             | Self::Manifest(payload)
             | Self::Migrate(payload)
-            | Self::Bus(payload) => Some(payload),
+            | Self::Bus(payload)
+            | Self::Lease(payload) => Some(payload),
             Self::Peer(_) | Self::Features(_) | Self::Checksum(_) => None,
         }
     }

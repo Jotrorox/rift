@@ -277,9 +277,16 @@ fn admissible(db: &Connection, op: &ClaimOp) -> io::Result<Result<(), Refusal>> 
         ))),
         Some((_, expired)) if expired != 0 => Err(Refusal::Fenced),
         Some((incarnation, _)) if incarnation != to_sql(holder.incarnation) => {
+            let stored = from_sql(incarnation);
             Err(Refusal::Unavailable(format!(
-                "incarnation {} of peer {} is not its current one",
-                holder.incarnation, holder.peer
+                "incarnation {} of peer {} is not its current one: the peer table has incarnation {stored}{}",
+                holder.incarnation,
+                holder.peer,
+                if stored < holder.incarnation {
+                    " (its `peer joined` was not applied before this claim)"
+                } else {
+                    ""
+                }
             )))
         }
         Some(_) => Ok(()),

@@ -46,8 +46,9 @@ pub const TIMING: RaftTiming = RaftTiming {
 };
 const TOKEN: &str = "simulated-cluster-token";
 
-/// A test component: `config` entries (unused until step 8) count per key,
-/// so applying an entry twice would show.
+/// A test component: `config` entries count per key, so applying an entry
+/// twice would show. Registered unless a test registers the configuration
+/// component of step 8, which owns that kind.
 pub struct Counter;
 
 impl Component for Counter {
@@ -202,11 +203,15 @@ impl Sim {
 
     pub async fn start(&mut self, index: usize) -> io::Result<Cluster> {
         let mut components = Components::new();
-        components.register(Arc::new(Counter))?;
         if let Some(extra) = &self.components {
             for component in extra(index) {
                 components.register(component)?;
             }
+        }
+        // `config` entries belong to the configuration component (step 8)
+        // when a test registers it.
+        if !components.supported().contains(&EntryKind::Config) {
+            components.register(Arc::new(Counter))?;
         }
         self.wait_released(index).await;
         let settings = self.settings(index);
@@ -662,3 +667,6 @@ async fn a_member_without_its_raft_file_is_refused_until_replaced() {
 
 /// The replicated instance database with real stores (step 3).
 mod database_tests;
+/// Leader tasks: server states, term-tagged writes, forwarded requests and
+/// stop vetoes (step 7).
+mod leader_tests;

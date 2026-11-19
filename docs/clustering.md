@@ -136,6 +136,7 @@ consensus traffic:
 | control | `player` | Actions for players connected to the receiving peer |
 | control | `bus` | Interest and forwarded messages (see [message bus](#message-bus)) |
 | control | `load` | Reservations and stop vetoes (see [inputs from other peers](#inputs-from-other-peers)) |
+| control | `queue` | Queue tickets for the leader's queue service and its turns (see [step 9 notes](#step-9-notes)) |
 | bulk | `snapshot`, `blob` | Snapshots, template and file contents by SHA-256 |
 
 **Liveness comes from peer links, not from log entries.** Peers do not write
@@ -216,6 +217,7 @@ Every log entry is one of a small number of kinds, each versioned:
 | `migrate` | Upgrade one component's schema to a version every member supports |
 | `checksum` | A hash of the state machine at this index, compared by every peer |
 | `bus` | Node session claims and releases, the bus-login key, the peers' bus addresses (see [step 5 notes](#step-5-notes)) |
+| `lease` | Named plugin leases: grants, renewals and releases with fencing tokens (see [step 9 notes](#step-9-notes)) |
 
 Rules for every kind:
 
@@ -754,7 +756,8 @@ Some state stays deliberately per peer, and the documentation will say so:
 | Connection rate limits, per-address counts, `limits.max_connections` | They protect one process; a network-wide cap is `cluster.max_players` |
 | Backend health checks | Each peer measures its own path to the backends and routes by it |
 | Metrics | Per process; aggregate them in Prometheus |
-| Plugin and Lua in-memory state, `rift.every` timers | Each peer runs its own plugin instances; see [decisions](#decisions) for leader-only work |
+| Plugin and Lua in-memory state, `rift.timers` | Each peer runs its own plugin instances. `rift.every` jobs run on the leader unless `scope = "peer"`; see [step 9 notes](#step-9-notes) and [decisions](#decisions) for leader-only work |
+| Connection admission: `rate_limit`, `login_rate_limit`, `limits.max_connections`, `limits.max_connections_per_address` | Each peer counts what it accepts ([hardening](hardening.md#in-a-cluster)); a global bucket is global to the peer, not the network |
 | Managed server logs and consoles | Served by the node agent that runs the server, from any peer |
 
 ## Failure behavior
@@ -928,8 +931,9 @@ What the cluster core does differently from the text above, and why:
   ends at once when the leader starts a transfer. openraft does not step a
   leader down when its lease runs out, so leader tasks check
   `LeaderContext::has_lease` themselves.
-- **The shared-configuration hash** in handshakes is the SHA-256 of the
-  `rift.lua` source text until step 8 hashes the shared sections.
+- **The shared-configuration hash** in handshakes was the SHA-256 of the
+  `rift.lua` source text until step 8; it now hashes the shared sections
+  (see [step 8 notes](#step-8-notes)).
 - **`replace`** removes the old Raft id and allocates a new one at once; if
   the peer is not running yet, `rift admin cluster add <name> <address>`
   finishes the job once it is (it reuses the allocated id).
@@ -1082,6 +1086,288 @@ of seams that a single Rift fills with its in-process implementations
 - **Expected arrivals need no routing:** the session's own peer publishes
   the player's permissions and records the arrival before it forwards the
   connection.
+
+### Step 7 notes
+
+Leader tasks live in `src/cluster/leader.rs` (the library part) and
+`src/cluster_runtime.rs` (the proxy's part). Where they differ from the text
+above, or stop short of it:
+
+- **Wiring.** `cluster::attach::cluster_components` is the one place every
+  step registers its state machine components; `main`, `rift cluster init`
+  and `rift witness` all start their peer with it, so every peer, the
+  initializing one and witnesses included, announces the same entry kinds
+  (a witness without `claim` or `bus` support would hold their activation
+  back for good). The player registry the presence component serves is
+  made there and taken by the first proxy generation's players. `serve`
+  attaches presence (with the process-wide identity) and the bus once the
+  broker, the streams and the QUIC listener exist and before the first
+  login; reloads keep the broker, the players, the nodes and the managed
+  servers, so the attachments stay valid without re-attaching. `/metrics`
+  adds the bus series. Witnesses are not federated although they now apply
+  `bus` entries: the peer table says which peers are witnesses.
+- **Leader tasks** start from `on_leader_gain` once the new leader holds its
+  lease and has passed a read barrier, so it applied everything committed
+  before its term. They run in the term they gained (`leader::in_term`, and
+  `leader::with_thread_term` on blocking threads): the cluster's executor
+  tags every write such a task makes through the stores with that term, so
+  a deposed leader's writes are refused by the new leader. Once per term the
+  new leader recovers half-done creations, removals and moves
+  (`Store::recover`: unfinished creations are aborted, removals finished,
+  stale moves of named servers forgotten), prunes group states, node
+  schedules and server states, runs the permission upgrade
+  (`migrate_once`) and mirrors `extensions.groups`. For as long as it leads
+  it fences and reconciles the node agents, sweeps expired permissions and
+  runs scheduled backups. The scaler and instance creations, removals and
+  moves run in the control loop only while `Coordination::acting_term`
+  says this peer leads, in that term. Every other peer restores the
+  registry without recovering anything (`Store::restore_with`).
+- **Managed servers** follow a `managed::Coordinator`. Only the leader's
+  workers start, stop, adopt, recover, restart and idle-stop servers; the
+  leader records each server's phase, last error, administrator intent and
+  restart attempts in the `server_states` table (a schema component of its
+  own, written with `InstanceOp::SetServerState`), and every other peer's
+  workers mirror those records, so all peers route from one view. A peer
+  that starts to lead takes every server over from the record and adopts
+  processes from what the agents report, never from what it owned during an
+  earlier leadership; a server that looks stopped then is not recorded until
+  its agent reported or ten seconds passed.
+- **Followers hand requests to the leader** over the `load` stream:
+  administrator starts and stops and start on connect (through
+  `ManagedServers`, so the admin CLI, the HTTP API and `rift.control.*` all
+  follow), and instance creations and removals (through the control loop).
+  A start on connect waits for the leader's start, then until the replica
+  shows the server running (at most five seconds more). Moves are refused on
+  a follower with the leader's name: `rift admin move` prepares on the peer
+  it runs on. Other node commands that change something (backups,
+  restores, warming, template syncs run by hand) are refused on a follower
+  by the node fence below rather than forwarded; run them on the leader.
+- **Fencing.** Agents advertise `fence`. `Command::Fence { term }` stores
+  the highest term in `.rift-fence` below `--root`; every control command a
+  cluster sends carries the leader's term in a `term` field beside `op`
+  (agents of earlier releases ignore it), and the agent refuses control
+  commands of a lower term, or without one once fenced. `logs`, `console`,
+  `files`, `upload`, `tree` and `read` are inspection and never fenced; on a
+  follower they go out without checking the node's reachability, which only
+  the leader observes. `Nodes::request` fences an agent on demand before its
+  first control command of a term; an agent without `fence` gets no control
+  command in a cluster and is reported when it connects, by
+  `rift check --strict` and in the leader's log. The leader fences and
+  reconciles every online agent once per term and again after it
+  reconnects, so adoption does not depend on the reconnect path.
+- **Inputs from other peers.** Every peer reports its reservations to the
+  leader each second; the scaler adds the reports younger than five seconds.
+  Queue lengths are not reported: queues are the leader's service (step 9).
+  Before an idle stop, and before a scale-down removal the scaler decided,
+  the leader asks every live peer that serves players; a peer vetoes while
+  it has a reservation for the server, and otherwise routes no new player
+  there for fifteen seconds (`ManagedServers::quiesce`), by which time the
+  leader's record of the stop takes over. A peer that does not answer counts
+  as a veto, as do `Presence::stop_holds` after a peer expiry. A vetoed
+  server is asked about again after another idle period.
+- **`local` in a cluster.** Configuration validation on a peer (and so
+  `rift check`) refuses managed servers and service groups without a node.
+  `rift cluster init` moves the ready instances of this host to the
+  initializing peer's node, with the directory a node gives an instance of
+  its group, and prints which `--root` keeps each folder in place; it
+  needs `nodes.<peer>` in the configuration when there are such instances,
+  and says what else must change before the peer starts. **Not done:** the
+  embedded node agent. A peer is not yet a node by itself: run `rift node
+  --name <peer>` on each peer's host and define `nodes.<peer>`; labels from
+  `cluster.toml` do not reach node selection.
+- **`rift cluster init`** also moves the bus-login key into the cluster
+  (`bus::import_key`).
+- **Leaving.** `rift admin cluster leave <peer>` runs on the leader, which
+  hands its leadership away first if it is the one leaving, and asks the
+  leaving peer (over `load`) to drain. Draining is the shutdown that SIGTERM
+  starts: the listeners stop taking logins, the peer hands the leadership to
+  another voter if it has it, the bus listener closes (its clients
+  reconnect elsewhere), the sessions drain (releasing their claims), and
+  presence, the bus, the leader tasks and Raft stop. The Transfer packet
+  handoff remains step 10.
+- **`rift check --strict`** on a peer also reports a key-value store in a
+  file of its own, and, through the running peer's admin listener, a peer
+  that is not joined or diverged, a cluster without a leader, peers that
+  are unreachable or refused (another cluster token, other shared secrets),
+  expired, behind by more than 1,000 entries or on another version, and
+  node agents that cannot be fenced.
+- **Not covered by tests yet:** the scaler across a leader change (it runs
+  in the proxy binary, outside the simulation), a fake agent fenced and
+  reconciled by a new leader (the agent's fence and the protocol are unit
+  tested), and stop holds after a peer expiry. `rift.events.instances` is
+  still published by the peer that made the change only.
+
+### Step 8 notes
+
+Configuration and files live in `src/cluster/files*`. Where they differ
+from the text above:
+
+- **Deployments.** A `config` entry carries the source, its revision, the
+  actor and the action (`save`, `rollback`, `reload`, `init`, `startup`);
+  the leader stamps its time. Applying it only records it in
+  `config_deployments` (the last 64, as `deployments.json` kept). Each
+  peer's deployer then writes the source to `rift.lua` atomically (a
+  flushed sibling file renamed over it, with its permissions) and reloads
+  through the configuration service's ordinary reload, off the apply path.
+  The peer that proposed the deployment applies it in the configuration
+  transaction that proposed it; if that transaction fails after the commit,
+  the deployer reloads after 30 s. A peer whose reload fails keeps running
+  its previous configuration and reports why (`config_peers`), which
+  `rift admin cluster` and `GET /api/cluster` show under `configuration`,
+  with the metrics `rift_cluster_config_in_sync`,
+  `rift_cluster_config_reload_failed` and
+  `rift_cluster_config_shared_mismatch`. A failed reload is not retried
+  until the next deployment or a manual reload.
+- **What becomes a deployment.** `PUT /api/config`, structured edits,
+  rollbacks, and a reload (`rift admin reload`, SIGHUP, `POST /api/reload`)
+  whose `rift.lua` is not a deployed revision. A reload whose file is an
+  older deployed revision applies the last deployment instead (the deployer
+  is about to rewrite the file); one whose file is the last deployment is a
+  plain reload, as on a single Rift.
+- **History and audit** are `config_deployments` and `config_audit` (the
+  last 1,024 operator records). The summaries of refused requests stay with
+  each peer. `rift cluster init` imports `deployments.json` and the
+  operator records of `audit.jsonl` into a cluster that has no deployment
+  yet, and records the current `rift.lua` as the last deployment; a
+  cluster created before this step records the first peer's file when it
+  starts.
+- **Peer and shared sections.** The peer sections are the listeners (with
+  the metrics, admin and status listeners and the PROXY protocol), routes
+  (with `on_route`), limits (with the rate limits), health checks, the
+  server list (with its cache and `on_status`), the tab list and the web
+  listener. The others are shared, except `instances` and
+  `moved_servers`, which come from the instance database. A section's hash
+  is the SHA-256 of the `Debug` rendering of its parsed structures (ordered
+  maps throughout), with the directory of `rift.lua` and its file name
+  replaced, so peers installed under different paths agree.
+- **Activation.** The proposing peer evaluates the candidate once per
+  member name (evaluation is local Lua) and refuses it, naming the peers
+  and sections, if a shared section differs; the entry carries every
+  member's hash, and applying it refuses a deployment that was not
+  evaluated for every current member (the proposer evaluates again and
+  retries) or whose members disagree. Peers do not refuse a deployment
+  because another peer's *running* configuration differs: that would block
+  the deployment that fixes it. A peer that runs the last deployment but
+  evaluates a shared section differently (other Lua modules or plugin
+  folders on its host) is reported by section.
+- **Handshakes** carry the shared hash of what the peer runs and follow
+  reloads; a difference is logged, not refused, since peers reload one
+  after the other during a deployment.
+- **`rift check --strict`** on a peer evaluates the file as every member in
+  the peer's replica would and names the peers and sections that differ,
+  says whether the file is the last, an older or no deployed revision, and
+  reports peers whose reports show another shared hash for the last
+  deployment or a failed reload.
+- **Startup (decision 6)** runs after the replica caught up (a linearizable
+  read, or the local replica with a warning when there is no quorum) and
+  before the configuration is loaded again: `--adopt-deployed` keeps the
+  hand-edited file as `rift.lua.hand-edited`. Only the 64 retained
+  deployments count as deployed revisions. A new peer started without a
+  `rift.lua` (with `rift`, not `rift --config <missing file>`) receives the
+  deployed one. Its `rift.config.cluster` settings are the defaults until
+  it restarts with the file.
+- **Templates.** A folder is a top-level entry of `template_storage`; a
+  `manifest` entry replaces a folder's listing (paths, sizes, SHA-256 and
+  empty directories) or removes it, optionally only if the folder is still
+  at the version the change was computed against (uploads and deletes
+  retry on a conflict). Top-level names starting with a dot are not
+  replicated. Blobs live in `cache/blobs/` beside `rift.lua`. An upload or
+  a git sync stores its blobs, has a majority of voters fetch them (each
+  voter pulls them over the `blob` stream and answers once stored) and
+  only then proposes the manifest. Transfers go in 1 MiB chunks into
+  `cache/blobs/tmp/<sha256>.part`, resume from its length (from any peer)
+  and are checked against the SHA-256 before the blob is placed; a copy
+  with another hash is deleted and refused. Each peer writes the folders
+  of the manifest whose blobs it holds (a staged copy renamed over each
+  changed file, links removed and never followed, unlisted entries
+  removed) and retries the others every 30 s. It removes only folders it
+  wrote itself (`cache/materialized.json`), so folders a peer had before it
+  joined stay until they are deleted through the API. Unreferenced blobs
+  go after an hour.
+- **The software cache** (`software`, `POST /api/templates/{name}/download`)
+  stays per peer: it is a cache of public downloads, which each peer fetches
+  when it first needs them.
+- **Git syncs** run on the leader: `POST /api/template-sources/{name}/sync`
+  and the check-out before an instance is created are forwarded to it over
+  the `blob` stream. A new leader checks out and publishes the configured
+  sources the manifest lacks. The record of which commit a source was synced
+  from stays in the leader's software cache, so a leader that never synced a
+  source fetches it again when it is next needed.
+- **Web tokens** come from the configuration, so they work on every peer;
+  the random token a process creates when none is configured stays with
+  that process. The web API keeps no sessions.
+- **Witnesses** register the components (they apply every entry) but do
+  not attach them, so they hold no blobs: with two proxies and a witness,
+  both proxies must hold an upload's blobs before its manifest commits.
+
+### Step 9 notes
+
+Queues and the plugin-facing cluster API live in `src/cluster/queues*`, on
+top of `crate::extensions::queue`, which holds the ordering and admission
+rules a single Rift and the leader share. Where they differ from the text
+above:
+
+- **Tickets are not replicated.** A ticket lives in the memory of the peer
+  that holds the player's session. Each peer sends the leader its whole
+  queue state (its live tickets with priorities and the slots its sessions
+  hold, by destination) on the `queue` stream, at once after a change and
+  at least every second; the report is also the heartbeat. The leader
+  answers each report with that peer's view: the network-wide order (as
+  priorities), the head of each queue, the slots the other peers hold and
+  the positions of the peer's own tickets.
+- **Arrivals.** The leader stamps a ticket it sees for the first time with
+  its wall clock (milliseconds times 1024, plus a sequence that keeps them
+  unique and increasing), and orders by priority, then arrival, then peer and
+  connection id. Every peer keeps the stamps of its tickets and sends them
+  again after a leader change; the new leader places a stamped ticket where
+  the old one had it and stamps new ones after every stamp it has seen. Order
+  across a leader change therefore assumes that the peers' clocks roughly
+  agree, as entry stamps do. A new leader collects reports for two seconds
+  (`SETTLE`) before peers admit by its views and it lets heads in.
+- **Capacity.** A destination's used slots are the sum of every live peer's
+  reported slots, or the players the merged player registry puts on the
+  destination and its instances, whichever is more. A peer adds its own
+  current leases to the other peers' last reported ones, so its own
+  admissions count at once.
+- **Turns.** Four times a second the leader drops peers that stopped
+  reporting for `cluster.peer_timeout`, expired or restarted (their tickets
+  and slots go), then tells each queue head that may enter, once per head,
+  with a fresh view over the `queue` stream. The head's peer admits the
+  player through its usual queue check (`queued_target`), which needs a view
+  less than five seconds old; direct entries use the last view's slot counts
+  and the local head when no fresh view exists. The consistency this gives
+  is written up in [queues](queues.md#in-a-cluster).
+- **Lengths.** `Extensions::queue_lengths` on the leader returns the
+  network-wide lengths once it settled; elsewhere the lengths of the last
+  view.
+- **Admission limits** (`rate_limit`, `login_rate_limit`,
+  `limits.max_connections` and the per-address cap) stay per peer, as
+  [what stays per peer](#what-stays-per-peer) says; nothing in them assumed
+  a single process.
+- **Leases** (decision 8) are `lease` entries applied by a component of their
+  own (`cluster_leases`, keyed by owner and name). A grant succeeds when the
+  lease has no live holder: none, its time-to-live passed on the leader's
+  entry clock, or its peer's incarnation expired or was replaced. The token
+  is a per-lease counter that every grant raises and a release keeps, so it
+  only grows, across leader changes and restarts. Asking again while
+  holding extends and keeps the token; a renewal needs the current holder
+  and token. Owners are `config` for the configuration script and
+  `plugin:<name>` for each plugin. The lease API waits for the proposal on
+  the caller's thread (plugin threads and the script's blocking workers, at
+  most the callback's deadline); without a cluster it grants at once.
+- **Job scopes.** `rift.every` in `rift.lua` and in Lua plugins, and
+  `extensions.jobs`, take `scope = "cluster"` (the default) or `"peer"`.
+  Every peer keeps its timers and checks `Cluster::is_leader_with_lease`
+  before each tick of a `cluster` job. `rift.timers.*` and WebAssembly timers
+  stay per peer: a scoped timer and the lease calls in `wit/rift-plugin.wit`
+  would need a contract release with regenerated C, Go and Rust SDKs, which
+  is left for later, like scoped subscriptions in step 5.
+- **Plugins that are not cluster-aware** (decision 9): `plugin.toml` takes
+  `cluster = true` (or `"aware"`). In a cluster, persistent plugins without
+  it are flagged in `rift check` (from a `cluster.toml` beside the
+  configuration or a `cluster` section), in the plugin status of `rift admin
+  plugins list` and `GET /api/plugins` (`cluster_warning`) and in the
+  dashboard; every plugin loads either way.
 
 ## Decisions
 

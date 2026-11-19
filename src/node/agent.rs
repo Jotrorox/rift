@@ -317,6 +317,8 @@ pub struct Agent {
     uploads: StdMutex<HashMap<String, Upload>>,
     /// The index in [`Options::controllers`] to try first.
     next_controller: AtomicUsize,
+    /// The highest cluster term a leader fenced this agent with.
+    fence: super::fence::Fence,
 }
 
 struct Upload {
@@ -339,6 +341,7 @@ impl Agent {
     pub fn new(options: Options) -> io::Result<Arc<Self>> {
         std::fs::create_dir_all(&options.root)?;
         let root = std::fs::canonicalize(&options.root)?;
+        let fence = super::fence::Fence::open(&root)?;
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
         let mut http = reqwest::Client::builder()
@@ -375,6 +378,7 @@ impl Agent {
             http,
             uploads: StdMutex::new(HashMap::new()),
             next_controller: AtomicUsize::new(0),
+            fence,
         }))
     }
 
@@ -498,12 +502,9 @@ impl Agent {
                 };
                 let (agent, client) = (self.clone(), client.clone());
                 tokio::spawn(async move {
-                    let result = match serde_json::from_slice::<Command>(&message.payload) {
-                        Ok(command) => agent.handle(command).await,
-                        Err(error) => Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("invalid node command: {error}"),
-                        )),
+                    let result = match protocol::decode(&message.payload) {
+                        Ok((command, term)) => agent.handle_tagged(command, term).await,
+                        Err(error) => Err(error),
                     };
                     let mut payload = protocol::reply(result).to_string();
                     if payload.len() > protocol::MAX_MESSAGE {
@@ -657,8 +658,24 @@ impl Agent {
         }
     }
 
+    /// Run `command`, which carries a cluster leader's `term` if a cluster
+    /// sent it: a control command of a lower term than this agent's fence
+    /// is refused (see [`super::fence`]); inspection commands come from any
+    /// peer and are never fenced.
+    pub async fn handle_tagged(&self, command: Command, term: Option<u64>) -> io::Result<Value> {
+        if !command.is_inspection() && !matches!(command, Command::Fence { .. }) {
+            self.fence.check(term)?;
+        }
+        self.handle(command).await
+    }
+
     pub async fn handle(&self, command: Command) -> io::Result<Value> {
         match command {
+            Command::Fence { term } => {
+                let term = self.fence.raise(term)?;
+                log_info!("node {} fenced by cluster term {term}", self.options.name);
+                Ok(json!({"term": term}))
+            }
             Command::Start(start) => self.start(start).await,
             Command::Stop { server, timeout_ms } => {
                 self.stop(&server, Duration::from_millis(timeout_ms)).await
@@ -1721,4 +1738,96 @@ where
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(root: &Path) -> Options {
+        Options {
+            controller: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            fallback_controllers: Vec::new(),
+            ca: root.join("unused-ca.pem"),
+            name: "n1".into(),
+            token: "t".repeat(32),
+            root: root.to_owned(),
+            web: None,
+            allowed_programs: BTreeSet::from(["java".to_owned()]),
+            forwarding_secret: None,
+            forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
+        }
+    }
+
+    fn reconcile() -> Command {
+        Command::Reconcile {
+            servers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fenced_agent_refuses_control_commands_of_a_deposed_leader() {
+        let root = std::env::temp_dir().join(format!("rift-agent-fence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = Agent::new(options(&root)).unwrap();
+        // Never fenced: a single Rift's commands carry no term.
+        agent.handle_tagged(reconcile(), None).await.unwrap();
+        let fenced = agent
+            .handle_tagged(Command::Fence { term: 5 }, Some(5))
+            .await
+            .unwrap();
+        assert_eq!(fenced["term"], 5);
+        for term in [Some(4), None] {
+            let refused = agent.handle_tagged(reconcile(), term).await.unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{term:?}");
+        }
+        let lower = agent
+            .handle_tagged(Command::Fence { term: 4 }, Some(4))
+            .await
+            .unwrap_err();
+        assert_eq!(lower.kind(), io::ErrorKind::PermissionDenied);
+        // Inspection is never fenced: any peer's web API may send it.
+        let logs = Command::Logs {
+            server: "lobby".into(),
+            directory: PathBuf::from("lobby"),
+            cursor: None,
+        };
+        let read = agent.handle_tagged(logs.clone(), Some(1)).await.unwrap();
+        assert_eq!(read["text"], "");
+        agent.handle_tagged(logs, None).await.unwrap();
+        // The leader of this term and later ones are obeyed.
+        agent.handle_tagged(reconcile(), Some(5)).await.unwrap();
+        agent.handle_tagged(reconcile(), Some(6)).await.unwrap();
+        // The fence survives a restart of the agent.
+        drop(agent);
+        let agent = Agent::new(options(&root)).unwrap();
+        let refused = agent.handle_tagged(reconcile(), Some(4)).await.unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn commands_carry_the_term_and_old_agents_still_read_them() {
+        let command = reconcile();
+        let plain = protocol::encode(&command, None).unwrap();
+        assert_eq!(plain, serde_json::to_vec(&command).unwrap());
+        assert_eq!(protocol::decode(&plain).unwrap(), (command.clone(), None));
+        let tagged = protocol::encode(&command, Some(7)).unwrap();
+        assert_eq!(
+            protocol::decode(&tagged).unwrap(),
+            (command.clone(), Some(7))
+        );
+        // An agent of an earlier release parses the command and ignores the term.
+        assert_eq!(serde_json::from_slice::<Command>(&tagged).unwrap(), command);
+        assert!(!command.is_inspection());
+        assert!(
+            Command::Tree {
+                server: "lobby".into(),
+                directory: PathBuf::from("lobby"),
+                offset: 0,
+            }
+            .is_inspection()
+        );
+    }
 }

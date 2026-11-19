@@ -53,6 +53,54 @@ pub struct App {
     local_token: Arc<str>,
     local_token_announced: Arc<std::sync::atomic::AtomicBool>,
 }
+/// On a cluster peer: apply deployments through this configuration
+/// service's reload, and report every configuration it publishes (its
+/// source and where its files are) to the cluster (docs/clustering.md,
+/// "Configuration and files"). The web token needs nothing here: it comes
+/// from the configuration, which every peer runs, while the random local
+/// token stays with each process.
+fn follow_cluster(
+    files: &'static Arc<rift::cluster::files::FilesState>,
+    current: &watch::Receiver<Arc<Snapshot>>,
+    commands: &control::Sender,
+    path: Option<PathBuf>,
+) {
+    let sender = commands.clone();
+    files.set_reloader(Arc::new(
+        move || -> rift::cluster::transport::BoxFuture<'static, Result<(), String>> {
+            let sender = sender.clone();
+            Box::pin(async move {
+                let (reply, result) = oneshot::channel();
+                sender
+                    .send(control::Command {
+                        operation: control::Operation::Reload,
+                        reply,
+                        actor: "cluster".to_owned(),
+                    })
+                    .await
+                    .map_err(|_| "the configuration service stopped".to_owned())?;
+                match result.await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(error)) => Err(error.message),
+                    Err(_) => Err("the configuration service stopped".to_owned()),
+                }
+            })
+        },
+    ));
+    let mut current = current.clone();
+    tokio::spawn(async move {
+        loop {
+            let snapshot = current.borrow_and_update().clone();
+            files.configure(&snapshot.config, path.as_deref());
+            if let Some(source) = snapshot.source.as_deref() {
+                files.report_running(source);
+            }
+            if current.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
 /// A random 256-bit token as 64 hex digits.
 fn generate_token() -> io::Result<String> {
     let mut random = [0u8; 32];
@@ -107,6 +155,9 @@ impl App {
         let workflows = Arc::new(store);
         if let Some(source) = current.borrow().source.as_deref() {
             workflows.deploy(source, "system", "startup")?;
+        }
+        if let Some(files) = rift::cluster::files::global() {
+            follow_cluster(files, &current, &commands, path.clone());
         }
         Ok(Self {
             current,

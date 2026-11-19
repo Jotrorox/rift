@@ -281,9 +281,48 @@ pub fn set_local_peer(name: &str) {
     let _ = LOCAL_PEER.set(name.to_owned());
 }
 
-/// `rift.peer`: this process's peer name, `None` outside a cluster.
+/// `rift.peer`: this process's peer name, `None` outside a cluster. Inside
+/// [`with_peer`] on the same thread, the name given there.
 pub fn local_peer() -> Option<&'static str> {
-    LOCAL_PEER.get().map(String::as_str)
+    PEER_OVERRIDE
+        .with(std::cell::Cell::get)
+        .or_else(|| LOCAL_PEER.get().map(String::as_str))
+}
+
+thread_local! {
+    static PEER_OVERRIDE: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Peer names [`with_peer`] has used, kept for the life of the process: at
+/// most one per member name a cluster ever had.
+static PEER_NAMES: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Run `work` on this thread with `rift.peer` set to `name`: how a peer
+/// evaluates a configuration the way another peer would (docs/clustering.md,
+/// "One configuration").
+pub fn with_peer<T>(name: &str, work: impl FnOnce() -> T) -> T {
+    let name: &'static str = {
+        let mut names = PEER_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        match names.get(name) {
+            Some(known) => *known,
+            None => {
+                let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+                names.insert(leaked);
+                leaked
+            }
+        }
+    };
+    struct Restore(Option<&'static str>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            PEER_OVERRIDE.with(|cell| cell.set(previous));
+        }
+    }
+    let _restore = Restore(PEER_OVERRIDE.with(|cell| cell.replace(Some(name))));
+    work()
 }
 
 #[cfg(test)]

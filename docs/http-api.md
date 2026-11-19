@@ -236,7 +236,7 @@ Plugin routes are for unrestricted operators only.
 
 | Method and path | Permission | What it does |
 | --- | --- | --- |
-| `GET /api/plugins` | `read` | `{plugins: [...]}`: every [plugin](plugin-operations.md) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable` |
+| `GET /api/plugins` | `read` | `{plugins: [...]}`: every [plugin](plugin-operations.md) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities`, `restartable` and, in a [cluster](plugins.md#plugins-in-a-cluster), `cluster_warning` for a persistent plugin whose `plugin.toml` does not declare `cluster = true` (otherwise null) |
 | `GET /api/plugins/{name}` | `read` | One plugin's entry, or `404` |
 | `GET /api/plugins/{name}/logs` | `logs` | `{plugin, lines}`: the last 200 log lines of a persistent plugin as `{timestamp_unix_ms, level, message}` |
 | `POST /api/plugins/{name}/restart` | `plugins` | Stop a persistent plugin and start a fresh instance with `{}`; returns `202` when accepted. Poll `GET /api/plugins/{name}` for `status` and `restarts` |

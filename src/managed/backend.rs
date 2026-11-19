@@ -65,6 +65,10 @@ pub(super) trait ProcessBackend: Send + 'static {
     /// `keep_running`; remote ones keep running. Both are adopted again by
     /// the next controller.
     fn survives_controller(&self, server: &Server) -> bool;
+    /// Forget the process this worker owned, without touching it: a cluster
+    /// peer that leads again adopts what the agents report instead of
+    /// trusting what it owned before another peer led.
+    fn forget(&mut self) {}
 }
 
 #[derive(Debug, Default)]
@@ -938,6 +942,12 @@ impl ProcessBackend for Remote {
 
     fn survives_controller(&self, _server: &Server) -> bool {
         true
+    }
+
+    fn forget(&mut self) {
+        self.running = None;
+        self.agent = None;
+        self.revision = 0;
     }
 }
 

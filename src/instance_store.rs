@@ -132,6 +132,35 @@ const MOVED_MARIADB: &str = "CREATE TABLE moved_servers (
     port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
+/// The runtime state of each managed server as a cluster leader last
+/// recorded it (docs/clustering.md, "Inputs from other peers"), in a
+/// component of its own. Only a cluster leader writes it: every peer routes
+/// from the same view, and a new leader starts from the old one's. A single
+/// Rift keeps the (empty) table and never reads it.
+const SERVERS_COMPONENT: &str = "server_states";
+const SERVERS_SCHEMA_VERSION: u32 = 1;
+const SERVERS_V1: &str = "CREATE TABLE server_states (
+    name TEXT PRIMARY KEY NOT NULL,
+    phase TEXT NOT NULL,
+    last_error TEXT,
+    automatic INTEGER NOT NULL DEFAULT 1 CHECK(automatic IN (0,1)),
+    restart_attempts INTEGER NOT NULL DEFAULT 0
+) STRICT;";
+const SERVERS_POSTGRES: &str = r#"CREATE TABLE server_states (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    phase TEXT COLLATE "C" NOT NULL,
+    last_error TEXT,
+    automatic BIGINT NOT NULL DEFAULT 1 CHECK(automatic IN (0,1)),
+    restart_attempts BIGINT NOT NULL DEFAULT 0
+);"#;
+const SERVERS_MARIADB: &str = "CREATE TABLE server_states (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    phase VARCHAR(16) NOT NULL,
+    last_error TEXT,
+    automatic BIGINT NOT NULL DEFAULT 1 CHECK(automatic IN (0,1)),
+    restart_attempts BIGINT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
+
 const GROUPS_V1: &str = "CREATE TABLE group_states (
     name TEXT PRIMARY KEY NOT NULL,
     suspended INTEGER NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
@@ -200,16 +229,21 @@ fn moved_sql(dialect: Dialect, _from: u32) -> String {
     ddl(dialect, [MOVED_V1, MOVED_POSTGRES, MOVED_MARIADB])
 }
 
+fn servers_sql(dialect: Dialect, _from: u32) -> String {
+    ddl(dialect, [SERVERS_V1, SERVERS_POSTGRES, SERVERS_MARIADB])
+}
+
 type Upgrade = fn(Dialect, u32) -> String;
 
 /// The schema components of this module, their latest versions and the SQL
 /// that creates or upgrades them, in the order startup migrates them.
-const COMPONENTS: [(&str, u32, Upgrade); 5] = [
+const COMPONENTS: [(&str, u32, Upgrade); 6] = [
     (COMPONENT, SCHEMA_VERSION, instances_sql),
     (GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, groups_sql),
     (LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, logins_sql),
     (NODES_COMPONENT, NODES_SCHEMA_VERSION, nodes_sql),
     (MOVED_COMPONENT, MOVED_SCHEMA_VERSION, moved_sql),
+    (SERVERS_COMPONENT, SERVERS_SCHEMA_VERSION, servers_sql),
 ];
 
 /// Every component of this module and the version this Rift writes.
@@ -228,6 +262,7 @@ const GROUP_STATES: &[&str] = &["group_states"];
 const LOGIN_GENERATIONS: &[&str] = &["login_generations"];
 const NODE_SCHEDULES: &[&str] = &["node_schedules"];
 const MOVED_SERVERS: &[&str] = &["moved_servers"];
+const SERVER_STATES: &[&str] = &["server_states"];
 
 /// The tables of `component`, if it belongs to this module.
 pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
@@ -237,8 +272,31 @@ pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
         LOGINS_COMPONENT => Some(LOGIN_GENERATIONS),
         NODES_COMPONENT => Some(NODE_SCHEDULES),
         MOVED_COMPONENT => Some(MOVED_SERVERS),
+        SERVERS_COMPONENT => Some(SERVER_STATES),
         _ => None,
     }
+}
+
+/// An instance `rift cluster init` moved from this host to its peer's node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvertedInstance {
+    pub name: String,
+    /// The absolute directory the instance used on this host.
+    pub from: std::path::PathBuf,
+    /// The directory the node uses, relative to its `--root`.
+    pub to: std::path::PathBuf,
+}
+
+/// A managed server's runtime state as a cluster leader records it in
+/// `server_states`: what its worker shows (`phase` is a
+/// [`crate::managed::Phase`] name), whether automatic starts are allowed,
+/// and its recovery budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerState {
+    pub phase: String,
+    pub last_error: Option<String>,
+    pub automatic: bool,
+    pub restart_attempts: u32,
 }
 
 /// Migrate `component` to `to_version` in the caller's transaction (see
@@ -334,6 +392,17 @@ pub enum InstanceOp {
     PruneMovedServers {
         keep: Vec<String>,
     },
+    /// A cluster leader records the runtime state of managed server `name`
+    /// for every peer.
+    SetServerState {
+        name: String,
+        state: ServerState,
+    },
+    /// Forget the runtime states of servers not in `keep`; the outcome
+    /// names them.
+    PruneServerStates {
+        keep: Vec<String>,
+    },
 }
 
 /// The result of an [`InstanceOp`].
@@ -369,6 +438,7 @@ impl InstanceOp {
             Self::SetMovedServer { .. }
             | Self::ForgetMovedServer { .. }
             | Self::PruneMovedServers { .. } => MOVED_SERVERS,
+            Self::SetServerState { .. } | Self::PruneServerStates { .. } => SERVER_STATES,
         }
     }
 }
@@ -565,7 +635,57 @@ fn perform(connection: &Conn, op: &InstanceOp) -> Result<InstanceOutcome, String
         InstanceOp::PruneMovedServers { keep } => {
             prune(connection, "moved_servers", keep).map(InstanceOutcome::Pruned)
         }
+        InstanceOp::SetServerState { name, state } => {
+            if crate::managed::Phase::parse(&state.phase).is_none() {
+                return Err(format!(
+                    "server_states.{name}: unknown phase {:?}",
+                    state.phase
+                ));
+            }
+            connection
+                .execute(
+                    "INSERT INTO server_states (name,phase,last_error,automatic,restart_attempts)
+                     VALUES (?1,?2,?3,?4,?5)
+                     ON CONFLICT(name) DO UPDATE SET phase=excluded.phase,
+                        last_error=excluded.last_error, automatic=excluded.automatic,
+                        restart_attempts=excluded.restart_attempts",
+                    params![
+                        name,
+                        state.phase,
+                        state.last_error,
+                        state.automatic,
+                        state.restart_attempts
+                    ],
+                )
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::PruneServerStates { keep } => {
+            prune(connection, "server_states", keep).map(InstanceOutcome::Pruned)
+        }
     }
+}
+
+/// Every runtime state a cluster leader recorded.
+fn read_server_states(connection: &Conn) -> Result<BTreeMap<String, ServerState>, String> {
+    let rows = connection
+        .query_map(
+            "SELECT name,phase,last_error,automatic,restart_attempts FROM server_states ORDER BY name",
+            params![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ServerState {
+                        phase: row.get::<_, String>(1)?,
+                        last_error: row.get::<_, Option<String>>(2)?,
+                        automatic: row.get::<_, bool>(3)?,
+                        restart_attempts: row.get::<_, u32>(4)?,
+                    },
+                ))
+            },
+        )
+        .or_message()?;
+    Ok(rows.into_iter().collect())
 }
 
 /// Delete the rows of `table` whose name is not in `keep`; their names.
@@ -890,10 +1010,22 @@ impl Store {
 
     /// Validate every registration before recovering intents or launching workers.
     pub fn restore(&self, config: &mut Config) -> io::Result<()> {
+        self.restore_with(config, true)
+    }
+
+    /// [`Store::restore`]; without `recover`, only validate and take the
+    /// ready registrations and moves into `config`, leaving unfinished
+    /// creations, removals and stale moves alone. A cluster peer restores
+    /// this way: only its leader recovers ([`Store::recover`]), once it
+    /// leads (docs/clustering.md, "Work that runs once: the leader").
+    pub fn restore_with(&self, config: &mut Config, recover: bool) -> io::Result<()> {
         let records = self.records()?;
         let mut recovery_ports = Vec::new();
         for record in &records {
-            if ["removing", "deleting"].contains(&record.phase.as_str()) && !record.remote() {
+            if recover
+                && ["removing", "deleting"].contains(&record.phase.as_str())
+                && !record.remote()
+            {
                 let address = SocketAddr::from(([127, 0, 0, 1], record.definition.instance.port));
                 // A `keep_running` server outlived the proxy that was removing it.
                 crate::managed::stop_kept(&record.definition.plan.directory, REMOVAL_STOP_GRACE)
@@ -1036,6 +1168,24 @@ impl Store {
                     .map_err(|e| self.error(e))?;
             }
         }
+        if recover {
+            self.recover_records(records)?;
+            self.retain_moved_servers(&candidate.moved_servers)?;
+        }
+        *config = candidate;
+        Ok(())
+    }
+
+    /// Finish what an earlier controller left half done: abort unfinished
+    /// creations, finish removals, and forget the moves `config` no longer
+    /// applies. A cluster leader runs this when it gains leadership, for
+    /// whatever the previous leader left.
+    pub fn recover(&self, config: &Config) -> io::Result<()> {
+        self.recover_records(self.records()?)?;
+        self.retain_moved_servers(&config.moved_servers)
+    }
+
+    fn recover_records(&self, records: Vec<Record>) -> io::Result<()> {
         for record in records {
             let result = match record.phase.as_str() {
                 "creating" => self.abort_creation(&record.name),
@@ -1049,8 +1199,6 @@ impl Store {
                 ))
             })?;
         }
-        self.retain_moved_servers(&candidate.moved_servers)?;
-        *config = candidate;
         Ok(())
     }
 
@@ -1157,6 +1305,66 @@ impl Store {
             definition,
         })?;
         Ok(())
+    }
+
+    /// `rift cluster init`: put every ready instance of this host (stored
+    /// with an empty node and an absolute directory) on node `node`, the
+    /// initializing peer, with the directory `config` gives an instance of
+    /// its group there (relative to the node's `--root`). Its files stay
+    /// where they are; the result says where each instance was and where
+    /// the node looks for it. `config` must define the node.
+    pub fn convert_local_instances(
+        &self,
+        config: &Config,
+        node: &str,
+    ) -> io::Result<Vec<ConvertedInstance>> {
+        let mut converted = Vec::new();
+        for record in self.records()? {
+            if record.remote() || record.phase != "ready" {
+                continue;
+            }
+            let instance = &record.definition.instance;
+            let mut candidate = config.clone();
+            candidate
+                .add_instance_on(&instance.group, &record.name, instance.port, Some(node))
+                .map_err(|e| {
+                    self.error(format!(
+                        "instances.{}: cannot put it on node {node}: {e}",
+                        record.name
+                    ))
+                })?;
+            let directory = candidate
+                .managed_servers
+                .get(&record.name)
+                .map(|server| server.directory.clone())
+                .ok_or_else(|| self.error(format!("instances.{}: no directory", record.name)))?;
+            let definition = serde_json::to_string(&Definition {
+                instance: ServiceInstance {
+                    node: Some(node.to_owned()),
+                    ..instance.clone()
+                },
+                plan: Plan {
+                    directory: directory.clone(),
+                    marker: None,
+                    stage: None,
+                    created: false,
+                },
+            })
+            .map_err(|e| self.error(e))?;
+            self.run(InstanceOp::Move {
+                name: record.name.clone(),
+                from: String::new(),
+                node: node.to_owned(),
+                port: instance.port,
+                definition,
+            })?;
+            converted.push(ConvertedInstance {
+                name: record.name.clone(),
+                from: record.definition.plan.directory.clone(),
+                to: directory,
+            });
+        }
+        Ok(converted)
     }
 
     /// Re-register a ready remote instance on another node: the commit point
@@ -1468,6 +1676,85 @@ impl Store {
                         }
                     }
                 }),
+        );
+    }
+
+    /// The runtime states a cluster leader recorded, by server.
+    pub fn server_states(&self) -> io::Result<BTreeMap<String, ServerState>> {
+        read_server_states(&self.database.read()).map_err(|e| self.error(e))
+    }
+
+    /// Record `name`'s runtime state (a cluster leader's write).
+    pub fn set_server_state(&self, name: &str, state: ServerState) -> io::Result<()> {
+        self.run(InstanceOp::SetServerState {
+            name: name.to_owned(),
+            state,
+        })?;
+        Ok(())
+    }
+
+    /// Forget the runtime states of servers `keep` does not name.
+    pub fn prune_server_states<'a>(
+        &self,
+        keep: impl IntoIterator<Item = &'a String>,
+    ) -> io::Result<Vec<String>> {
+        match self.run(InstanceOp::PruneServerStates {
+            keep: keep.into_iter().cloned().collect(),
+        })? {
+            InstanceOutcome::Pruned(names) => Ok(names),
+            other => Err(self.error(format!("unexpected outcome {other:?}"))),
+        }
+    }
+
+    /// Mirror the recorded runtime states into memory: `states` gets the
+    /// whole table now and after every change, under the rules of
+    /// [`Store::watch_states`].
+    pub fn watch_server_states(
+        &self,
+        states: impl Fn(BTreeMap<String, ServerState>) + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let label = self.database.label().to_owned();
+        let connection = self.database.lock();
+        states(read_server_states(&connection).map_err(|e| self.error(e))?);
+        self.remember(
+            self.database
+                .on_change(
+                    &["server_states"],
+                    move |connection, _| match read_server_states(connection) {
+                        Ok(current) => states(current),
+                        Err(error) => {
+                            log_error!(
+                                "instance database {label}: server states not reloaded: {error}"
+                            )
+                        }
+                    },
+                ),
+        );
+        drop(connection);
+        Ok(())
+    }
+
+    /// Mirror the moves of named servers into memory: `moved` gets the
+    /// whole table after every change, under the rules of
+    /// [`Store::watch_states`].
+    pub fn watch_moved_servers(
+        &self,
+        moved: impl Fn(BTreeMap<String, MovedServer>) + Send + Sync + 'static,
+    ) {
+        let label = self.database.label().to_owned();
+        self.remember(
+            self.database
+                .on_change(
+                    &["moved_servers"],
+                    move |connection, _| match read_moved_servers(connection) {
+                        Ok(current) => moved(current),
+                        Err(error) => {
+                            log_error!(
+                                "instance database {label}: moved servers not reloaded: {error}"
+                            )
+                        }
+                    },
+                ),
         );
     }
 

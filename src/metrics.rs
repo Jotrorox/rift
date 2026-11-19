@@ -322,6 +322,7 @@ impl Metrics {
         // Only cluster peers have these series (docs/clustering.md).
         if let Some(cluster) = rift::cluster::global() {
             text.push_str(&cluster.render_metrics());
+            text.push_str(&rift::cluster::bus::render_metrics());
         }
         text
     }

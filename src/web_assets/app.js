@@ -1690,7 +1690,8 @@
       cell(tr, plugin.status, `state ${plugin.status === "active" ? "running" : plugin.status}`);
       cell(tr, plugin.restartable ? count(plugin.restarts) : "—", "metric-value");
       cell(tr, plugin.restartable ? count(plugin.calls) : "—", "metric-value");
-      cell(tr, plugin.last_error || "—");
+      // In a cluster, plugins without a cluster declaration are flagged here.
+      cell(tr, [plugin.last_error, plugin.cluster_warning].filter(Boolean).join("; ") || "—");
       const actions = cell(tr, "");
       if (!plugin.restartable) return;
       const button = document.createElement("button");

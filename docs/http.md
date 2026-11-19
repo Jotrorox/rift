@@ -348,6 +348,24 @@ without its token are summarized the same way.
   without a final result.
 - These are local records, not a tamper-proof external audit log.
 
+### In a cluster
+
+On a [cluster](clustering.md) peer, deployment history and operator audit
+records are replicated, so `GET /api/deployments`, rollbacks and
+`GET /api/audit` give the same answer on every peer (`"replicated": true`):
+
+- `PUT /api/config`, structured edits, rollbacks and a reload of an edited
+  `rift.lua` are deployments: Rift evaluates the source as every peer would,
+  refuses it with `409` if a shared section depends on `rift.peer` (the
+  message names the peer and section), commits it, applies it on the peer
+  that took the request and writes it to every other peer's `rift.lua`,
+  which then reloads. A peer whose reload fails keeps its configuration and
+  shows the reason in `GET /api/cluster` under `configuration`.
+- Unauthenticated request summaries stay with each peer.
+- `rift cluster init` moves the records directory's `deployments.json` and
+  `audit.jsonl` into the cluster; afterwards the files are no longer
+  written.
+
 ## Template and server files
 
 The Files page and `/api/files` serve two kinds of folders, like CloudNet's
@@ -380,6 +398,14 @@ dashboard; see [Templates and server software](templates.md).
 node token (`rift.config.nodes.<name>.token_env`) to mirror template folders.
 That token can only read template files; every other request, and every
 write, is refused with `403`. Node reads are not audited, like other reads.
+
+On a [cluster](clustering.md#templates-and-other-files) peer, template writes
+and deletes change the replicated template manifest: the response comes once
+a majority of voting peers hold the uploaded file and the change is
+committed, and every peer then writes the same `template_storage`. A write
+fails with `500` while fewer than a majority of voters are reachable.
+Top-level names starting with a dot are refused. Reads (and node agents)
+use the peer's own copy, so any peer serves the same templates.
 
 ## Limits
 

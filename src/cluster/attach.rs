@@ -9,18 +9,80 @@
 //! stores (instance registry, permission authority, player directory,
 //! extension store) open afterwards, check their schema instead of
 //! migrating it, and follow the replica through their apply hooks.
-use super::{Cluster, Components, Options, Settings, operations::ClusterExecutor, replicated};
+//!
+//! [`cluster_components`] is the one place where every step registers the
+//! state machine components it needs; `main`, `rift cluster init` and
+//! `rift witness` all start their peer with what it returns.
+use super::{
+    Cluster, Components, Options, Settings, bus::BusState, operations::ClusterExecutor, replicated,
+};
 use crate::{
     config::Config,
     database::{Database, Mode},
+    players::PlayerRegistry,
 };
 use std::{
     io,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
 static DATABASE: OnceLock<Arc<Database>> = OnceLock::new();
+
+/// What [`cluster_components`] made for the proxy that starts next: the
+/// player registry its presence component serves and the bus state of its
+/// bus component. `runtime::serve` takes them.
+static PREPARED: Mutex<Option<Prepared>> = Mutex::new(None);
+
+/// The parts of a starting proxy that its cluster components hold.
+#[derive(Clone)]
+pub struct Prepared {
+    /// The roster the proxy's players must serve (see [`take_roster`]).
+    pub registry: Arc<PlayerRegistry>,
+    pub bus: Arc<BusState>,
+}
+
+/// Every state machine component of a peer, registered before it starts:
+/// presence (`claim` entries), the bus (`bus` and `stream` entries) and
+/// those of the later steps. Every way of starting a peer calls this, so
+/// all of them support (and announce) the same entry kinds.
+pub fn cluster_components(config: Option<&Config>) -> io::Result<Components> {
+    let shared = config
+        .and_then(|config| config.cluster.clone())
+        .unwrap_or_default();
+    let registry = Arc::new(PlayerRegistry::default());
+    let bus = BusState::new();
+    let mut components = Components::new();
+    for component in super::players::components(&registry, &shared) {
+        components.register(component)?;
+    }
+    for component in super::bus::components(&bus) {
+        components.register(component)?;
+    }
+    for component in super::queues::components() {
+        components.register(component)?;
+    }
+    for component in super::files::components(&super::files::prepare()) {
+        components.register(component)?;
+    }
+    // Further steps register their components here, one line each.
+    *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Prepared { registry, bus });
+    Ok(components)
+}
+
+/// What the last [`cluster_components`] made; `None` on a single Rift.
+pub fn prepared() -> Option<Prepared> {
+    PREPARED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The roster [`cluster_components`] made, once: the players of the first
+/// proxy generation serve it, so the presence component and the proxy share
+/// one registry. `None` on a single Rift, whose players make their own.
+pub fn take_roster() -> Option<Arc<PlayerRegistry>> {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let prepared = prepared()?;
+    (!TAKEN.swap(true, std::sync::atomic::Ordering::AcqRel)).then_some(prepared.registry)
+}
 
 /// A started peer and the instance database it replicates.
 pub struct Attached {
@@ -59,6 +121,12 @@ pub async fn database(
     wait_for_state(&cluster).await?;
     let _ = DATABASE.set(database.clone());
     Ok(Attached { cluster, database })
+}
+
+/// The file of a key-value store kept in a file of its own, which a
+/// cluster refuses (for `rift check --strict`).
+pub fn file_store(config: &Config) -> Option<&std::path::Path> {
+    crate::extensions::storage::file_target(config)
 }
 
 /// What a cluster cannot run with.

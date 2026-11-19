@@ -1348,6 +1348,38 @@ impl Config {
         }
     }
 
+    /// What a cluster refuses: servers on `local`, the host of the proxy
+    /// that runs them. Every peer starts the same configuration, so a local
+    /// server would run once per peer; in a cluster each peer is a node
+    /// named after itself instead, and servers and groups select nodes
+    /// (docs/clustering.md, "Servers on the peers' own hosts").
+    pub fn check_cluster_placement(&self) -> io::Result<()> {
+        for (name, server) in &self.managed_servers {
+            if server.node.is_none() && !self.instances.contains_key(name) {
+                return Err(invalid(format!(
+                    "managed_servers.{name}: a cluster runs no server on {LOCAL_NODE:?}; give it a node (each peer is a node named after itself)"
+                )));
+            }
+        }
+        for (name, group) in &self.service_groups {
+            if group.nodes.is_none() {
+                return Err(invalid(format!(
+                    "service_groups.{name}: a cluster runs no instance on {LOCAL_NODE:?}; set nodes (each peer is a node named after itself)"
+                )));
+            }
+        }
+        if let Some((name, _)) = self
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.node.is_none())
+        {
+            return Err(invalid(format!(
+                "instances.{name}: runs on {LOCAL_NODE:?}, which a cluster refuses; `rift cluster init` moves such instances to the initializing peer"
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether authenticated sessions run player hooks: with extensions, or
     /// with persistent plugins once players have a verified identity.
     pub fn player_hooks(&self) -> bool {
@@ -1359,6 +1391,11 @@ impl Config {
             return Err(invalid(
                 "cluster: a cluster replicates its own SQLite state; database.backend = \"postgres\" or \"mariadb\" cannot be combined with it",
             ));
+        }
+        // A cluster peer has a cluster.toml, which names it before the
+        // configuration is evaluated.
+        if crate::cluster::settings::local_peer().is_some() {
+            self.check_cluster_placement()?;
         }
         let path = self.instance_database.as_os_str().as_encoded_bytes();
         if path.is_empty()

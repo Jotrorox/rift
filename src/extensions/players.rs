@@ -584,7 +584,8 @@ impl Players {
             });
         Self {
             sessions: Arc::default(),
-            roster: Arc::default(),
+            // A cluster peer's presence component holds the roster already.
+            roster: crate::cluster::attach::take_roster().unwrap_or_default(),
             destinations,
             groups,
             events,
