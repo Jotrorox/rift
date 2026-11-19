@@ -2,7 +2,7 @@
 //!
 //! A configured store is either a bundled-SQLite database of its own (`path`)
 //! or the table `extension_entries` in the instance database
-//! (`database = true`), which is a SQLite file or PostgreSQL. Each mutation
+//! (`database = true`), which is a SQLite file, PostgreSQL or MariaDB. Each mutation
 //! commits only the entries it changes. A file store runs in WAL mode with
 //! `synchronous=FULL`, so a write costs one small append and sync instead of
 //! rewriting the store; its connection holds an exclusive lock: one runtime
@@ -1027,8 +1027,13 @@ fn current(connection: &Conn, (namespace, key): &Key) -> database::Result<Option
 /// of the primary key.
 fn usage(connection: &Conn, owner: Option<&Owner>) -> database::Result<Usage> {
     let dialect = connection.dialect();
+    // MariaDB casts to a 64-bit integer as SIGNED; it has no BIGINT cast.
+    let integer = match dialect {
+        Dialect::Mariadb => "SIGNED",
+        Dialect::Sqlite | Dialect::Postgres => "BIGINT",
+    };
     let measure = format!(
-        "SELECT count(*), CAST(COALESCE(SUM(8 + {} + {} + length(value)), 0) AS BIGINT)
+        "SELECT count(*), CAST(COALESCE(SUM(8 + {} + {} + length(value)), 0) AS {integer})
          FROM extension_entries WHERE ",
         dialect.octets("namespace"),
         dialect.octets("key"),
@@ -1180,6 +1185,15 @@ fn shared_schema(dialect: Dialect) -> &'static str {
                 value BYTEA NOT NULL,
                 PRIMARY KEY (namespace, key)
             );"
+        }
+        // Namespaces and keys are at most MAX_LABEL bytes.
+        Dialect::Mariadb => {
+            "CREATE TABLE extension_entries (
+                namespace VARCHAR(255) NOT NULL,
+                \"key\" VARCHAR(255) NOT NULL,
+                value LONGBLOB NOT NULL,
+                PRIMARY KEY (namespace, \"key\")
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;"
         }
     }
 }
@@ -1860,14 +1874,13 @@ mod tests {
     }
 
     #[test]
-    fn the_store_can_live_in_postgres() {
-        let Some(location) =
-            crate::database::test_postgres_or_skip("the_store_can_live_in_postgres")
+    fn the_store_can_live_on_a_server() {
+        let Some(location) = crate::database::test_server_or_skip("the_store_can_live_on_a_server")
         else {
             return;
         };
         let database = Arc::new(Database::connect(&location).unwrap());
-        assert_eq!(database.dialect(), Dialect::Postgres);
+        assert_ne!(database.dialect(), Dialect::Sqlite);
         exercise_shared(&database);
     }
 

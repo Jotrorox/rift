@@ -139,7 +139,7 @@ impl Options {
     pub fn from_config(config: &crate::config::Config, source: Option<&[u8]>) -> io::Result<Self> {
         if config.database.is_some() {
             return Err(super::invalid(
-                "cluster: database.backend = \"postgres\" cannot be combined with cluster.toml; a cluster replicates SQLite",
+                "cluster: database.backend = \"postgres\" or \"mariadb\" cannot be combined with cluster.toml; a cluster replicates SQLite",
             ));
         }
         let mut options = Self::new(config.cluster.clone().unwrap_or_default());

@@ -317,7 +317,8 @@ mod tests {
                 .contains("instance_database")
         );
         let mut postgres = previous.clone();
-        postgres.database = Some(rift::database::PostgresConfig {
+        postgres.database = Some(rift::database::ServerConfig {
+            engine: rift::database::Engine::Postgres,
             url: rift::database::Url::Env("RIFT_DATABASE_URL".into()),
             ca: None,
             standby: false,

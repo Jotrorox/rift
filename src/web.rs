@@ -559,6 +559,10 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers", get(managed_servers))
             .route("/api/servers/{name}/start", post(start_server))
             .route("/api/servers/{name}/stop", post(stop_server))
+            .route(
+                "/api/servers/{name}/move",
+                post(move_server).delete(cancel_move),
+            )
             .route("/api/servers/{name}/logs", get(server_logs))
             .route("/api/servers/{name}/console", post(server_console))
             .route("/api/players", get(player_list))
@@ -568,6 +572,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/nodes", get(nodes))
             .route("/api/cluster", get(cluster))
             .route("/api/nodes/warm", post(warm_templates))
+            .route("/api/nodes/plan", get(node_plan))
             .route("/api/plugins", get(plugin_list))
             .route("/api/plugins/{name}", get(plugin_status))
             .route("/api/plugins/{name}/logs", get(plugin_logs))
@@ -885,7 +890,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "files", ..] | ["api", "template-sources", ..] => "files",
                 ["api", "templates", _, "download"]
                 | ["api", "software", ..]
-                | ["api", "nodes", "warm"] => "servers",
+                | ["api", "nodes", "warm" | "plan"] => "servers",
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
@@ -1070,6 +1075,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         let operation = match segments.as_slice() {
             ["api", "servers", _, "start"] => "start",
             ["api", "servers", _, "stop"] => "stop",
+            ["api", "servers", _, "move"] => "move",
             ["api", "servers", _, "console"] => "console",
             ["api", "players", _, "message"] => "message_player",
             ["api", "players", _, "kick"] => "kick_player",
@@ -1353,7 +1359,7 @@ async fn player_action(
     match result {
         Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
         Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),
-        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
     }
 }
 async fn managed_servers(
@@ -1384,6 +1390,22 @@ async fn cluster() -> Json<Value> {
 
 async fn nodes(State(app): State<App>) -> Json<Value> {
     Json(admin::nodes(&app.snapshot()))
+}
+
+/// Suggested moves that even out the nodes; `?spread=<percent>` sets how far
+/// apart they may be. Nothing moves.
+async fn node_plan(State(app): State<App>, RawQuery(query): RawQuery) -> Response {
+    let spread = match query.as_deref() {
+        None | Some("") => Ok(crate::rebalance::DEFAULT_SPREAD),
+        Some(query) => query.strip_prefix("spread=").map_or_else(
+            || Err("expected spread=<percent>".to_owned()),
+            crate::rebalance::parse_spread,
+        ),
+    };
+    match spread {
+        Ok(spread) => Json(crate::rebalance::plan(&app.snapshot(), spread)).into_response(),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
 }
 
 async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
@@ -2192,6 +2214,106 @@ async fn software_versions(Path(kind): Path<String>) -> Response {
         ),
     }
 }
+/// `rift admin move` from the web: move a persistent instance or a named
+/// server, with its folder, to `{node}`. Poll the operation for the result;
+/// `GET /api/servers` shows the progress under `move`.
+async fn move_server(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["node", "copy", "keep_source"]) {
+        Ok(value) => value,
+        Err(failure) => return failure.into_response(),
+    };
+    let Some(node) = value.get("node").and_then(Value::as_str).map(str::to_owned) else {
+        return error(StatusCode::BAD_REQUEST, "node must be a string");
+    };
+    let flag = |key: &str, default: bool| match value.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(format!("{key} must be a boolean")),
+    };
+    let (copy, keep_source) = match (flag("copy", true), flag("keep_source", false)) {
+        (Ok(copy), Ok(keep_source)) => (copy, keep_source),
+        (Err(message), _) | (_, Err(message)) => {
+            return error(StatusCode::BAD_REQUEST, message);
+        }
+    };
+    if !copy && keep_source {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "keep_source applies to copies; a move without copy never deletes the old folder",
+        );
+    }
+    let snapshot = app.snapshot();
+    if !snapshot.config.managed_servers.contains_key(&name) {
+        return error(StatusCode::NOT_FOUND, format!("unknown server {name:?}"));
+    }
+    // Refuse what can be refused now, before tracking an operation.
+    if let Err(message) = crate::moving::check(&snapshot, &name, &node, copy) {
+        return error(StatusCode::CONFLICT, message);
+    }
+    let group = snapshot
+        .config
+        .instances
+        .get(&name)
+        .map(|instance| instance.group.clone());
+    let id = match app.operations.reserve(group, "move", &name) {
+        Ok(id) => id,
+        Err(failure) => return failure.into_response(),
+    };
+    let operation_id = id.clone();
+    tokio::spawn(async move {
+        let request = crate::moving::Request {
+            instance: name.clone(),
+            node,
+            copy,
+            keep_source,
+        };
+        let committer = crate::moving::Committer::Control {
+            commands: &app.commands,
+            actor: access.name.clone(),
+        };
+        let reply = crate::moving::run(snapshot, committer, request)
+            .await
+            .map(|value| value.to_string())
+            .map_err(|message| control::Error {
+                status: 409,
+                message,
+            });
+        let (outcome, code) = match &reply {
+            Ok(_) => ("completed", 200),
+            Err(failure) => ("failed", failure.status),
+        };
+        if let Err(failure) = record_audit(&app, &access, "move", &name, outcome, code).await {
+            log_error!("move result audit failed: {failure}");
+        }
+        app.operations.complete(&operation_id, reply, 200);
+    });
+    let location = format!("/api/operations/{id}");
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location.clone())],
+        Json(json!({"operation_id":id,"status":"pending","poll":location})),
+    )
+        .into_response()
+}
+/// Cancel the running move of a server before its commit; the move's
+/// operation then fails and the server stays on its old node.
+async fn cancel_move(
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(failure) = payload(body, &[]) {
+        return failure.into_response();
+    }
+    match crate::moving::cancel(&name) {
+        Ok(value) => Json(value).into_response(),
+        Err(message) => error(StatusCode::CONFLICT, message),
+    }
+}
 async fn instance_result(
     State(app): State<App>,
     Extension(access): Extension<Access>,
@@ -2535,7 +2657,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/cluster","POST /api/nodes/warm","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/cluster","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

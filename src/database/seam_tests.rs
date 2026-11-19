@@ -31,7 +31,11 @@ fn alex() -> Uuid {
 /// A memory database with every component's tables, as startup creates
 /// them, and the authority that watches its permission tables.
 fn prepared() -> (Arc<Database>, Authority) {
-    let database = Arc::new(Database::memory());
+    prepared_on(Arc::new(Database::memory()))
+}
+
+/// [`prepared`] on `database`, which may live on a server.
+fn prepared_on(database: Arc<Database>) -> (Arc<Database>, Authority) {
     let authority =
         Authority::open_at(database.clone(), &PermissionsConfig::default(), NOW).unwrap();
     Store::new(database.clone()).unwrap();
@@ -90,6 +94,19 @@ fn operations() -> Vec<Operation> {
         Operation::Instances(InstanceOp::SetNodeSchedule {
             node: "node1".into(),
             schedule: "cordoned".into(),
+        }),
+        Operation::Instances(InstanceOp::SetMovedServer {
+            name: "lobby".into(),
+            configured_node: String::new(),
+            configured_backend: "127.0.0.1:25566".into(),
+            node: "node1".into(),
+            port: 30001,
+        }),
+        Operation::Instances(InstanceOp::PruneMovedServers {
+            keep: vec!["lobby".into()],
+        }),
+        Operation::Instances(InstanceOp::ForgetMovedServer {
+            name: "lobby".into(),
         }),
         write(PermBody::Change {
             change: PermChange::CreateGroup {
@@ -160,6 +177,39 @@ fn operations_and_outcomes_round_trip_through_serde() {
     );
     let json = serde_json::to_string(&failed).unwrap();
     assert_eq!(serde_json::from_str::<Outcome>(&json).unwrap(), failed);
+}
+
+/// The default executor runs every operation on a server database too
+/// (PostgreSQL or MariaDB), commits it and calls the hooks of its tables.
+#[test]
+fn operations_run_locally_on_a_server() {
+    let Some(location) = test_server_or_skip("operations_run_locally_on_a_server") else {
+        return;
+    };
+    let (database, _authority) = prepared_on(Arc::new(Database::connect(&location).unwrap()));
+    let changes = Arc::new(AtomicUsize::new(0));
+    let counted = changes.clone();
+    let hook = database.on_change(&["group_states"], move |_, change| {
+        assert!(!change.reload);
+        counted.fetch_add(1, Ordering::SeqCst);
+    });
+    for operation in operations() {
+        let outcome = database.run(operation).unwrap();
+        assert!(!outcome.failed(), "{outcome:?}");
+    }
+    // SetGroupState and PruneGroupStates.
+    assert_eq!(changes.load(Ordering::SeqCst), 2);
+    // A failure rolls back and calls no hook.
+    let failed = database
+        .run(Operation::Instances(InstanceOp::SetGroupState {
+            group: "games".into(),
+            suspended: true,
+            mode: "paused".into(),
+        }))
+        .unwrap();
+    assert!(failed.failed());
+    assert_eq!(changes.load(Ordering::SeqCst), 2);
+    database.remove_hook(hook);
 }
 
 #[test]

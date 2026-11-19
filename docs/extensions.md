@@ -242,8 +242,8 @@ storage = { database = true }            -- the instance database
 - `path` is a bundled-SQLite file that one Rift locks while it runs; see
   [the storage file](host-services.md#the-storage-file).
 - `database = true` keeps the entries in the table `extension_entries` of the
-  [instance database](database.md): the SQLite file `instance_database` or
-  PostgreSQL (`rift.config.database`). A deployment on PostgreSQL then needs
+  [instance database](database.md): the SQLite file `instance_database`,
+  PostgreSQL or MariaDB (`rift.config.database`). A deployment on a server then needs
   no SQLite file at all, and the database's backups cover the store. It needs
   a configuration file, which is what makes Rift open the instance database.
 - Limits, quotas, validation and the commit rules are the same for both.

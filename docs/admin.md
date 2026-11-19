@@ -75,11 +75,17 @@ Prefix each command with `rift admin`.
 | `groups` | `servers` | Lists [service groups](service-groups.md) |
 | `create <group>` | `servers` | Allocates a port and registers a stopped backend in the group |
 | `remove <instance>` | `servers` | Removes an instance after child cleanup; refuses while it has players or pending attachments |
-| `move <instance> <node> [--keep-source] [--no-copy]` | `servers` | [Moves a persistent instance](nodes.md#move-a-persistent-instance-to-another-node) and its folder to another node; returns when the move has finished |
+| `move <server> <node> [--keep-source] [--no-copy]` | `servers` | [Moves a persistent instance or a named server](nodes.md#move-a-persistent-instance-to-another-node) and its folder to another node; returns when the move has finished |
+| `move <server> --cancel` | `servers` | [Cancels a running move](nodes.md#interrupted-and-cancelled-moves) before its commit; the server stays on its old node |
+| `backup <instance>` | `servers` | Takes a [backup](backups.md) snapshot of a persistent instance on a node now |
+| `backups [instance]` | `servers` | Lists the backed-up instances, or one instance's snapshots |
+| `backups forget <instance> <snapshot>\|all` | `servers` | Deletes snapshots and the files only they used |
+| `restore <instance> [snapshot] [--node <node>]` | `servers` | [Restores an instance](backups.md#restore-an-instance) from its newest or a given snapshot, in place or onto another node; returns when it has finished |
 | `group start <group>`, `group stop <group>` | `servers` | Starts or stops a [whole group](service-groups.md#start-stop-and-dev-mode-for-a-whole-group) |
 | `group mode <group> active\|dev` | `servers` | Sets the group's mode |
 | `nodes` | `servers` | Lists [node agents](nodes.md) |
 | `node cordon <node>`, `node drain <node>`, `node uncordon <node>` | `servers` | [Takes a node out of service](nodes.md#take-a-node-out-of-service) or returns it |
+| `node plan [--spread <percent>]` | `servers` | [Suggests moves](nodes.md#even-out-the-nodes) that even out memory across nodes; moves nothing |
 | `templates` | `servers` | Lists templates and git template sources with their cache and sync state |
 | `download <template> [refresh]` | `servers` | Downloads a template's [server software](templates.md#download-server-software-automatically) ahead of time; `refresh` replaces the cached jar |
 | `sync <template-source>` | `servers` | Pulls new commits of a [git template source](templates.md#template-folders-from-git) |

@@ -1,5 +1,5 @@
 //! `rift database copy`: move the instance database between the SQLite file
-//! and PostgreSQL.
+//! and a server (PostgreSQL or MariaDB).
 use rift::{
     config::Config,
     database::{Database, Location},
@@ -11,10 +11,10 @@ use std::{
 };
 
 pub const USAGE: &str = "Usage: rift database copy [--from <file> | --to <file>] [--replace] [config]\n\
-    Copies every Rift table between a SQLite instance database and the PostgreSQL\n\
-    database that rift.config.database configures (default config ./rift.lua).\n\
-    --from <file>  copy from this SQLite file (default: instance_database) into PostgreSQL\n\
-    --to <file>    copy from PostgreSQL into this SQLite file, to move back\n\
+    Copies every Rift table between a SQLite instance database and the PostgreSQL or\n\
+    MariaDB database that rift.config.database configures (default config ./rift.lua).\n\
+    --from <file>  copy from this SQLite file (default: instance_database) into the server\n\
+    --to <file>    copy from the server into this SQLite file, to move back\n\
     --replace      overwrite a target that already holds data\n\
     Stop Rift first: both databases are opened exclusively.";
 
@@ -67,20 +67,20 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
     let config_path = config_path.unwrap_or_else(|| PathBuf::from(crate::DEFAULT_CONFIG_PATH));
     let config = Config::load_unrestored(&config_path)?;
-    let Some(mut postgres) = config.database.clone() else {
+    let Some(mut server) = config.database.clone() else {
         return Err(invalid(format!(
-            "{}: rift.config.database does not select backend = \"postgres\"; configure the PostgreSQL database to copy to or from",
+            "{}: rift.config.database does not select backend = \"postgres\" or \"mariadb\"; configure the server database to copy to or from",
             config_path.display()
         )));
     };
     // A copy never waits for a running Rift.
-    postgres.standby = false;
-    let postgres = Location::Postgres(postgres);
+    server.standby = false;
+    let server = Location::Server(server);
     let (source, target) = match to {
-        Some(file) => (postgres, Location::Sqlite(file)),
+        Some(file) => (server, Location::Sqlite(file)),
         None => (
             Location::Sqlite(from.unwrap_or_else(|| config.instance_database.clone())),
-            postgres,
+            server,
         ),
     };
     if let Location::Sqlite(path) = &source

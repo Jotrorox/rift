@@ -14,6 +14,13 @@ and are listed under **SDKs**.
 
 ### Added
 
+- `rift admin node plan` suggests moves that even out memory across nodes,
+  from their `memory_mb` and the host memory their agents measure. Each move
+  is a `rift admin move` command that passes the checks of a real move, with
+  the players who would have to leave; `--spread <percent>` sets how far
+  apart nodes may be (20 points by default). It only suggests: Rift still
+  never moves a server on its own. Also at `GET /api/nodes/plan`. See
+  [docs/nodes.md](docs/nodes.md#even-out-the-nodes).
 - The instance database can live in PostgreSQL instead of the SQLite file:
   `rift.config.database = { backend = "postgres" }` with the connection URL in
   `RIFT_DATABASE_URL` (or `url_env`), optional `ca` for TLS and `schema` to
@@ -26,8 +33,30 @@ and are listed under **SDKs**.
   back, and `rift check --strict` checks a PostgreSQL database read-only. See
   [docs/database.md](docs/database.md).
 - `extensions.storage = { database = true }` keeps the extension store in the
-  instance database (SQLite or PostgreSQL) instead of a file of its own.
-
+  instance database (SQLite, PostgreSQL or MariaDB) instead of a file of its
+  own.
+- MariaDB (10.5 or newer) works as the instance database too:
+  `rift.config.database = { backend = "mariadb" }` with a `mariadb://` URL in
+  `RIFT_DATABASE_URL`. It supports the same settings and features as
+  PostgreSQL: TLS with `require_ssl=true` or `ca`, `schema` naming a database
+  on the server, one owner at a time through a named lock with
+  `standby = true` for a waiting second controller, `rift database copy` to
+  and from SQLite, and `rift check --strict`. See
+  [docs/database.md](docs/database.md#use-mariadb).
+- Built-in backups of persistent instances on nodes. With
+  `rift.config.backups` set, Rift snapshots each such instance every
+  `interval_ms` (6 hours by default) into a folder on the proxy host or an S3
+  bucket (`backups.s3`, also MinIO, R2 and other S3-compatible services) and
+  keeps the newest `keep` snapshots. Files are stored by SHA-256, so after the
+  first snapshot only changed files are uploaded. A running server's world is
+  flushed with `save-off` and `save-all flush` and copied on its node first,
+  so saving pauses only for that local copy. `rift admin backup <instance>`
+  takes a snapshot now, `rift admin backups [instance]` lists them,
+  `rift admin backups forget` deletes them, and
+  `rift admin restore <instance> [snapshot] [--node <node>]` restores an
+  instance in place or onto another node, which recovers the instances of a
+  dead node in one command. Agents need the new `backup` feature: upgrade them
+  together with the controller. See [backups](docs/backups.md).
 - `tab_list.names = "all"` gives the entries backends list themselves the
   same rank names and order as Rift's own entries for players on other
   servers, so a backend without a tab plugin (such as Pumpkin) shows
@@ -42,6 +71,28 @@ and are listed under **SDKs**.
   node died; `--keep-source` keeps the old folder. Instances never move
   automatically. Both agents must advertise the new `move` feature: upgrade them
   together with the controller.
+- `rift admin move <server> <node>` also moves named servers of
+  `managed_servers`, folder included. The server keeps its port, and the move
+  is refused when that port is taken on the new node. The configuration file
+  is not edited: the instance database remembers the new node and backend
+  across reloads and restarts until the configuration changes the server's
+  `node` or backend, for example to the new values. `rift admin servers`
+  shows the node the configuration still names as `configured_node`. See
+  [docs/nodes.md](docs/nodes.md#move-a-named-server).
+- Moves can be started and followed from the dashboard: servers on nodes have
+  a Move button that asks for the new node, and the server list shows the
+  copy's progress, rate and time left, with a button to cancel it. The web API
+  has `POST /api/servers/{name}/move` (an operation to poll) and
+  `DELETE /api/servers/{name}/move` to cancel, and `/api/servers` and
+  `rift admin servers` report a running move under `move`.
+  `rift admin move <server> --cancel` cancels from the command line.
+- An interrupted move resumes instead of starting over. When a copy fails,
+  is cancelled or the proxy stops during it, the files that arrived stay on
+  the new node, and the next move of the same server to that node sends only
+  the files that are missing or changed since; it recognises a copied file by
+  its size and modification time, which moved files now keep. What the source
+  deleted meanwhile is dropped. Both agents need the new `move_resume`
+  feature; with older agents a move starts over as before.
 
 ### Nodes
 
@@ -95,7 +146,8 @@ and are listed under **SDKs**.
 - `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
   have every node download its groups' templates and server software ahead of
   time, so the first instance on a new or freshly synced node starts without
-  waiting. Agents need the same version as the controller for it.
+  waiting. Agents need the new `warm` feature; the controller tells older
+  agents to upgrade instead of sending the command.
 
 ### Integration and operations
 
@@ -110,6 +162,9 @@ and are listed under **SDKs**.
   ignore it.
 - New component `extension_store` (table `extension_entries`), created only
   with `extensions.storage = { database = true }`. Older releases ignore it.
+- New component `moved_servers`, schema 1: where `rift admin move` put named
+  servers. Older releases ignore it and run those servers where the
+  configuration says, without their folder there.
 
 ## [0.1.0] - 2026-11-16
 

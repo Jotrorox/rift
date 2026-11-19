@@ -50,6 +50,7 @@ pub(super) fn schema_sql(dialect: Dialect, _from: u32) -> String {
     match dialect {
         Dialect::Sqlite => store::SCHEMA.into(),
         Dialect::Postgres => store::POSTGRES_SCHEMA.into(),
+        Dialect::Mariadb => store::MARIADB_SCHEMA.into(),
     }
 }
 

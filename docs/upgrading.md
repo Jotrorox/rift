@@ -67,6 +67,48 @@ Local managed servers stop with Rift, after the drain. Servers with
 
 Preserve `admin.env` securely when changing its format or secret.
 
+## Upgrade nodes
+
+With [nodes](nodes.md), upgrade the controller first and then the agents, one
+node at a time. The controller checks each agent's features before it uses
+them, so a new controller runs older agents and only refuses what they lack.
+An older controller would not know about a newer agent's features. The
+[version skew policy](stability.md#controller-and-node-agents) lists the
+supported combinations.
+
+1. Upgrade the controller as above. Agents reconnect by themselves and their
+   servers keep running. `rift admin nodes` and the dashboard's Nodes panel
+   flag each agent as `version_mismatch` until it is upgraded. An operation
+   that needs a feature the agent lacks is refused on that node, with a
+   message that says so.
+2. Upgrade each node in turn. Restarting the agent stops its servers
+   (`KillMode=control-group`), so drain the node first:
+
+   ```sh
+   # On the controller: no new instances, disposable games empty out.
+   rift admin node drain node2
+   rift admin nodes                     # wait for "drained": true
+   rift admin stop survival             # persistent instances and named servers, if any
+   # On the node, with the verified release extracted as for the controller:
+   sudo install -m 0755 ./rift /usr/local/bin/rift
+   sudo systemctl restart rift-node
+   sudo journalctl -u rift-node -n 50 --no-pager
+   # On the controller: version matches, nothing missing.
+   rift admin nodes                     # "version_mismatch": false, "missing_features": []
+   rift admin start survival
+   rift admin node uncordon node2
+   ```
+
+   A server that is not stopped first is restarted by the controller once
+   the agent is back, but its players are disconnected.
+3. Once every node is done, run `rift check --strict` against the controller.
+   It reports agents that would still refuse servers in the configuration.
+
+Agents keep no database, so they need no backup. To roll back within the same
+minor release, the controller can go back on its own. To roll back across a
+minor release, roll back the agents as well: an older controller does not
+support agents from a newer minor release.
+
 ## Roll back
 
 If validation, startup or the client check fails, restore the matched binary,
@@ -98,8 +140,9 @@ start, and there is no downgrade.
 - Where the path differs, use the configured `instance_database`. The `.lock`
   file beside it holds no data and needs no backup.
 - The [changelog](../CHANGELOG.md) names each release that changes the schema.
-- With the instance database in [PostgreSQL](database.md), take a `pg_dump`
-  instead (it works while Rift runs); rolling back means restoring it.
+- With the instance database in [PostgreSQL or MariaDB](database.md), take a
+  `pg_dump` or `mariadb-dump --single-transaction` instead (it works while
+  Rift runs); rolling back means restoring it.
 
 ## Upgrade a container
 

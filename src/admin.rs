@@ -526,7 +526,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
             "start" | "stop" | "groups" | "group" | "create" | "remove" | "move" | "templates"
-            | "download" | "sync" | "warm" | "nodes" | "node",
+            | "download" | "sync" | "warm" | "nodes" | "node" | "backup" | "backups" | "restore",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -584,6 +584,13 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
                 "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
                 "moving": server.moving,
+                // Phase and progress while `rift admin move` runs.
+                "move": crate::moving::describe(&server.name),
+                // Set while `rift admin move` overrides the configuration.
+                "configured_node": config
+                    .moved_servers
+                    .get(&server.name)
+                    .map(|moved| &moved.configured_node),
                 "address": address,
                 "port": address
                     .and_then(|address| address.parse::<SocketAddr>().ok())
@@ -804,6 +811,22 @@ pub(crate) async fn warm_templates(
                 }
             }
         }
+        // An agent without the feature would refuse the command; say why
+        // instead. A node that never connected fails as unreachable below.
+        let warm_feature = [rift::node::protocol::Requirement {
+            feature: rift::node::protocol::feature::WARM,
+            mandatory: true,
+        }];
+        if !command.is_empty() && !snapshot.nodes.lacking(&node, &warm_feature).is_empty() {
+            let error = format!(
+                "the agent on {node} cannot warm templates; upgrade rift on that node to {}",
+                env!("CARGO_PKG_VERSION")
+            );
+            work.spawn(async move {
+                json!({"node": node, "ok": false, "error": error, "templates": results})
+            });
+            continue;
+        }
         let nodes = snapshot.nodes.clone();
         work.spawn(async move {
             if !command.is_empty() {
@@ -813,14 +836,7 @@ pub(crate) async fn warm_templates(
                 match nodes.request(&node, &warm, DOWNLOAD_DEADLINE).await {
                     Ok(reply) => results.extend(reply["templates"].as_array().cloned().unwrap_or_default()),
                     Err(error) => {
-                        let error = if error.kind() == io::ErrorKind::InvalidInput
-                            && error.to_string().contains("unknown variant")
-                        {
-                            format!("the agent on {node} is older than the controller; upgrade it")
-                        } else {
-                            error.to_string()
-                        };
-                        return json!({"node": node, "ok": false, "error": error, "templates": results});
+                        return json!({"node": node, "ok": false, "error": error.to_string(), "templates": results});
                     }
                 }
             }
@@ -925,6 +941,10 @@ pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Resu
 /// plugin name, or the command alone.
 pub(crate) fn audited(args: &[String]) -> (String, String) {
     match args {
+        // A plan changes nothing and names no node.
+        [command, action, ..] if command == "node" && action == "plan" => {
+            ("node plan".into(), String::new())
+        }
         [command, action, rest @ ..]
             if command == "plugins" || command == "group" || command == "node" =>
         {
@@ -933,7 +953,12 @@ pub(crate) fn audited(args: &[String]) -> (String, String) {
                 rest.first().cloned().unwrap_or_default(),
             )
         }
-        [command, instance, ..] if command == "move" => (command.clone(), instance.clone()),
+        [command, action, instance, ..] if command == "backups" && action == "forget" => {
+            (format!("{command} {action}"), instance.clone())
+        }
+        [command, instance, ..] if matches!(command.as_str(), "move" | "backup" | "restore") => {
+            (command.clone(), instance.clone())
+        }
         [command, ..] => (command.clone(), String::new()),
         [] => (String::new(), String::new()),
     }
@@ -986,9 +1011,21 @@ pub(crate) async fn execute(
                 .map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        [command, rest @ ..] if command == "move" => {
-            let request = crate::moving::Request::parse(rest)?;
-            crate::moving::run(snapshot, commands, request).await
+        [command, rest @ ..] if command == "move" => match crate::moving::Command::parse(rest)? {
+            crate::moving::Command::Move(request) => {
+                crate::moving::run(snapshot, crate::moving::Committer::Admin(commands), request).await
+            }
+            crate::moving::Command::Cancel(instance) => crate::moving::cancel(&instance),
+        },
+        [command, instance] if command == "backup" => crate::backups::backup_now(snapshot, instance).await,
+        [command] if command == "backups" => crate::backups::list(snapshot, None).await,
+        [command, action, instance, which] if command == "backups" && action == "forget" => {
+            crate::backups::forget(snapshot, instance, which).await
+        }
+        [command, instance] if command == "backups" => crate::backups::list(snapshot, Some(instance)).await,
+        [command, rest @ ..] if command == "restore" => {
+            let request = crate::backups::Restore::parse(rest)?;
+            crate::backups::restore(snapshot, commands, request).await
         }
         [command, backend] if command == "start" || command == "stop" => {
             managed_backend(&snapshot, backend).map_err(|error| error.to_string())?;
@@ -1040,6 +1077,9 @@ pub(crate) async fn execute(
         [command, action, group, mode] if command == "group" && action == "mode" => {
             crate::groups::set_mode(&snapshot, group, mode).map_err(|error| error.message)
         }
+        [command, action, rest @ ..] if command == "node" && action == "plan" => {
+            crate::rebalance::parse(rest).map(|spread| crate::rebalance::plan(&snapshot, spread))
+        }
         [command, action, node] if command == "node" => {
             crate::cordon::apply(&snapshot, node, action).map_err(|error| error.message)
         }
@@ -1052,7 +1092,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <instance> <node> [--no-copy] [--keep-source] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | cluster [<command>] | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | move <server> <node> [--no-copy] [--keep-source] | move <server> --cancel | backup <instance> | backups [instance] | backups forget <instance> <snapshot>|all | restore <instance> [snapshot] [--node <node>] | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | node cordon|drain|uncordon <node> | node plan [--spread <percent>] | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | cluster [<command>] | reload | shutdown".into()),
     }
 }
 
@@ -1118,6 +1158,9 @@ pub async fn serve(
                                     if args.first().is_some_and(|command| command == "move") {
                                         deadline += crate::moving::DEADLINE;
                                     }
+                                    if matches!(args.first().map(String::as_str), Some("backup" | "backups" | "restore")) {
+                                        deadline += crate::backups::DEADLINE;
+                                    }
                                     if let [command, name] = args.as_slice()
                                         && command == "remove"
                                         && let Some(server) = snapshot.config.managed_servers.get(name)
@@ -1165,7 +1208,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <instance> <node> [--no-copy] [--keep-source]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|cluster [<command>]|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|move <server> <node> [--no-copy] [--keep-source]|move <server> --cancel|backup <instance>|backups [instance]|backups forget <instance> <snapshot>|all|restore <instance> [snapshot] [--node <node>]|start <backend>|stop <backend>|node cordon|drain|uncordon <node>|node plan [--spread <percent>]|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|cluster [<command>]|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -1208,7 +1251,17 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "transfer" | "remove" | "create" | "move" | "download" | "sync" | "warm" | "cluster"
+            "transfer"
+                | "remove"
+                | "create"
+                | "move"
+                | "download"
+                | "sync"
+                | "warm"
+                | "backup"
+                | "backups"
+                | "restore"
+                | "cluster"
         )
     }) {
         Duration::from_secs(24 * 60 * 60 + 45)

@@ -20,6 +20,7 @@ extern crate rift;
 
 mod admin;
 mod admission;
+mod backups;
 mod bungee_runtime;
 mod check;
 mod control;
@@ -35,6 +36,7 @@ mod moving;
 mod network;
 mod node_init;
 mod operator;
+mod rebalance;
 mod runtime;
 mod scaling;
 mod status;
@@ -68,7 +70,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     rift dev [options] (development proxy for plugin authors; see rift dev --help)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift node init <name> [--address <host>] (print a node's token, systemd unit and setup checks; see rift node init --help)\n\
-    rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL; see rift database --help)\n\
+    rift database copy [--from <file> | --to <file>] [--replace] [path] (copy the instance database between SQLite and PostgreSQL or MariaDB; see rift database --help)\n\
     rift cluster init|recover [options] (create or recover a cluster of several proxies; see rift cluster --help)\n\
     rift witness [--config <path>] (run this host as a cluster witness; see docs/clustering.md)\n\
     rift --version (print package version)\n\

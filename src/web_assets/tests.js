@@ -411,6 +411,75 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("server-result").textContent.includes("read-only"), "Asynchronous cleanup error missing");
     assert(h.element("server-result").className.includes("warning"), "Asynchronous cleanup error presented as success");
   });
+  await test("persistent servers on nodes move from the dashboard with progress, cancel and resume", async () => {
+    const h = fixture(appSource); await flush();
+    let operation = 0, outcome = { status: "pending" }, posted = null, cancelled = 0;
+    h.model.status.nodes = [{ name: "node1", state: "online", schedule: "active" }, { name: "node2", state: "online", schedule: "active" },
+      { name: "node3", state: "unreachable", schedule: "active" }];
+    h.model.status.managed_servers = [
+      { name: "survival-1", group: "survival", storage: "persistent", state: "running", players: 0, reservations: 0, node: "node1" },
+      { name: "arena-1", group: "arena", storage: "disposable", state: "running", node: "node1" },
+      { name: "lobby", storage: "persistent", state: "running", node: "local" },
+    ];
+    h.model.intercept = (path, options) => {
+      if (path === "/api/servers/survival-1/move" && options.method === "POST") {
+        posted = JSON.parse(options.body); operation += 1; outcome = { status: "pending" };
+        return h.response({ operation_id: `move-${operation}`, status: "pending", poll: `/api/operations/move-${operation}` }, 202);
+      }
+      if (path === "/api/servers/survival-1/move" && options.method === "DELETE") { cancelled += 1; return h.response({ server: "survival-1", cancelling: true }); }
+      if (path === `/api/operations/move-${operation}`) return h.response(outcome);
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    let rows = h.element("managed-servers").children;
+    assert(rows[0].children[9].children[3].textContent === "Move…", "Move button missing");
+    assert(rows[1].children[9].children.length === 3 && rows[2].children[9].children.length === 2, "Only persistent servers on nodes can move");
+    await rows[0].children[9].children[3].emit("click"); await flush();
+    assert(!h.element("move-panel").hidden, "Move form did not open");
+    const options = h.element("move-node").children;
+    assert(options.map((option) => option.value).join() === "node2,node3", "The current node was offered");
+    assert(options[1].disabled && options[1].textContent.includes("unreachable"), "An unreachable node was selectable");
+    assert(h.element("move-node").value === "node2" && !h.element("move-start").disabled, "The online node was not chosen");
+    h.element("move-keep-source").checked = true;
+    await h.element("move-form").emit("submit"); await flush();
+    assert(posted.node === "node2" && posted.keep_source === true, `Move request wrong: ${JSON.stringify(posted)}`);
+    assert(h.element("move-panel").hidden && h.element("server-result").textContent.includes("Moving survival-1 to node2"), "Move start not reported");
+    // The list shows the copy while it runs, and offers to cancel it.
+    h.model.status.managed_servers[0].move = { from: "node1", to: "node2", phase: "copying", copy: true, cancelling: false,
+      bytes: 1048576, reused_bytes: 524288, total_bytes: 4194304, total_files: 10 };
+    await h.element("refresh-status").emit("click"); await flush();
+    rows = h.element("managed-servers").children;
+    const [bar, label] = rows[0].children[1].children[0].children;
+    assert(bar.value === 1048576 && bar.max === 4194304, "Progress bar wrong");
+    assert(label.textContent.includes("1.0 MiB of 4.0 MiB (25%)") && label.textContent.includes("512 KiB kept"), `Progress wrong: ${label.textContent}`);
+    const cancel = rows[0].children[9].children[3];
+    assert(cancel.textContent === "Cancel move" && !cancel.disabled, "Cancel missing");
+    await cancel.emit("click"); await flush();
+    assert(cancelled === 1 && h.element("server-result").textContent.includes("Cancelling"), "Cancel not sent");
+    outcome = { status: "failed", http_status: 409, error: "the move of survival-1 to node node2 was cancelled; survival-1 stays on node node1" };
+    delete h.model.status.managed_servers[0].move;
+    await h.advance(2000);
+    assert(h.element("server-result").textContent.includes("was cancelled") && h.element("server-result").className.includes("warning"), "Cancelled move not reported as a warning");
+    // Committing moves can no longer be cancelled.
+    h.model.status.managed_servers[0].move = { from: "node1", to: "node2", phase: "committing", copy: true, bytes: 4194304, total_bytes: 4194304 };
+    await h.element("refresh-status").emit("click"); await flush();
+    rows = h.element("managed-servers").children;
+    assert(rows[0].children[9].children[3].disabled && rows[0].children[1].children[0].children[1].textContent.includes("Finishing"), "Committing move still cancellable");
+    // Moving again resumes, and the outcome says what was kept.
+    delete h.model.status.managed_servers[0].move;
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[9].children[3].emit("click"); await flush();
+    assert(!h.element("move-keep-source").checked, "Keep source carried over");
+    await h.element("move-form").emit("submit"); await flush();
+    outcome = { status: "succeeded", result: { node: "node2", copied: { bytes: 3145728, reused_bytes: 1048576 } } };
+    await h.advance(2000);
+    assert(h.element("server-result").textContent.includes("Moved survival-1 to node2 (3.0 MiB copied, 1.0 MiB kept from an earlier attempt)"), `Outcome wrong: ${h.element("server-result").textContent}`);
+    assert(h.element("server-result").className.includes("success"), "Move outcome not a success");
+    // Refusals keep the form open with the reason.
+    await h.element("managed-servers").children[0].children[9].children[3].emit("click"); await flush();
+    h.model.intercept = (path) => path === "/api/servers/survival-1/move" ? h.response({ error: "node node2 already runs its max_instances (1) servers" }, 409) : null;
+    await h.element("move-form").emit("submit"); await flush();
+    assert(!h.element("move-panel").hidden && h.element("move-result").textContent.includes("max_instances"), "Refusal not shown in the form");
+  });
   await test("occupied, reserved and removing instances disable removal", async () => {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [

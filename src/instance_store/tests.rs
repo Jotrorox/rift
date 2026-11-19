@@ -705,6 +705,62 @@ fn node_schedules_persist_and_active_removes_the_row() {
 }
 
 #[test]
+fn moved_named_servers_persist_until_the_configuration_changes_them() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    assert!(store.moved_servers().unwrap().is_empty());
+    let source = |node: &str, backend: &str| {
+        format!(
+            "rift.config.listeners.public='127.0.0.1:0'
+rift.config.backends.survival='{backend}'
+rift.config.routes.public='survival'
+rift.config.messaging={{listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}}
+rift.config.nodes.node1={{address='10.0.0.11'}}
+rift.config.nodes.node2={{address='10.0.0.12'}}
+rift.config.managed_servers.survival={{node='{node}',directory='survival',command={{'java'}}}}"
+        )
+    };
+    let load = |source: &str| Config::from_lua_at(source, &fixture.root.join("rift.lua")).unwrap();
+    let mut moved = load(&source("node1", "10.0.0.11:25570"));
+    moved.move_named_server("survival", "node2").unwrap();
+    let entry = moved.moved_servers.get("survival");
+    assert!(entry.is_some());
+    store.set_moved_server("survival", entry).unwrap();
+    store.set_moved_server("survival", entry).unwrap();
+    drop(store);
+
+    // A restart puts the server where it moved.
+    let store = fixture.store();
+    assert_eq!(store.moved_servers().unwrap(), moved.moved_servers);
+    let mut restored = load(&source("node1", "10.0.0.11:25570"));
+    store.restore(&mut restored).unwrap();
+    assert_eq!(
+        restored.managed_servers["survival"].node.as_deref(),
+        Some("node2")
+    );
+    assert_eq!(restored.backends["survival"].address(), "10.0.0.12:25570");
+    assert_eq!(restored.moved_servers, moved.moved_servers);
+    assert_eq!(store.moved_servers().unwrap(), moved.moved_servers);
+
+    // Once the configuration names the new node, the move is forgotten.
+    let mut updated = load(&source("node2", "10.0.0.12:25570"));
+    store.restore(&mut updated).unwrap();
+    assert!(updated.moved_servers.is_empty());
+    assert!(store.moved_servers().unwrap().is_empty());
+
+    store.set_moved_server("survival", entry).unwrap();
+    store.retain_moved_servers(&moved.moved_servers).unwrap();
+    assert_eq!(store.moved_servers().unwrap().len(), 1);
+    store.retain_moved_servers(&BTreeMap::new()).unwrap();
+    assert!(store.moved_servers().unwrap().is_empty());
+    store.set_moved_server("survival", entry).unwrap();
+    store.set_moved_server("survival", None).unwrap();
+    assert!(store.moved_servers().unwrap().is_empty());
+    let connection = store.database().lock();
+    assert_eq!(database::version(&connection, "moved_servers").unwrap(), 1);
+}
+
+#[test]
 fn every_creation_of_a_name_gets_a_new_login_generation() {
     let fixture = Fixture::new("persistent");
     let store = fixture.store();
@@ -725,8 +781,8 @@ fn every_creation_of_a_name_gets_a_new_login_generation() {
 }
 
 #[test]
-fn the_instance_registry_works_on_postgres() {
-    let Some(location) = database::test_postgres_or_skip("the_instance_registry_works_on_postgres")
+fn the_instance_registry_works_on_a_server() {
+    let Some(location) = database::test_server_or_skip("the_instance_registry_works_on_a_server")
     else {
         return;
     };
@@ -736,7 +792,7 @@ fn the_instance_registry_works_on_postgres() {
         DatabaseCheck::Missing
     );
     let store = Store::new(Arc::new(Database::connect(&location).unwrap())).unwrap();
-    assert_eq!(store.database().dialect(), Dialect::Postgres);
+    assert_ne!(store.database().dialect(), Dialect::Sqlite);
     assert!(store.database().path().is_none());
     assert_eq!(
         Store::check(&location, &fixture.config()).unwrap(),

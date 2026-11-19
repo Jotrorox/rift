@@ -79,7 +79,7 @@ exactly once.
 
 | Concern | Today (one process) | In a cluster |
 | --- | --- | --- |
-| Durable state | SQLite file or PostgreSQL, one writer | A SQLite replica on every peer, changed only by applying the Raft log |
+| Durable state | SQLite file, PostgreSQL or MariaDB, one writer | A SQLite replica on every peer, changed only by applying the Raft log |
 | Writes | A closure under the connection lock | A typed operation, executed by the leader; the resulting changeset is replicated |
 | Online players | `PlayerRegistry`, in memory | Name and UUID **claims** in the log; player attributes broadcast between peers |
 | Duplicate logins | Checked in process | Decided by applying a claim, so exactly one peer wins |
@@ -268,6 +268,8 @@ their memory:
 
 - group states and node schedules (`src/runtime.rs`, `serve`);
 - registered instances in `Config.instances` (`src/instance_store.rs`);
+- named servers that `rift admin move` moved, in `Config.moved_servers`
+  (`src/instance_store.rs`);
 - the permission authority's groups, revision and compiled cache
   (`src/permissions/authority.rs`);
 - the key-value mirror (`src/extensions/storage.rs`).
@@ -347,9 +349,10 @@ kicked by its owning peer when the ban applies.
 
 > [!IMPORTANT]
 > A cluster uses the replicated SQLite backend. `database.backend =
-> "postgres"` with a [standby](database.md#standby-controllers) stays
-> available for networks that want one active proxy; combining it with
-> `cluster` is a configuration error (decision 5).
+> "postgres"` or `"mariadb"` with a
+> [standby](database.md#standby-controllers) stays available for networks
+> that want one active proxy; combining either with `cluster` is a
+> configuration error (decision 5).
 
 ## Players
 
@@ -578,7 +581,9 @@ through.
 Some work must happen exactly once in the network. It runs on the current
 Raft leader and nowhere else:
 
-- the scaler (`src/scaling.rs`), instance creation, removal and moves;
+- the scaler (`src/scaling.rs`), instance creation, removal and moves
+  (including resumed copies and moves of named servers);
+- scheduled backups of persistent instances (`src/backups.rs`) and restores;
 - managed server and instance lifecycle: starting, stopping, idle stops,
   restart retries and recovery;
 - node control commands and node schedules (cordon, drain);
@@ -794,7 +799,7 @@ downgrading means restoring a backup, as for a single Rift today.
    instance database, moves `deployments.json`, `audit.jsonl`, the bus-login
    key, file-backed key-value stores and the template folders into the
    replicated store, and converts `local` registrations to this peer's node.
-   A PostgreSQL installation first runs `rift database copy --to
+   A PostgreSQL or MariaDB installation first runs `rift database copy --to
    rift.sqlite3`.
 2. Start the other peers with their `cluster.toml`, add them with `rift admin
    cluster add`, and promote the voters once they have caught up.
@@ -830,7 +835,7 @@ broker, extensions, player registry, nodes and managed servers together.
 | `src/messaging/` | Subject scopes; interest exchange and forwarding; peer-prefixed inboxes; principals on forwarded messages |
 | `crates/rift-messaging`, Java client | Address lists and failover |
 | `src/managed.rs`, `src/scaling.rs`, `src/node/` | Leader-only start; fencing; reconcile on leadership gain; stop vetoes; peers as embedded nodes |
-| `src/instance_store.rs` | Recovery as a leader task; apply hook for `Config.instances` |
+| `src/instance_store.rs` | Recovery as a leader task; apply hooks for `Config.instances` and `Config.moved_servers` |
 | `src/control.rs`, `src/operator.rs` | Deployments, history and audit as replicated entries; shared-section hashes |
 | `src/extensions/storage.rs`, `src/directory.rs`, `src/messaging/stream.rs`, `src/instance_login.rs` | Their own entry kinds; the stream service on the leader; the replicated bus-login key |
 | `src/config.rs`, `src/check.rs` | `cluster` settings, `cluster.toml`, `rift.peer`, peer and shared sections, strict checks against a running cluster |
@@ -967,12 +972,12 @@ every part of the document that depends on it.
 | Keep indefinitely | Nobody is disconnected by a partition | The majority's counts understate, so idle stops and caps misbehave; the players cannot be messaged or moved from the majority side |
 | Disconnect when fenced | Simplest; counts are true immediately | Every short network blip disconnects a whole proxy's players |
 
-### 5. PostgreSQL in clusters
+### 5. PostgreSQL or MariaDB in clusters
 
 | Option | For | Against |
 | --- | --- | --- |
-| **Never: `cluster` with `backend = "postgres"` is an error; keep standby mode** (chosen) | One replicated backend to test; no external single point of failure | Networks with highly available PostgreSQL cannot reuse it for a cluster |
-| Later, as an alternative state store | Uses an existing HA database; no Raft for durable state | A third mode of every write path; PostgreSQL becomes the availability limit again |
+| **Never: `cluster` with `backend = "postgres"` or `"mariadb"` is an error; keep standby mode** (chosen) | One replicated backend to test; no external single point of failure | Networks with highly available PostgreSQL or MariaDB cannot reuse it for a cluster |
+| Later, as an alternative state store | Uses an existing HA database; no Raft for durable state | A third mode of every write path; the database server becomes the availability limit again |
 
 ### 6. A peer whose `rift.lua` differs from the deployed revision
 

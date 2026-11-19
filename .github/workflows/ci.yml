@@ -763,6 +763,44 @@ jobs:
           database:: instance_store:: directory:: permissions:: extensions::storage::
           --test-threads=1
 
+  mariadb:
+    name: MariaDB backend
+    # The same database-backed tests as the PostgreSQL job, against MariaDB.
+    # Each test creates its own database, so the job connects as root.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: rift-ci
+          MARIADB_DATABASE: rift
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RIFT_TEST_MARIADB_URL: mariadb://root:rift-ci@127.0.0.1:3306/rift
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          shared-key: test-debug-ubuntu-24.04
+          cache-bin: false
+          # Only the debug test job saves the shared cache.
+          save-if: false
+      - name: Test the database-backed components on MariaDB
+        # Filters match module paths; config::database:: is covered by database::.
+        run: >-
+          cargo test --locked -p rift --lib --
+          database:: instance_store:: directory:: permissions:: extensions::storage::
+          --test-threads=1
+
   build-linux:
     name: Build shared Linux test executable
     runs-on: ubuntu-24.04
@@ -1252,7 +1290,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, changes, pumpkin-adapter, test, test-release, package, test-session-server, postgres, java, build-linux, minecraft, compatibility, translation, benchmark]
+    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, changes, pumpkin-adapter, test, test-release, package, test-session-server, postgres, mariadb, java, build-linux, minecraft, compatibility, translation, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

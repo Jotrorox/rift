@@ -542,7 +542,7 @@ fn mismatch(state: &NodeState) -> Option<String> {
     }
     (state.version != VERSION).then(|| {
         format!(
-            "agent {} differs from this controller {VERSION}; upgrade agents together with the controller",
+            "agent {} differs from this controller {VERSION}; finish the upgrade so both run the same release, controller first",
             state.version
         )
     })

@@ -1,11 +1,11 @@
 //! Durable instance registrations and filesystem intents, kept in the
-//! instance database (SQLite or PostgreSQL).
+//! instance database (SQLite, PostgreSQL or MariaDB).
 //!
 //! Every write is an [`InstanceOp`] run through [`Database::run`] and
 //! performed by [`execute`]. Group states and node schedules reach memory
 //! only through the apply hooks [`Store::watch_states`] registers.
 use crate::{
-    config::{Config, GroupMode, GroupState, NodeSchedule, ServiceInstance},
+    config::{Config, GroupMode, GroupState, MovedServer, NodeSchedule, ServiceInstance},
     database::{
         self, Conn, Database, Dialect, HookId, Location, OptionalExtension, Row,
         operation::{Operation, OrMessage, Outcome},
@@ -51,6 +51,22 @@ CREATE TABLE sequences (
     value TEXT COLLATE "C" NOT NULL
 );"#;
 
+/// MariaDB keys text by `VARCHAR` (names are at most 107 bytes) and needs
+/// `LONGTEXT` for definitions past 64 KiB.
+const INSTANCES_MARIADB: &str = "CREATE TABLE instances (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    node VARCHAR(255) NOT NULL DEFAULT '',
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535),
+    phase VARCHAR(16) NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
+    explicitly_stopped BIGINT NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
+    definition LONGTEXT NOT NULL,
+    UNIQUE(node, port)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE TABLE sequences (
+    group_name VARCHAR(255) PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
+
 /// Operator group state lives in its own schema component, so the
 /// `instances` schema (and a downgrade to a release without group state)
 /// is unaffected; older releases ignore the extra table.
@@ -68,6 +84,10 @@ const LOGINS_POSTGRES: &str = r#"CREATE TABLE login_generations (
     name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
     generation BIGINT NOT NULL CHECK(generation > 0)
 );"#;
+const LOGINS_MARIADB: &str = "CREATE TABLE login_generations (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    generation BIGINT NOT NULL CHECK(generation > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 /// Node schedules (cordon and drain) live in their own component too.
 const NODES_COMPONENT: &str = "node_schedules";
@@ -80,6 +100,37 @@ const NODES_POSTGRES: &str = r#"CREATE TABLE node_schedules (
     name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
     schedule TEXT COLLATE "C" NOT NULL CHECK(schedule IN ('cordoned','draining'))
 );"#;
+const NODES_MARIADB: &str = "CREATE TABLE node_schedules (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    schedule VARCHAR(16) NOT NULL CHECK(schedule IN ('cordoned','draining'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
+
+/// Where `rift admin move` put servers of `managed_servers`, in a component
+/// of its own; older releases ignore the table and run the servers where the
+/// configuration says.
+const MOVED_COMPONENT: &str = "moved_servers";
+const MOVED_SCHEMA_VERSION: u32 = 1;
+const MOVED_V1: &str = "CREATE TABLE moved_servers (
+    name TEXT PRIMARY KEY NOT NULL,
+    configured_node TEXT NOT NULL,
+    configured_backend TEXT NOT NULL,
+    node TEXT NOT NULL,
+    port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535)
+) STRICT;";
+const MOVED_POSTGRES: &str = r#"CREATE TABLE moved_servers (
+    name TEXT COLLATE "C" PRIMARY KEY NOT NULL,
+    configured_node TEXT COLLATE "C" NOT NULL,
+    configured_backend TEXT COLLATE "C" NOT NULL,
+    node TEXT COLLATE "C" NOT NULL,
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
+);"#;
+const MOVED_MARIADB: &str = "CREATE TABLE moved_servers (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    configured_node VARCHAR(255) NOT NULL,
+    configured_backend TEXT NOT NULL,
+    node VARCHAR(255) NOT NULL,
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
     name TEXT PRIMARY KEY NOT NULL,
@@ -91,12 +142,18 @@ const GROUPS_POSTGRES: &str = r#"CREATE TABLE group_states (
     suspended BIGINT NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
     mode TEXT COLLATE "C" NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
 );"#;
+const GROUPS_MARIADB: &str = "CREATE TABLE group_states (
+    name VARCHAR(255) PRIMARY KEY NOT NULL,
+    suspended BIGINT NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
+    mode VARCHAR(16) NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;";
 
-/// The DDL of a component for `dialect`.
-fn ddl(dialect: Dialect, sqlite: &str, postgres: &str) -> String {
+/// The DDL of a component for `dialect`: `[sqlite, postgres, mariadb]`.
+fn ddl(dialect: Dialect, [sqlite, postgres, mariadb]: [&str; 3]) -> String {
     match dialect {
         Dialect::Sqlite => sqlite,
         Dialect::Postgres => postgres,
+        Dialect::Mariadb => mariadb,
     }
     .to_owned()
 }
@@ -105,11 +162,12 @@ fn ddl(dialect: Dialect, sqlite: &str, postgres: &str) -> String {
 /// [`SCHEMA_VERSION`]. Version 2 stores each instance's node ('' for this
 /// host); ports are unique per node, since every node has its own port
 /// range. `user_version` keeps the version too, for Rift releases that
-/// predate `rift_schema`, so a downgrade still opens the file. PostgreSQL
+/// predate `rift_schema`, so a downgrade still opens the file. Server
 /// databases always start at the latest version.
 fn instances_sql(dialect: Dialect, from: u32) -> String {
     match (dialect, from) {
         (Dialect::Postgres, _) => INSTANCES_POSTGRES.to_owned(),
+        (Dialect::Mariadb, _) => INSTANCES_MARIADB.to_owned(),
         (Dialect::Sqlite, 0) => format!(
             "{INSTANCES_V2}
             CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
@@ -127,26 +185,31 @@ fn instances_sql(dialect: Dialect, from: u32) -> String {
 }
 
 fn groups_sql(dialect: Dialect, _from: u32) -> String {
-    ddl(dialect, GROUPS_V1, GROUPS_POSTGRES)
+    ddl(dialect, [GROUPS_V1, GROUPS_POSTGRES, GROUPS_MARIADB])
 }
 
 fn logins_sql(dialect: Dialect, _from: u32) -> String {
-    ddl(dialect, LOGINS_V1, LOGINS_POSTGRES)
+    ddl(dialect, [LOGINS_V1, LOGINS_POSTGRES, LOGINS_MARIADB])
 }
 
 fn nodes_sql(dialect: Dialect, _from: u32) -> String {
-    ddl(dialect, NODES_V1, NODES_POSTGRES)
+    ddl(dialect, [NODES_V1, NODES_POSTGRES, NODES_MARIADB])
+}
+
+fn moved_sql(dialect: Dialect, _from: u32) -> String {
+    ddl(dialect, [MOVED_V1, MOVED_POSTGRES, MOVED_MARIADB])
 }
 
 type Upgrade = fn(Dialect, u32) -> String;
 
 /// The schema components of this module, their latest versions and the SQL
 /// that creates or upgrades them, in the order startup migrates them.
-const COMPONENTS: [(&str, u32, Upgrade); 4] = [
+const COMPONENTS: [(&str, u32, Upgrade); 5] = [
     (COMPONENT, SCHEMA_VERSION, instances_sql),
     (GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, groups_sql),
     (LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, logins_sql),
     (NODES_COMPONENT, NODES_SCHEMA_VERSION, nodes_sql),
+    (MOVED_COMPONENT, MOVED_SCHEMA_VERSION, moved_sql),
 ];
 
 /// Every component of this module and the version this Rift writes.
@@ -164,6 +227,7 @@ const CREATION: &[&str] = &["instances", "login_generations"];
 const GROUP_STATES: &[&str] = &["group_states"];
 const LOGIN_GENERATIONS: &[&str] = &["login_generations"];
 const NODE_SCHEDULES: &[&str] = &["node_schedules"];
+const MOVED_SERVERS: &[&str] = &["moved_servers"];
 
 /// The tables of `component`, if it belongs to this module.
 pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
@@ -172,6 +236,7 @@ pub fn component_tables(component: &str) -> Option<&'static [&'static str]> {
         GROUPS_COMPONENT => Some(GROUP_STATES),
         LOGINS_COMPONENT => Some(LOGIN_GENERATIONS),
         NODES_COMPONENT => Some(NODE_SCHEDULES),
+        MOVED_COMPONENT => Some(MOVED_SERVERS),
         _ => None,
     }
 }
@@ -188,7 +253,8 @@ pub fn migrate(
     Some(database::migrate_component(connection, name, to_version, *latest, sql).or_message())
 }
 
-/// A write to the instance registry, group states or node schedules.
+/// A write to the instance registry, group states, node schedules or the
+/// moves of named servers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum InstanceOp {
@@ -251,6 +317,23 @@ pub enum InstanceOp {
     PruneNodeSchedules {
         keep: Vec<String>,
     },
+    /// Record that `rift admin move` moved named server `name` to `port` on
+    /// `node`, away from the node and backend the configuration names.
+    SetMovedServer {
+        name: String,
+        configured_node: String,
+        configured_backend: String,
+        node: String,
+        port: u16,
+    },
+    /// Forget the move of named server `name`.
+    ForgetMovedServer {
+        name: String,
+    },
+    /// Forget the moves of servers not in `keep`; the outcome names them.
+    PruneMovedServers {
+        keep: Vec<String>,
+    },
 }
 
 /// The result of an [`InstanceOp`].
@@ -260,7 +343,7 @@ pub enum InstanceOutcome {
     Done,
     /// The name [`InstanceOp::AllocateName`] allocated.
     Name(String),
-    /// The groups or nodes a prune removed.
+    /// The groups, nodes or moved servers a prune removed.
     Pruned(Vec<String>),
     /// The message of a failure; nothing was written.
     Failed(String),
@@ -283,6 +366,9 @@ impl InstanceOp {
             | Self::SetExplicitStop { .. } => INSTANCES,
             Self::SetGroupState { .. } | Self::PruneGroupStates { .. } => GROUP_STATES,
             Self::SetNodeSchedule { .. } | Self::PruneNodeSchedules { .. } => NODE_SCHEDULES,
+            Self::SetMovedServer { .. }
+            | Self::ForgetMovedServer { .. }
+            | Self::PruneMovedServers { .. } => MOVED_SERVERS,
         }
     }
 }
@@ -451,6 +537,34 @@ fn perform(connection: &Conn, op: &InstanceOp) -> Result<InstanceOutcome, String
         InstanceOp::PruneNodeSchedules { keep } => {
             prune(connection, "node_schedules", keep).map(InstanceOutcome::Pruned)
         }
+        InstanceOp::SetMovedServer {
+            name,
+            configured_node,
+            configured_backend,
+            node,
+            port,
+        } => {
+            connection
+                .execute(
+                    "INSERT INTO moved_servers (name,configured_node,configured_backend,node,port)
+                     VALUES (?1,?2,?3,?4,?5)
+                     ON CONFLICT(name) DO UPDATE SET configured_node=excluded.configured_node,
+                        configured_backend=excluded.configured_backend, node=excluded.node,
+                        port=excluded.port",
+                    params![name, configured_node, configured_backend, node, port],
+                )
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::ForgetMovedServer { name } => {
+            connection
+                .execute("DELETE FROM moved_servers WHERE name=?1", params![name])
+                .or_message()?;
+            Ok(InstanceOutcome::Done)
+        }
+        InstanceOp::PruneMovedServers { keep } => {
+            prune(connection, "moved_servers", keep).map(InstanceOutcome::Pruned)
+        }
     }
 }
 
@@ -515,6 +629,28 @@ fn read_node_schedules(connection: &Conn) -> Result<BTreeMap<String, NodeSchedul
             Ok((name, schedule))
         })
         .collect()
+}
+
+/// Every named server `rift admin move` moved.
+fn read_moved_servers(connection: &Conn) -> Result<BTreeMap<String, MovedServer>, String> {
+    let rows = connection
+        .query_map(
+            "SELECT name,configured_node,configured_backend,node,port FROM moved_servers ORDER BY name",
+            params![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    MovedServer {
+                        configured_node: row.get(1)?,
+                        configured_backend: row.get(2)?,
+                        node: row.get(3)?,
+                        port: row.get(4)?,
+                    },
+                ))
+            },
+        )
+        .or_message()?;
+    Ok(rows.into_iter().collect())
 }
 
 const RECORD_COLUMNS: &str =
@@ -653,7 +789,7 @@ impl Store {
                 }
                 Database::read_only(&path)?
             }
-            Location::Postgres(_) => {
+            Location::Server(_) => {
                 let database = Database::connect_read_only(location)?;
                 if database.owner()?.is_some() {
                     return Ok(DatabaseCheck::InUse);
@@ -665,14 +801,14 @@ impl Store {
         let (version, check) = {
             let connection = store.database.read();
             let version = database::version(&connection, COMPONENT).map_err(|e| store.error(e))?;
-            // PostgreSQL keeps its own consistency; only a file is checked.
+            // A server keeps its own consistency; only a file is checked.
             let check: Option<String> = match connection.dialect() {
                 Dialect::Sqlite => Some(
                     connection
                         .query_row("PRAGMA quick_check", params![], |r| r.get(0))
                         .map_err(|e| store.error(e))?,
                 ),
-                Dialect::Postgres => None,
+                Dialect::Postgres | Dialect::Mariadb => None,
             };
             (version, check)
         };
@@ -680,7 +816,7 @@ impl Store {
             Some(check) if check != "ok" => {
                 return Err(store.error(format!("integrity check failed: {check}")));
             }
-            // A PostgreSQL database without instance tables yet; startup
+            // A server database without instance tables yet; startup
             // creates them.
             None if version == 0 => return Ok(DatabaseCheck::Missing),
             _ => {}
@@ -767,6 +903,10 @@ impl Store {
             }
         }
         let mut candidate = config.clone();
+        let moved = self.moved_servers()?;
+        candidate
+            .restore_moved_servers(&moved)
+            .map_err(|e| self.error(format!("configuration conflict: {e}")))?;
         candidate
             .restore_instances(
                 records
@@ -776,6 +916,18 @@ impl Store {
                     .collect(),
             )
             .map_err(|e| self.error(format!("configuration conflict: {e}")))?;
+        for (name, entry) in &moved {
+            match candidate.moved_servers.get(name) {
+                Some(_) => crate::log_info!(
+                    "managed_servers.{name} runs on node {} since rift admin move; the configuration still names node {}",
+                    entry.node,
+                    entry.configured_node
+                ),
+                None => crate::log_info!(
+                    "managed_servers.{name}: the configuration changed since rift admin move, so it decides the node again"
+                ),
+            }
+        }
         for record in &records {
             let definition = &record.definition;
             let directory = &definition.plan.directory;
@@ -897,6 +1049,7 @@ impl Store {
                 ))
             })?;
         }
+        self.retain_moved_servers(&candidate.moved_servers)?;
         *config = candidate;
         Ok(())
     }
@@ -1179,6 +1332,46 @@ impl Store {
         self.run(InstanceOp::SetNodeSchedule {
             node: node.to_owned(),
             schedule: schedule.as_str().to_owned(),
+        })?;
+        Ok(())
+    }
+
+    /// The servers of `managed_servers` that `rift admin move` moved.
+    pub fn moved_servers(&self) -> io::Result<BTreeMap<String, MovedServer>> {
+        read_moved_servers(&self.database.read()).map_err(|e| self.error(e))
+    }
+
+    /// Record where named server `name` runs since its move; `None` forgets
+    /// the move, once the server is back where the configuration has it.
+    pub fn set_moved_server(&self, name: &str, moved: Option<&MovedServer>) -> io::Result<()> {
+        let op = match moved {
+            None => InstanceOp::ForgetMovedServer {
+                name: name.to_owned(),
+            },
+            Some(moved) => InstanceOp::SetMovedServer {
+                name: name.to_owned(),
+                configured_node: moved.configured_node.clone(),
+                configured_backend: moved.configured_backend.clone(),
+                node: moved.node.clone(),
+                port: moved.port,
+            },
+        };
+        self.run(op)?;
+        Ok(())
+    }
+
+    /// Forget the moves that no longer apply, because the configuration
+    /// changed the node or backend of their servers, or dropped them.
+    pub fn retain_moved_servers(&self, applied: &BTreeMap<String, MovedServer>) -> io::Result<()> {
+        if self
+            .moved_servers()?
+            .keys()
+            .all(|name| applied.contains_key(name))
+        {
+            return Ok(());
+        }
+        self.run(InstanceOp::PruneMovedServers {
+            keep: applied.keys().cloned().collect(),
         })?;
         Ok(())
     }

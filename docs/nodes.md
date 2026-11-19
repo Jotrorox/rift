@@ -24,7 +24,7 @@ agents only prepare server directories and run processes.
 > There is exactly one active proxy. The message broker and the player
 > registry both live in the proxy process, so nodes add game-server capacity,
 > not proxy capacity. With the instance database in
-> [PostgreSQL](database.md), a second controller can wait as a
+> [PostgreSQL or MariaDB](database.md), a second controller can wait as a
 > [standby](database.md#standby-controllers) and take over, adopting the
 > nodes' running servers, when the active one stops.
 
@@ -239,6 +239,8 @@ rift.config.managed_servers.survival = {
   the node, or upload files through the dashboard's Files page.
 - Start, stop, start on connect, idle stops, restart retries, console commands
   and logs work exactly as for local servers.
+- `rift admin move` [moves it](#move-a-named-server) and its folder to
+  another node.
 - The proxy probes readiness, since it must reach the server anyway.
 
 ## Service groups across nodes
@@ -417,8 +419,8 @@ match it, including their server software, exactly as a `prepare` would.
 - The command fails if any node is unreachable or any template fails, after
   the others have finished. The message names each failure; run it again once
   the node is back.
-- Agents older than the controller do not know the command and report that
-  they need an upgrade.
+- Warming needs the `warm` feature. A node whose agent lacks it is reported
+  as needing an upgrade and nothing is sent to it.
 
 Warming does not touch existing instances: like a template edit, it only
 changes what the next new instance copies.
@@ -433,7 +435,10 @@ rift admin move lobby-3 node2
 ```
 
 The command needs the `servers` [admin permission](admin.md) and returns when
-the move has finished:
+the move has finished. In the [dashboard](http.md), choose **Move…** next to
+the server on the Servers page instead, pick the new node and follow the copy
+in the server list; the web API has the same as
+[`POST /api/servers/{name}/move`](http-api.md#managed-servers). Either way:
 
 1. Rift checks the move: the instance must be a persistent instance of a
    service group with `nodes`, and `node2` must match the group's `nodes`, be
@@ -446,8 +451,9 @@ the move has finished:
 3. It copies the instance folder from the old node to the new one through the
    proxy, over the message bus, in chunks of 512 KiB. Agents need no extra
    ports or credentials. The new node checks every file against the SHA-256
-   of the bytes read on the old one, and assembles the copy in a staging
-   folder next to the instance folder.
+   of the bytes read on the old one, gives it the modification time it has
+   there, and assembles the copy in a staging folder next to the instance
+   folder.
 4. It puts the copy in place, records the new node in the instance database
    and gives the instance a new backend address. The port stays the same if it
    is free on the new node; otherwise the instance gets the first free port of
@@ -459,32 +465,76 @@ the move has finished:
 | `--keep-source` | Keep the old folder on the old node instead of deleting it |
 | `--no-copy` | Copy nothing: the folder is already on the new node |
 
-The reply lists what was copied, the new port and address, and
-`cleanup_error` if the old folder could not be deleted. Delete that folder by
+The reply lists what was copied (`copied`, with `reused_files` and
+`reused_bytes` that an earlier attempt had already copied), the new port and
+address, and `cleanup_error` if the old folder could not be deleted. Delete that folder by
 hand then: it is not used again. Plugins see the move on
 [`rift.events.instances`](messaging-subjects.md#events) with
 `"event":"moved"`.
 
 **If something fails**, the instance stays on its old node with its files
-untouched, and starts again if it was running. A copy that was interrupted,
-also by a controller restart, stays on the new node until the next move of the
-same instance to that node, which replaces it. Rift never replaces a folder it
+untouched, and starts again if it was running. Rift never replaces a folder it
 did not put there itself.
 
 **While a move runs**, the instance's service group holds still: its scaling
 does not create, start, stop or remove instances. Other groups and reloads are
 not held up. The copy is limited by the bus, so plan for a few minutes per
-gigabyte on a slow link.
+gigabyte on a slow link. `rift admin servers` and `GET /api/servers` show the
+move under `move`: its phase (`stopping`, `copying` or `committing`), the
+files and bytes copied so far and, when the old node's agent reports it, the
+size of the whole folder. The dashboard turns that into a progress bar with
+the rate and the time left.
+
+### Interrupted and cancelled moves
+
+A long copy does not have to finish in one go. Cancel it with
+
+```sh
+rift admin move lobby-3 --cancel
+```
+
+or **Cancel move** in the dashboard, and the instance goes back to its old
+node and starts again if it was running. A move can be cancelled until its
+copy is done; once it commits, it finishes.
+
+What was copied is kept. When a copy fails (the old node went offline, the
+bus dropped, the proxy restarted) or is cancelled, the files that arrived
+whole stay on the new node in `.rift-move-lobby-3` next to the instance
+folder. Running the same move again, to the same node, continues the copy: it
+sends only the files that are missing, and those that changed on the old node
+meanwhile, which it tells by their size and modification time. Files the old
+node no longer has are left out of the result. A copy that was already put in
+place, but whose move the proxy could not record, is taken back the same way.
+
+Resuming needs the `move_resume` feature on both agents, new in this release.
+With an older agent on the new node, a failed copy is deleted and the next
+move starts over; with an older agent on the old node, every file is sent
+again.
+
+If you decide against the move instead, delete `.rift-move-lobby-3` and
+`.rift-resume-lobby-3` below `local/services` on the new node, or let a later
+move of the instance to that node reuse them.
 
 ### Recover the instances of a dead node
 
-A copy needs the old node online. If it is gone for good, restore each
-instance folder from a backup onto a new node, below the agent's `--root` at
-the same path (`local/services/<instance>`), then:
+A copy needs the old node online. If it is gone for good and you use
+[built-in backups](backups.md), restore each instance onto another node from
+its newest snapshot:
+
+```sh
+rift admin restore lobby-3 --node node2
+```
+
+With backups of your own, restore each instance folder onto a new node, below
+the agent's `--root` at the same path (`local/services/<instance>`), then:
 
 ```sh
 rift admin move lobby-3 node2 --no-copy
 ```
+
+Built-in backups cover persistent instances only, so recover a
+[named server](#move-a-named-server) the same way: put its folder on the new
+node at the same path and run `rift admin move <server> <node> --no-copy`.
 
 Rift checks that the folder exists and records the new node; it deletes
 nothing. Keep the dead node in `rift.config.nodes` until its instances have
@@ -492,8 +542,108 @@ moved, since Rift refuses a configuration that drops a node with instances. If t
 old node comes back, its agent stops any server that no longer belongs to it,
 but leaves the old folder for you to delete.
 
-Named servers in `managed_servers` cannot be moved this way: copy their folder
-yourself and change their `node` and backend in the configuration.
+### Move a named server
+
+Named servers in `managed_servers` move with the same command:
+
+```sh
+rift admin move survival node2
+```
+
+It works like an instance move, with these differences:
+
+- No service group applies, so neither do `nodes` and memory. `node2` must
+  still be online, not cordoned or draining, run an agent that can start the
+  server, and have a free instance slot and its `min_free_disk_mb` of free
+  disk.
+- The server keeps its port, since its own files may name it. Rift refuses
+  the move when another server on `node2` already uses that port.
+- Nothing in the folder is rewritten, `server.properties` included.
+- The old folder is only deleted when it is named after the server, like
+  `directory = "survival"`. Otherwise Rift keeps it and says so in
+  `cleanup_error`.
+- The reply and the `moved` event have `group` and `storage` set to `null`,
+  and `configured_node` names the node the configuration still has.
+- Rift needs its instance database to remember the move, so it refuses to
+  move named servers when it runs without a configuration file.
+
+**Your configuration file is not edited.** Rift records the new node and
+backend in the instance database and keeps using them across reloads and
+restarts, for as long as the configuration names the server's old node and
+backend. `rift admin servers` shows the old node as `configured_node`, and
+Rift logs the move at every start. To finish the move, put the new values in
+the configuration and reload:
+
+```lua
+rift.config.backends.survival = "10.0.0.12:25570"
+rift.config.managed_servers.survival = {
+    node = "node2",
+    directory = "survival",
+    command = { "java", "-Xmx4G", "-jar", "server.jar", "nogui" },
+    start_on_connect = true,
+}
+```
+
+Rift then forgets the move. Any other change to the server's `node` or
+backend also hands the server back to the configuration; like every other
+change to a named server's definition, that one needs a restart. Moving the
+server back to the node the configuration names forgets the move too.
+
+### Even out the nodes
+
+Persistent instances stay where they were created, so nodes drift apart: one
+fills up while a newer one sits empty. `rift admin node plan` suggests moves
+that even them out:
+
+```sh
+rift admin node plan               # nodes may be 20 points apart
+rift admin node plan --spread 10   # or as far apart as you choose
+```
+
+```json
+{
+  "balanced": false, "max_spread_percent": 20.0,
+  "spread_percent": 75.0, "planned_spread_percent": 25.0,
+  "nodes": [
+    {"name": "node1", "state": "online", "schedule": "active",
+     "memory_used_percent": 75.0, "planned_memory_used_percent": 50.0,
+     "instances": 3, "planned_instances": 2, "load_per_cpu": 0.4,
+     "disk_free_mb": 81234, "warnings": []}
+  ],
+  "moves": [
+    {"server": "lobby-1", "group": "lobby", "from": "node1", "to": "node3",
+     "memory_mb": 2048, "players": 0, "command": "rift admin move lobby-1 node3"}
+  ],
+  "notes": ["the remaining spread cannot be narrowed by moving whole servers"]
+}
+```
+
+**It only suggests.** Nothing moves until you run the `command` of a move;
+Rift never moves a server on its own. Run the moves in the order listed: each
+one counts on the room the earlier ones leave.
+
+- A node's memory use is the larger of what is allocated of its `memory_mb`
+  and what its agent [measures](#host-resources) in use on the host. A node
+  with neither, or one that is not online, is left out and named in `notes`.
+- While the busiest and the least used node are more than the spread apart,
+  the plan moves a server off the busiest node it can to a less used one,
+  picking the move that leaves the busier of the two lowest. A move must
+  lower that node by at least one point, and the plan stops after 20 moves.
+- Only persistent instances and named servers move. An instance counts with
+  its group's `memory_mb`, a named server with its `memory_limit`; a named
+  server without one is left where it is. Disposable instances are replaced
+  anyway, and new ones go to the node with the most free memory.
+- Every suggested move passes the same checks as `rift admin move` would now:
+  the group's `nodes`, cordons, free slots, memory, free disk and agent
+  features. When nothing fits, `notes` says why.
+- `players` shows who would have to leave first; a move needs an empty
+  server. Load and disk are reported per node with `warnings` (a load above
+  one process per CPU, free disk below `min_free_disk_mb`), but the plan
+  balances memory only, and the copy also needs room for the server's folder.
+
+Over HTTP, `GET /api/nodes/plan` (or `?spread=10`) returns the same plan. It
+needs the `servers` permission and an operator who is not restricted to
+groups.
 
 ## Failure behavior
 
@@ -501,7 +651,7 @@ yourself and change their `node` and backend in the configuration.
 | --- | --- |
 | The controller connection drops | The agent **keeps its servers running** and reconnects. On every (re)connection the controller sends its instance list: the agent stops servers no longer assigned to it and deletes unassigned disposable directories. |
 | The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop saved before the restart still wins. Local servers stop, unless they have [`keep_running`](kept-servers.md). |
-| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. [Move them](#recover-the-instances-of-a-dead-node) yourself if the node does not come back. Recovery waits for the node instead of spending restart retries. |
+| A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. [Restore or move them](#recover-the-instances-of-a-dead-node) yourself if the node does not come back. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
 | The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. |
@@ -580,9 +730,12 @@ principal.
 - `env` and `inherit_env` travel with the start command and apply on the node
   as they would locally, against the agent's environment.
 
-**Agents older than the controller**
+## Agents older than the controller
 
-Upgrade agents together with the controller. An agent ignores start settings
+Upgrade the controller first, then the agents one node at a time
+([upgrade nodes](upgrading.md#upgrade-nodes)). The
+[version skew policy](stability.md#controller-and-node-agents) lists the
+supported combinations. An agent ignores start settings
 it does not know, so each agent reports the settings it applies, and the
 controller checks them before it starts a server there:
 
@@ -594,7 +747,12 @@ controller checks them before it starts a server there:
 
 [Moves](#move-a-persistent-instance-to-another-node) need the `move` feature on
 both agents (only the new one with `--no-copy`); an older agent refuses the
-move before the instance is stopped.
+move before the instance is stopped. Resuming an
+[interrupted move](#interrupted-and-cancelled-moves) needs `move_resume` on
+both; without it a move starts over. [Backups](backups.md) and restores in
+place need the `backup` feature,
+[warming the caches](#warm-the-node-caches) needs `warm`, and uploading files
+over 512 KiB needs `file_parts`.
 
 A refused server shows the reason as its last error, and service groups place
 new instances only on nodes whose agent can run them. Agents from 0.1.0 and
@@ -624,7 +782,7 @@ Agents and the controller exchange JSON over the existing bus:
 
 | Subject | Direction | Purpose |
 | --- | --- | --- |
-| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, `warm`, and for moves `tree`, `read`, `receive` and `discard` |
+| `rift.node.<n>.cmd` | controller → agent | Request/reply: `prepare`, `start`, `stop`, `console`, `logs`, `remove`, `files`, `reconcile`, `warm`, for moves `tree`, `read`, `receive` and `discard`, and for [backups](backups.md) `backup` and `release_backup` |
 | `rift.node.<n>.state` | agent → controller | Process list and [host resources](#host-resources) every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as

@@ -286,7 +286,7 @@ pub fn cluster(config: &Config, path: &Path, report: &mut Report) {
     };
     if config.database.is_some() {
         report.errors.push(
-            "cluster.toml: a cluster replicates SQLite; database.backend = \"postgres\" cannot be combined with it".into(),
+            "cluster.toml: a cluster replicates SQLite; database.backend = \"postgres\" or \"mariadb\" cannot be combined with it".into(),
         );
     }
     match settings.token() {
@@ -348,7 +348,7 @@ pub fn strict(config: &Config, path: &Path) -> Report {
                 rift::database::Location::Sqlite(_) => format!(
                     "instance database {described} does not exist yet; startup will create it"
                 ),
-                rift::database::Location::Postgres(_) => format!(
+                rift::database::Location::Server(_) => format!(
                     "instance database {described} connects and has no Rift tables yet; startup will create them"
                 ),
             });
@@ -472,7 +472,7 @@ pub async fn agents(config: &Config, report: &mut Report) {
             ));
         } else if version != own {
             report.warnings.push(format!(
-                "node {name}: agent {version} differs from this rift {own}; upgrade agents together with the controller"
+                "node {name}: agent {version} differs from this rift {own}; finish the upgrade so both run the same release, controller first"
             ));
         }
     }

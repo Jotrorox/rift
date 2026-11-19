@@ -43,6 +43,17 @@ const POSTGRES_SCHEMA: &str = r#"CREATE TABLE players (
     language TEXT COLLATE "C"
 );
 CREATE INDEX players_name ON players (name_key, last_seen);"#;
+const MARIADB_SCHEMA: &str = "CREATE TABLE players (
+    uuid VARCHAR(255) PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    name_key VARCHAR(255) NOT NULL,
+    first_seen BIGINT NOT NULL,
+    last_seen BIGINT NOT NULL,
+    last_ip TEXT NOT NULL DEFAULT '',
+    last_server TEXT NOT NULL DEFAULT '',
+    language TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_nopad_bin;
+CREATE INDEX players_name ON players (name_key, last_seen);";
 
 /// Most records one `search` returns.
 pub const MAX_SEARCH: u32 = 100;
@@ -54,6 +65,7 @@ fn schema_sql(dialect: Dialect, _from: u32) -> String {
     match dialect {
         Dialect::Sqlite => SCHEMA,
         Dialect::Postgres => POSTGRES_SCHEMA,
+        Dialect::Mariadb => MARIADB_SCHEMA,
     }
     .to_owned()
 }
@@ -348,10 +360,10 @@ impl Directory {
             .chain(['%'])
             .collect();
         self.read(|connection| {
-            let like = connection.dialect().like();
+            let like = connection.dialect().like("name_key", "?1");
             connection.query_map(
                 &format!(
-                    "SELECT {COLUMNS} FROM players WHERE name_key {like} ?1 ESCAPE '\\'
+                    "SELECT {COLUMNS} FROM players WHERE {like} ESCAPE '\\'
                      ORDER BY last_seen DESC, name_key LIMIT ?2"
                 ),
                 params![pattern, limit],
@@ -394,9 +406,9 @@ mod tests {
     const ALEX: &str = "00000000000000000000000000000001";
     const STEVE: &str = "00000000000000000000000000000002";
 
-    /// A directory in a fresh PostgreSQL schema, when the tests have one.
-    fn postgres(test: &str) -> Option<Directory> {
-        let location = crate::database::test_postgres_or_skip(test)?;
+    /// A directory in a fresh server schema, when the tests have one.
+    fn server(test: &str) -> Option<Directory> {
+        let location = crate::database::test_server_or_skip(test)?;
         Some(Directory::open(Arc::new(Database::connect(&location).unwrap())).unwrap())
     }
 
@@ -406,8 +418,8 @@ mod tests {
     }
 
     #[test]
-    fn joins_and_quits_are_remembered_on_postgres() {
-        if let Some(directory) = postgres("joins_and_quits_are_remembered_on_postgres") {
+    fn joins_and_quits_are_remembered_on_a_server() {
+        if let Some(directory) = server("joins_and_quits_are_remembered_on_a_server") {
             joins_and_quits(&directory);
         }
     }
@@ -452,8 +464,8 @@ mod tests {
     }
 
     #[test]
-    fn search_matches_prefixes_literally_on_postgres() {
-        if let Some(directory) = postgres("search_matches_prefixes_literally_on_postgres") {
+    fn search_matches_prefixes_literally_on_a_server() {
+        if let Some(directory) = server("search_matches_prefixes_literally_on_a_server") {
             search_literally(&directory);
         }
     }
@@ -483,8 +495,8 @@ mod tests {
     }
 
     #[test]
-    fn languages_belong_to_known_players_on_postgres() {
-        if let Some(directory) = postgres("languages_belong_to_known_players_on_postgres") {
+    fn languages_belong_to_known_players_on_a_server() {
+        if let Some(directory) = server("languages_belong_to_known_players_on_a_server") {
             languages(&directory);
         }
     }

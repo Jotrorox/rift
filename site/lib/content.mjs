@@ -25,7 +25,7 @@ export const DOCS = [
   page('Operate', 'operations', 'Day-to-day operations', 'Reloads, maintenance mode, draining and transfers.'),
   page('Operate', 'admin', 'Admin CLI', 'The admin endpoint, its token and permissions, and every rift admin command.'),
   page('Operate', 'deployment', 'Deployment', 'Run Rift under systemd or in a container.'),
-  page('Operate', 'database', 'SQLite or PostgreSQL', 'Where Rift keeps its state, using PostgreSQL, standby controllers and copying between backends.'),
+  page('Operate', 'database', 'SQLite, PostgreSQL or MariaDB', 'Where Rift keeps its state, using PostgreSQL or MariaDB, standby controllers and copying between backends.'),
   page('Operate', 'monitoring', 'Monitoring and logs', 'Prometheus metrics, connection events, log levels and what to do about each error.'),
   page('Operate', 'hardening', 'Hardening', 'Rate limits, PROXY protocol behind a load balancer, and how Rift guards its secrets.'),
   page('Operate', 'upgrading', 'Upgrade and rollback', 'Graceful shutdown, upgrades, rollback and the forward-only database.'),
@@ -37,6 +37,7 @@ export const DOCS = [
   page('Servers', 'server-limits', 'Isolation and memory limits', 'Confine server processes to their directory and cap their memory on Linux.'),
   page('Servers', 'bus-logins', 'Bus logins for servers', 'A message bus login for every managed server and group instance.'),
   page('Servers', 'nodes', 'Multiple hosts', 'Game servers on more machines with rift node agents, placement and failure handling.'),
+  page('Servers', 'backups', 'Backups', 'Scheduled snapshots of persistent instances on nodes to a folder or S3, and restores onto any node.'),
 
   page('Web', 'http', 'Web dashboard', 'The bundled dashboard, its tokens and operators, and browser-based configuration.'),
   page('Web', 'status-page', 'Status page', 'A public, read-only status site for your network.'),

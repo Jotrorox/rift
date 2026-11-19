@@ -60,6 +60,8 @@ counts every player.
 | `GET /api/servers` | `read` | `{servers: [...]}` with managed server lifecycle state, usage and `node` (`local` for this host) |
 | `POST /api/servers/{name}/start` | `servers`, scoped | Request a managed server start with `{}`; returns `202` when accepted |
 | `POST /api/servers/{name}/stop` | `servers`, scoped | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
+| `POST /api/servers/{name}/move` | `servers`, scoped | [Move](nodes.md#move-a-persistent-instance-to-another-node) a persistent instance or named server to another node with `{"node": "node2"}`, optionally `keep_source: true` or `copy: false` (like `--no-copy`); returns `202` with an [operation](#poll-an-operation) whose result is that of `rift admin move`. A move that cannot start now is `409` |
+| `DELETE /api/servers/{name}/move` | `servers`, scoped | Cancel the running move with `{}` before its commit; `409` when the server is not moving or the move is already committing |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | `logs`, scoped | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
 | `POST /api/servers/{name}/console` | `console`, scoped | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
 
@@ -77,6 +79,8 @@ shutdown has completed. Poll `GET /api/servers` for these fields:
 | `address`, `port`, `group`, `template` | `group` is `null` for static servers, `template` `null` without one |
 | `storage` | `persistent`, `disposable` or `ephemeral`; static managed servers are `persistent` |
 | `group_suspended`, `group_mode`, `draining` | State of a [whole group](#start-or-stop-a-whole-group) |
+| `node`, `configured_node` | The node the server runs on (`local` for this host), and the one the configuration still names after a [move](nodes.md#move-a-named-server) of a named server |
+| `move` | `null`, or the running [move](nodes.md#move-a-persistent-instance-to-another-node): `from`, `to`, `phase` (`stopping`, `copying` or `committing`), `cancelling`, `started_unix`, `files` and `bytes` copied so far (files an earlier attempt left included), `reused_files` and `reused_bytes` of those, and `total_files` and `total_bytes` of the folder, `null` with an older agent on the old node |
 
 Commands, arguments and working directories are omitted.
 
@@ -128,9 +132,10 @@ operator, the player must be on one of their servers.
 | `POST /api/groups/{name}/start` | `servers`, scoped | Start a whole [service group](service-groups.md#start-stop-and-dev-mode-for-a-whole-group) with `{}`: resume it and start every instance that is not running; returns `202` with `{group, suspended, mode, instances}` |
 | `POST /api/groups/{name}/stop` | `servers`, scoped | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
 | `PUT /api/groups/{name}/mode` | `servers`, scoped | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
-| `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance, download or warm operation state and its completed result; the scope is the operation's group |
+| `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance, move, download or warm operation state and its completed result; the scope is the operation's group |
 | `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), `schedule` (`active`, `cordoned`, `draining`), `drained`, address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, `min_free_disk_mb`, agent `version`, the start settings it applies (`features`), the controller's it lacks (`missing_features`), `version_mismatch`, `last_seen_ms` and the host `resources` its agent measured (`null` unless online; see [host resources](nodes.md#host-resources)) |
 | `POST /api/nodes/{name}/cordon`, `/drain`, `/uncordon` | `servers`, unrestricted operators only | [Take a node out of service](nodes.md#take-a-node-out-of-service) or return it, with `{}`; returns `200` with `{node, schedule, drained, instances}`, where each instance's `result` is `running`, `kept`, `retiring` or `draining` |
+| `GET /api/nodes/plan` | `servers`, unrestricted | [Suggested moves](nodes.md#even-out-the-nodes) that even out memory across nodes, optionally `?spread=<percent>` (1 to 100, default 20); returns `{balanced, max_spread_percent, spread_percent, planned_spread_percent, nodes, moves, notes}` and moves nothing |
 | `POST /api/nodes/warm` | `servers`, unrestricted | Have every node [cache its groups' templates](nodes.md#warm-the-node-caches) with `{}`, or one template's with `{"template": "bedwars"}`; returns `202` with an operation to poll. The result lists each node's templates with `files`, `downloaded`, `bytes` and `software`; the operation fails if any node or template failed |
 
 A `/api/groups` entry has the group name, inclusive port range, instance

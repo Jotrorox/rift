@@ -562,13 +562,14 @@ impl Authority {
             &format!(
                 "SELECT s.id, s.key, s.last_name FROM perm_subject s
                  WHERE s.kind = 0
-                   AND (?1 = '' OR s.last_name {like} ?2 ESCAPE '\\' OR s.key {like} ?3 ESCAPE '\\')
+                   AND (?1 = '' OR {name_like} ESCAPE '\\' OR {key_like} ESCAPE '\\')
                    AND (?4 IS NULL OR EXISTS (SELECT 1 FROM perm_node n WHERE n.subject_id = s.id
                         AND n.kind = 1 AND n.key = ?4 AND n.value = 'true'
                         AND (n.expires_at IS NULL OR n.expires_at > ?5)))
                  ORDER BY s.last_name IS NULL, {by_name}, s.key
                  LIMIT ?6",
-                like = dialect.like(),
+                name_like = dialect.like("s.last_name", "?2"),
+                key_like = dialect.like("s.key", "?3"),
                 by_name = dialect.nocase("s.last_name"),
             ),
             params![query, name, uuid, group, now, (limit + 1) as i64],

@@ -84,7 +84,7 @@ pub struct Snapshot {
     pub nodes: rift::node::Nodes,
     live: Arc<Mutex<Weak<Snapshot>>>,
     instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
-    instance_store: Option<Arc<rift::instance_store::Store>>,
+    pub(crate) instance_store: Option<Arc<rift::instance_store::Store>>,
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
@@ -2181,6 +2181,23 @@ async fn reconfigure(
         .await
         .map_err(Error::invalid)??;
     }
+    // A named server whose node or backend the configuration changed since
+    // `rift admin move` follows the configuration again.
+    if next.config.moved_servers != snapshot.config.moved_servers
+        && let Some(store) = snapshot.instance_store.clone()
+    {
+        for name in snapshot.config.moved_servers.keys() {
+            if !next.config.moved_servers.contains_key(name) {
+                log_info!(
+                    "managed_servers.{name}: the configuration changed since rift admin move, so it decides the node again"
+                );
+            }
+        }
+        let applied = next.config.moved_servers.clone();
+        if let Err(error) = blocking(move || store.retain_moved_servers(&applied)).await {
+            log_warn!("forgetting the moves of named servers failed: {error}");
+        }
+    }
     Ok((Arc::new(next), prepared, node_change))
 }
 
@@ -2621,16 +2638,21 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
             "{name} is not stopped for a move; use rift admin move"
         )));
     }
-    let directory = checked.directory;
+    let (directory, named) = (checked.directory, checked.named);
     let automatic = snapshot
         .managed
         .snapshot()
         .into_iter()
         .find(|server| server.name == name)
         .is_none_or(|server| server.automatic_enabled);
-    let port = move_port(snapshot, &name, &to)?;
     let mut config = snapshot.config.clone();
-    config.move_instance(&name, &to, port)?;
+    if named {
+        // A named server keeps its port, which `check` found free.
+        config.move_named_server(&name, &to)?;
+    } else {
+        let port = move_port(snapshot, &name, &to)?;
+        config.move_instance(&name, &to, port)?;
+    }
     let next = instance_snapshot(config, snapshot)?;
     let nodes = &snapshot.nodes;
     let unreachable = |message: String| Error {
@@ -2670,24 +2692,30 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
             }
         }
     }
-    // A folder that is in place but not recorded is removed again.
+    // A folder that is in place but not recorded is taken back again, kept
+    // for the next attempt where the node can resume a copy.
     let undo = || async {
         if copy {
-            transfer::discard_orphan(nodes, &name, &to, &directory).await;
+            transfer::set_aside(nodes, &name, &to, &directory).await;
         }
     };
-    // The folder keeps its world; only its port and address change.
-    let prepared = match rift::provisioning::remote_prepare(&next.config, &name) {
-        Ok(prepare) => {
-            nodes
-                .request(
-                    &to,
-                    &protocol::Command::Prepare(Box::new(prepare)),
-                    Duration::from_secs(120),
-                )
-                .await
+    // The folder keeps its world; only its port and address change. Named
+    // servers are never provisioned: they keep their port and files.
+    let prepared = if named {
+        Ok(serde_json::Value::Null)
+    } else {
+        match rift::provisioning::remote_prepare(&next.config, &name) {
+            Ok(prepare) => {
+                nodes
+                    .request(
+                        &to,
+                        &protocol::Command::Prepare(Box::new(prepare)),
+                        Duration::from_secs(120),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => Err(error),
     };
     match prepared {
         Ok(result) if result["created"] != true => {}
@@ -2713,7 +2741,12 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
         let (store, name) = (snapshot.instance_store.clone(), name.clone());
         async move {
             match store {
+                Some(store) if named => {
+                    blocking(move || store.set_moved_server(&name, config.moved_servers.get(&name)))
+                        .await
+                }
                 Some(store) => blocking(move || store.move_instance(&config, &name, &from)).await,
+                // `check` refuses to move a named server without a database.
                 None => Ok(()),
             }
         }
@@ -2755,7 +2788,16 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
         ));
     }
     let mut source_removed = false;
-    if copy && !keep_source {
+    // Like every node deletion, only a folder named after its server; a
+    // named server may live in any folder.
+    let deletable = directory.file_name() == Some(std::ffi::OsStr::new(&name));
+    if copy && !keep_source && !deletable {
+        cleanup.push(format!(
+            "the old folder {} on node {from} was kept, since it is not named after {name}; delete it yourself",
+            directory.display()
+        ));
+    }
+    if copy && !keep_source && deletable {
         let discard = protocol::Command::Discard {
             server: name.clone(),
             directory: directory.clone(),
@@ -2770,16 +2812,32 @@ async fn move_instance(commit: crate::moving::Commit, snapshot: &Arc<Snapshot>) 
             )),
         }
     }
-    let instance = &next.config.instances[&name];
+    let instance = next.config.instances.get(&name);
+    let address = next.config.backends[&name].address();
+    let port = address
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok());
+    // Where the Lua configuration still puts a named server, until edited.
+    let configured_node = next
+        .config
+        .moved_servers
+        .get(&name)
+        .map(|moved| moved.configured_node.clone());
+    if let Some(configured) = &configured_node {
+        log_info!(
+            "managed_servers.{name} stays on node {to} until its node and backend change in the configuration, which still names node {configured}; set them to {to} and {address} there"
+        );
+    }
     let response = serde_json::json!({
         "name": name,
         "moved": true,
-        "group": instance.group,
+        "group": instance.map(|instance| &instance.group),
         "from": from,
         "node": to,
-        "port": instance.port,
-        "address": next.config.backends[&name].address(),
-        "storage": instance.storage.as_str(),
+        "port": port,
+        "address": address,
+        "storage": instance.map(|instance| instance.storage.as_str()),
+        "configured_node": configured_node,
         "files_copied": copy,
         "source_removed": source_removed,
         "cleanup_error": (!cleanup.is_empty()).then(|| cleanup.join("; ")),
@@ -3218,6 +3276,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(network_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(server_states.run(receiver.clone()));
+    background.spawn(crate::backups::schedule(receiver.clone()));
     // Keep visibility rules current as permissions change.
     background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
