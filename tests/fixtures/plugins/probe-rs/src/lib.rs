@@ -16,7 +16,8 @@
 //!   `{"round": 1}`) and continues, name `Title` is shown a title (markup)
 //!   and subtitle (legacy codes) for 5/40/10 ticks and continues, name
 //!   `Locale` is denied with `locale=<the player's player-info locale>`
-//!   (`locale=unknown` for `none` and for a player who is not online),
+//!   (`locale=unknown` for `none` and for a player who is not online), name
+//!   `Menu` is denied with what the menu functions answered (see `menus`),
 //!   anyone else continues.
 //! - `suggest(ctx)`: `rich` with the tooltip markup `<red>Hi <p>` (argument
 //!   `p` the player's name) and `plain` without a tooltip; for the word
@@ -53,6 +54,14 @@
 //!   - `text`: arguments `<language or -> <json text>`; the message
 //!     `<render> | <plain> | <to-legacy> | <to-mini>` of the `text`
 //!     interface, each `error: <the host's error>` when it fails.
+//! - `menus(ctx)`: shows the player the hopper `probe` (slot 0 a stone
+//!   button `s` with payload `{"a":1}`, state `"st"`) through the builders,
+//!   tries a menu with an unknown item and a patch whose `slots` is not a
+//!   list, patches the title of `probe`, closes it, and shows and closes a
+//!   menu for the offline player `Nobody`; the deny text is
+//!   `shown=<r> updated=<r> closed=<r> offline=<r>,<r>,<r> item=<error>
+//!   patch=<error>`, each `<r>` the call's result as `Ok(true)`, `Ok(false)`
+//!   or `Err(..)`.
 //! - `job_done(handle, outcome)`: resolves the ticket of a `slow` command
 //!   with the message `done: <result as text>` or `failed: <error>`.
 //! - `work_init(config)` (worker): logs `worker ready` at info level.
@@ -60,6 +69,7 @@
 //!   `fail` fails with `worker says no`; payload `sleep` sleeps 300 ms and
 //!   answers `SLEPT`; payload `text <language>` answers the plugin's message
 //!   `denied` without formatting in that language (`text.plain`).
+use rift_plugin::menu::{Button, Menu, MenuPatch};
 use rift_plugin::{
     Action, CommandSpec, Context, DialogResponse, Hook, Ping, Plugin, Registration, StatusOverride,
     SuggestKind, Suggestion, Text, TitleSpec, background, meta, permissions, players, text,
@@ -159,6 +169,7 @@ impl Plugin for Probe {
                 assert_eq!(players::title(&ctx.uuid, &title), Ok(true));
                 Action::Continue
             }
+            "Menu" => menus(&ctx),
             "Locale" => {
                 let locale = players::get(&ctx.uuid)
                     .expect("players.get")
@@ -270,6 +281,36 @@ impl Probe {
         }
         Action::Continue
     }
+}
+
+/// `Menu`: every menu function, and the errors of an invalid menu and patch.
+fn menus(ctx: &Context) -> Action {
+    let hopper = Menu::hopper("probe")
+        .slot(
+            0,
+            Button::new("stone")
+                .id("s")
+                .payload(serde_json::json!({"a": 1})),
+        )
+        .state("st");
+    let shown = players::show_menu(&ctx.uuid, &hopper);
+    let item = players::menu(
+        &ctx.uuid,
+        r#"{"id":"probe","slots":[{"slot":0,"item":"no_such_item"}]}"#,
+    )
+    .unwrap_err();
+    let patch = players::update_menu_json(&ctx.uuid, "probe", r#"{"slots":1}"#).unwrap_err();
+    let updated = players::update_menu(&ctx.uuid, "probe", &MenuPatch::new().title("Patched"));
+    let closed = players::close_menu(&ctx.uuid, Some("probe"));
+    let offline = (
+        players::show_menu("Nobody", &hopper),
+        players::update_menu("Nobody", "probe", &MenuPatch::new()),
+        players::close_menu("Nobody", None),
+    );
+    Action::deny(format!(
+        "shown={shown:?} updated={updated:?} closed={closed:?} offline={:?},{:?},{:?} item={item} patch={patch}",
+        offline.0, offline.1, offline.2
+    ))
 }
 
 /// `whois`: what Rift remembers about a player.

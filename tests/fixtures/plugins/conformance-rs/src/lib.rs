@@ -15,6 +15,7 @@
 //! `tests/fixtures/plugins/conformance-chat-rs` is this source with that
 //! feature on, for the scenarios that handle chat. Without the feature the
 //! guest never lists it.
+use rift_plugin::menu::{Button, Click, Menu, MenuEvent, MenuKind, MenuPatch};
 use rift_plugin::{
     Action, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context, Hook, HttpRequest,
     HttpResponse, Ping, Plugin, Registration, RouteDecision, StatusOverride, SuggestKind,
@@ -254,6 +255,37 @@ impl Plugin for Guest {
             let kick = show(players::kick(&ctx.uuid, rich));
             report(&format!("rich {message} {action_bar} {broadcast} {kick}"));
         }
+        if self.config["menu"].as_bool() == Some(true) {
+            // The chest through the builders, the anvil as JSON text.
+            let chest = Menu::chest("pick")
+                .rows(1)
+                .title("Pick")
+                .slot(
+                    0,
+                    Button::new("diamond")
+                        .name("Buy")
+                        .id("buy")
+                        .payload("gold")
+                        .all_clicks(),
+                )
+                .state(1);
+            let chest = players::show_menu(&ctx.uuid, &chest);
+            let anvil = players::menu(
+                &ctx.uuid,
+                r#"{"id":"nick","type":"anvil","text":"Steve","typing":true}"#,
+            );
+            let invalid = players::menu(&ctx.uuid, r#"{"id":"bad","keys":1}"#)
+                .is_err_and(|error| error.contains("keys must be an object"));
+            let shown = |result: Result<bool, String>| match result {
+                Ok(shown) => shown.to_string(),
+                Err(error) => format!("error({error})"),
+            };
+            report(&format!(
+                "menu shown {} {} {invalid}",
+                shown(chest),
+                shown(anvil)
+            ));
+        }
     }
 
     fn after_transfer(&mut self, _ctx: Context) {
@@ -279,6 +311,60 @@ impl Plugin for Guest {
             "message {}",
             String::from_utf8_lossy(&message.payload)
         ));
+    }
+
+    fn menu(&mut self, event: MenuEvent) {
+        let field = |value: Option<String>| value.unwrap_or_else(|| "-".into());
+        let payload = event.payload::<String>().ok().flatten();
+        let state = event
+            .state::<i64>()
+            .ok()
+            .flatten()
+            .map(|state| state.to_string());
+        let (action, slot, click, key) = match event.kind() {
+            MenuKind::Click {
+                action,
+                slot,
+                click,
+                key,
+            } => (
+                Some(action.to_owned()),
+                Some(slot.to_string()),
+                (click != Click::Other).then(|| click.name().to_owned()),
+                key.map(|key| key.to_string()),
+            ),
+            _ => (None, None, None, None),
+        };
+        report(&format!(
+            "menu {} {} {} {} {} {} {} {} {} {}",
+            event.menu,
+            event.kind,
+            field(action),
+            field(slot),
+            field(click),
+            field(key),
+            field(event.text.clone()),
+            field(event.reason.clone()),
+            field(payload),
+            field(state),
+        ));
+        let uuid = &event.ctx.uuid;
+        match event.kind() {
+            MenuKind::Click { action: "buy", .. } => {
+                let patch = MenuPatch::new().title("Bought").state(2);
+                let updated = players::update_menu(uuid, "pick", &patch);
+                report(&format!("update {}", updated.unwrap_or(false)));
+            }
+            MenuKind::Text { .. } => {
+                let closed = players::close_menu(uuid, Some("nick"));
+                report(&format!("close {}", closed.unwrap_or(false)));
+            }
+            MenuKind::Close { .. } if event.menu == "pick" => {
+                let closed = players::close_menu(uuid, None);
+                report(&format!("close any {}", closed.unwrap_or(false)));
+            }
+            _ => {}
+        }
     }
 
     fn chat(&mut self, attempt: ChatAttempt) -> Action {

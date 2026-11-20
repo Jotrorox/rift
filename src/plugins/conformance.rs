@@ -26,13 +26,15 @@
 //! | `status_motd` | `status` replaces the MOTD with this text. |
 //! | `http` | `{path, body}`: `http` answers that path with status 200, `text/plain` and `body`. |
 //! | `chat` | Object: the guest handles the `chat` hook (installed with [`Fixture::install_chat`]). Every attempt reports `chat <kind> <command or -> <text>`. Text containing `chat.block` (a string) then goes through `slow` and `fail` as hook `chat` (reporting `chat`) and answers `decide.chat`; other text continues. |
+//! | `menu` | `true`: `join` shows the chest menu `pick` (one row, title `Pick`, slot 0 the button `buy` with payload `"gold"` reporting every click kind, state `1`) and the anvil menu `nick` (text `Steve`, `typing`), tries a menu whose `keys` is not an object, and reports `menu shown <chest result> <anvil result> <whether the invalid menu failed with "keys must be an object">`. Every menu event reports `menu <menu> <kind> <action> <slot> <click> <key> <text> <reason> <payload> <state>` (`-` for an absent field). A click on `buy` then calls `update-menu` with the title `Bought` and state `2` and reports `update <result>`; a `text` event closes `nick` (`close <result>`); the close of `pick` closes any menu (`close any <result>`). |
 //! | `rich` | A JSON text component. `join` sends it to the joining player with `players.message-json`, `action-bar-json`, `broadcast-json` and `kick-json`, in that order, and reports `rich <message> <action bar> <broadcast> <kick>` (each result, or `error(<message>)`). |
 //!
 //! Every hook the guest handles reports its name (`login`, `command`, `join`,
 //! ...) before acting. The guest registers route, status, http, login,
 //! initial_server, before_transfer, join, after_transfer and disconnect,
 //! plus command (and suggest for dynamic suggestions), timer and message
-//! when configured; every other hook keeps the contract's default.
+//! when configured; every other hook keeps the contract's default. Menu
+//! events need no registration.
 //!
 //! The shared example plugins (`examples/plugins/hello-*`) run through
 //! [`hello_example`] the same way.
@@ -1068,6 +1070,94 @@ pub(crate) async fn chat_is_asked_only_of_its_handlers(fixture: &dyn Fixture) {
     runtime.plugins().shutdown().await;
 }
 
+/// Menus: a plugin shows them, receives every kind of event with every
+/// field, patches and closes them, and an invalid one fails its call.
+pub(crate) async fn menus_reach_the_plugin_that_showed_them(fixture: &dyn Fixture) {
+    use crate::menu::{Click, CloseReason, Delivery, MenuEvent};
+    let mut lab = Lab::new(fixture);
+    let plugins = vec![lab.plugin("menus", "", json!({"menu": true}))];
+    let runtime = lab.runtime(&config("", plugins)).await;
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    let mut player = session(&runtime, 1);
+    player.ready("lobby").await;
+    lab.wait(|entry| entry == "menus:menu shown true true true")
+        .await;
+    let owner = crate::dialog::Owner::Plugin("menus".into());
+    let mut next = async || {
+        timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let PlayerAction::Menu(chest) = next().await else {
+        panic!("expected the chest");
+    };
+    assert_eq!(chest.owner, owner);
+    assert_eq!(chest.menu.id(), "pick");
+    assert_eq!(chest.menu.kind(), crate::menu::Kind::Chest { rows: 1 });
+    assert_eq!(chest.menu.state(), Some(&json!(1)));
+    let PlayerAction::Menu(anvil) = next().await else {
+        panic!("expected the anvil");
+    };
+    assert_eq!(anvil.menu.kind(), crate::menu::Kind::Anvil);
+    assert!(anvil.menu.typing());
+
+    let deliver = async |event| {
+        player
+            .menu(Delivery {
+                owner: owner.clone(),
+                event,
+            })
+            .await
+            .unwrap();
+    };
+    deliver(MenuEvent::click(&chest.menu, 0, Click::NumberKey, Some(3))).await;
+    lab.wait(|entry| entry == "menus:menu pick click buy 0 number_key 3 - - gold 1")
+        .await;
+    lab.wait(|entry| entry == "menus:update true").await;
+    let PlayerAction::UpdateMenu(update) = next().await else {
+        panic!("expected a patch");
+    };
+    assert_eq!((&update.owner, update.id.as_str()), (&owner, "pick"));
+    let mut patched = (*chest.menu).clone();
+    patched.apply(&update.patch).unwrap();
+    assert_eq!(patched.state(), Some(&json!(2)));
+    assert_eq!(patched.title(), Some(&Text::Component(json!("Bought"))));
+
+    let mut typed = (*anvil.menu).clone();
+    typed.typed("Alex".into());
+    deliver(MenuEvent::text(&typed)).await;
+    lab.wait(|entry| entry == "menus:menu nick text - - - - Alex - - -")
+        .await;
+    lab.wait(|entry| entry == "menus:close true").await;
+    assert_eq!(
+        next().await,
+        PlayerAction::CloseMenu {
+            owner: owner.clone(),
+            id: Some("nick".into())
+        }
+    );
+
+    deliver(MenuEvent::close(&chest.menu, CloseReason::Player)).await;
+    lab.wait(|entry| entry == "menus:menu pick close - - - - - player - 1")
+        .await;
+    lab.wait(|entry| entry == "menus:close any true").await;
+    assert_eq!(
+        next().await,
+        PlayerAction::CloseMenu {
+            owner: owner.clone(),
+            id: None
+        }
+    );
+    // The anvil's close carries its text too.
+    deliver(MenuEvent::close(&typed, CloseReason::Replaced)).await;
+    lab.wait(|entry| entry == "menus:menu nick close - - - - Alex replaced - -")
+        .await;
+    runtime.plugins().shutdown().await;
+}
+
 fn copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
@@ -1106,22 +1196,45 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
     let spec = installed(&folder, r#"{"deny":"Mallory"}"#);
     let namespace = format!("plugin.{}.hello", spec.name);
     let broker = Broker::default();
+    // The servers of the selector menu, beside lobby and game. The later
+    // `backends` key replaces the one in `BASE`.
+    let backends = "backends = { lobby = '127.0.0.1:25001', game = '127.0.0.1:25002', survival = '127.0.0.1:25003', creative = '127.0.0.1:25004', minigames = '127.0.0.1:25005' }";
     let runtime =
-        Extensions::with_engines(&config("", vec![spec]), broker.clone(), None, engines).unwrap();
+        Extensions::with_engines(&config(backends, vec![spec]), broker.clone(), None, engines)
+            .unwrap();
     runtime.plugins().start().await.unwrap();
     let registration = runtime.plugins().active()[0].registration().unwrap();
+    let hello = CommandSpec {
+        name: "hello".into(),
+        aliases: Vec::new(),
+        permission: "hello.use".into(),
+        suggest: SuggestKind::Players,
+        console: false,
+    };
+    let servers = CommandSpec {
+        name: "servers".into(),
+        aliases: Vec::new(),
+        permission: String::new(),
+        suggest: SuggestKind::None,
+        console: false,
+    };
+    // Every example opens the server selector with `servers` once its SDK
+    // has menus.
+    let menus = registration.commands.len() > 1;
+    if menus {
+        assert_eq!(registration.commands, [hello, servers]);
+    } else {
+        assert_eq!(registration.commands, [hello]);
+    }
+    // A Lua menu handler lists `menu`; a component's needs no entry.
+    let hooks: Vec<_> = registration
+        .hooks
+        .iter()
+        .copied()
+        .filter(|hook| *hook != Hook::Menu)
+        .collect();
     assert_eq!(
-        registration.commands,
-        [CommandSpec {
-            name: "hello".into(),
-            aliases: Vec::new(),
-            permission: "hello.use".into(),
-            suggest: SuggestKind::Players,
-            console: false,
-        }]
-    );
-    assert_eq!(
-        registration.hooks,
+        hooks,
         [
             Hook::Login,
             Hook::Command,
@@ -1149,7 +1262,12 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
         .players()
         .register(1, &[1; 16], "Player1", 774, "lobby");
     let mut player = session(&runtime, 1);
-    assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
+    let visible: &[_] = if menus {
+        &[("hello".to_owned(), true), ("servers".to_owned(), false)]
+    } else {
+        &[("hello".to_owned(), true)]
+    };
+    assert_eq!(player.visible_commands(), visible);
     assert_eq!(
         words(player.command("hello").await.unwrap()),
         "Hello, Player1!"
@@ -1192,8 +1310,82 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
         .await
         .unwrap();
     assert_eq!(reply.payload.as_ref(), b"ping \x00 payload");
+
+    if menus {
+        server_selector(&runtime, &mut actions).await;
+    }
     runtime.plugins().shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The `hello` examples' `servers` command: the selector menu, and a click on
+/// a server that transfers the player there.
+async fn server_selector(
+    runtime: &Extensions,
+    actions: &mut tokio::sync::mpsc::Receiver<PlayerAction>,
+) {
+    use crate::menu::{Click, CloseReason, Delivery, Kind, MenuEvent};
+    let player = session(runtime, 1);
+    assert_eq!(player.command("servers").await.unwrap(), Action::Continue);
+    let action = timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let PlayerAction::Menu(shown) = action else {
+        panic!("expected the selector, got {action:?}");
+    };
+    let menu = &shown.menu;
+    assert_eq!(
+        (menu.id(), menu.kind()),
+        ("servers", Kind::Chest { rows: 3 })
+    );
+    assert!(menu.title().is_some());
+    let item = |slot: usize| menu.slots()[slot].as_ref().map(|button| button.look.item);
+    assert_eq!(
+        [0, 11, 13, 15, 22].map(item),
+        [
+            Some("gray_stained_glass_pane"),
+            Some("grass_block"),
+            Some("bricks"),
+            Some("bow"),
+            Some("barrier"),
+        ]
+    );
+    assert_eq!(item(10), None, "a space is an empty slot");
+    for (slot, server) in [(11, "survival"), (13, "creative"), (15, "minigames")] {
+        let action = &menu.slots()[slot].as_ref().unwrap().action;
+        assert_eq!(action.id.as_deref(), Some("join"));
+        assert_eq!(action.payload, Some(json!(server)));
+        assert_eq!(menu.slots()[slot].as_ref().unwrap().look.lore.len(), 1);
+    }
+    assert!(menu.slots()[22].as_ref().unwrap().action.close);
+    let deliver = async |event| {
+        player
+            .menu(Delivery {
+                owner: shown.owner.clone(),
+                event,
+            })
+            .await
+            .unwrap();
+    };
+    deliver(MenuEvent::click(menu, 13, Click::Left, None)).await;
+    assert_eq!(
+        timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        PlayerAction::Transfer("creative".into())
+    );
+    // The close is no click: nothing follows it.
+    deliver(MenuEvent::close(menu, CloseReason::Plugin)).await;
+    deliver(MenuEvent::click(menu, 15, Click::Right, None)).await;
+    assert_eq!(
+        timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        PlayerAction::Transfer("minigames".into())
+    );
 }
 
 /// One `#[tokio::test]` per scenario for `$fixture`, a `Fixture` value.
@@ -1337,6 +1529,14 @@ macro_rules! conformance_tests {
                 return;
             }
             $crate::plugins::conformance::chat_is_asked_only_of_its_handlers(&$fixture).await;
+        }
+
+        #[tokio::test]
+        async fn menus_reach_the_plugin_that_showed_them() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::menus_reach_the_plugin_that_showed_them(&$fixture).await;
         }
 
         #[tokio::test]

@@ -9,13 +9,20 @@
 //!   `hello.ping` without a queue group (a failed subscription fails `init`)
 //!   and returns this registration:
 //!   - command `hello`, permission `hello.use`, suggest `players`;
+//!   - command `servers`, open to every player, no suggestions;
 //!   - hooks `login`, `command`, `join`, `message`, `timer`, so the host skips
 //!     every other hook.
 //! - `login(ctx)` returns `deny("You are not welcome here.")` when `ctx.name`
 //!   equals the configured `deny` name exactly, otherwise `continue`.
-//! - `command(ctx)` returns the message `greeting` with the argument `name`
-//!   set to `ctx.name`, which Rift renders from `messages.toml` in the
-//!   player's language (`Hello, <ctx.name>!` by default).
+//! - `command(ctx)` for `hello` returns the message `greeting` with the
+//!   argument `name` set to `ctx.name`, which Rift renders from
+//!   `messages.toml` in the player's language (`Hello, <ctx.name>!` by
+//!   default). For `servers` it shows the player the server selector (see
+//!   `selector` below) with `players::show_menu` and returns `continue`.
+//!   Host errors are ignored.
+//! - `menu(event)`: a click on a button with the action `join` transfers the
+//!   player to the server named by the button's payload. Host errors are
+//!   ignored; every other event is ignored.
 //! - `join(ctx)` calls `players::message(ctx.uuid, "Welcome, <ctx.name>!")`,
 //!   then `store::increment("hello", "joins", 1)`. Host errors are ignored.
 //! - `message(msg)`: when `msg.reply` is set, publishes `msg.payload`
@@ -25,6 +32,7 @@
 //!
 //! No other hook is implemented and nothing else is logged.
 
+use rift_plugin::menu::{Button, Menu, MenuEvent, MenuKind};
 use rift_plugin::{
     Action, BusMessage, CommandSpec, Context, Hook, Plugin, Registration, SuggestKind, bus,
     players, store, text, timers,
@@ -35,6 +43,32 @@ use serde::Deserialize;
 struct Config {
     #[serde(default)]
     deny: Option<String>,
+}
+
+/// The server selector: a chest of three rows framed in gray glass, with a
+/// button per server (action `join`, the server's name as payload) and one
+/// that closes the menu.
+fn selector() -> Menu {
+    let server = |item: &str, name: &str, server: &str| {
+        Button::new(item)
+            .name(text::mini(name))
+            .lore(["Click to join"])
+            .id("join")
+            .payload(server)
+    };
+    Menu::chest("servers")
+        .title(text::mini("<dark_gray>Choose a server"))
+        .layout(["#########", "# S C M #", "####X####"])
+        .key('#', Button::new("gray_stained_glass_pane").name(" "))
+        .key('S', server("grass_block", "<green>Survival", "survival"))
+        .key('C', server("bricks", "<gold>Creative", "creative"))
+        .key('M', server("bow", "<red>Minigames", "minigames"))
+        .key(
+            'X',
+            Button::new("barrier")
+                .name(text::mini("<red>Close"))
+                .close(),
+        )
 }
 
 #[derive(Default)]
@@ -54,6 +88,7 @@ impl Plugin for Hello {
                     .permission("hello.use")
                     .suggest(SuggestKind::Players),
             )
+            .command(CommandSpec::new("servers"))
             .hooks([
                 Hook::Login,
                 Hook::Command,
@@ -72,8 +107,20 @@ impl Plugin for Hello {
     }
 
     fn command(&mut self, ctx: Context) -> Action {
+        if ctx.command.as_deref() == Some("servers") {
+            let _ = players::show_menu(&ctx.uuid, &selector());
+            return Action::Continue;
+        }
         // The text lives in messages.toml, translated per player.
         Action::message(text::message("greeting").arg("name", ctx.name))
+    }
+
+    fn menu(&mut self, event: MenuEvent) {
+        if let MenuKind::Click { action: "join", .. } = event.kind()
+            && let Ok(Some(server)) = event.payload::<String>()
+        {
+            let _ = players::transfer(&event.ctx.uuid, &server);
+        }
     }
 
     fn join(&mut self, ctx: Context) {
