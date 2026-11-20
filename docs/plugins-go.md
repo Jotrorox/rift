@@ -72,7 +72,7 @@ func main() {}
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -171,8 +171,7 @@ diamond := rift.Sprite("item/diamond").Shadow("#000000", 0.5).HoverItem("minecra
 - `rift.Escape(s)` escapes text for splicing into markup. An argument needs no
   escaping.
 - `rift.RenderText(text, language)`, `rift.PlainText`, `rift.ToLegacy` and
-  `rift.ToMini` (the contract's `text` interface, since 0.2.1: set
-  `min_api = "0.2.1"` in `plugin.toml`) ask Rift to convert text, with
+  `rift.ToMini` (the contract's `text` interface) ask Rift to convert text, with
   markup, legacy codes and the plugin's messages resolved in `language`
   (`"de"`; `""` for the default). Each returns `(string, error)`: compact
   JSON, the words, `§` codes or markup. Use them for text that leaves through

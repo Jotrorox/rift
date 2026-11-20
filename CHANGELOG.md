@@ -131,6 +131,15 @@ and are listed under **SDKs**.
 
 ### Changed
 
+- **Breaking for plugins:** the plugin contract is `rift:plugin@0.3.0`, which
+  adds [inventory menus](docs/menus.md) for WebAssembly plugins:
+  `players.menu`, `update-menu` and `close-menu`, and the `menu` hook in
+  `handler` with its `menu-event`. A new hook is a breaking change, so Rift
+  now loads only `api = "0.3"` plugins, for every engine, and refuses a 0.2
+  manifest with a pointer to the guide. The move needs no change in a
+  plugin's source: persistent Lua plugins set `api = "0.3"`, WebAssembly
+  plugins also rebuild against a 0.3.0 SDK. See
+  [Moving from 0.2](docs/plugins.md#moving-from-02).
 - A markup argument now wins over a theme style of the same name. Before, the
   theme style was applied and the argument never shown, so a plugin's
   `<info>` argument vanished on a network whose theme has an `info` style.
@@ -215,6 +224,12 @@ and are listed under **SDKs**.
 
 ### SDKs
 
+- Rust `rift-plugin` 0.3.0 implements `rift:plugin@0.3.0`. Its `menu` module
+  builds menus, patches and buttons (`Menu::chest(id)`, `hopper`,
+  `dispenser`, `anvil`, `Button::new(item)`, `MenuPatch`) for
+  `players::show_menu`, `players::update_menu` and `players::close_menu`, and
+  `Plugin::menu` receives a `MenuEvent` whose `kind()` is a typed
+  `MenuKind`, with `payload::<T>()` and `state::<T>()` to decode the JSON.
 - Rust `rift-plugin` 0.2.1, Go `github.com/Jotrorox/rift/sdk/go` v0.2.1 and
   the C SDK implement `rift:plugin@0.2.1`. They build messages
   (`text::message`, `rift.Msg`, `rift_msg`), style arguments and escaped

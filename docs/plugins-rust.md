@@ -33,7 +33,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = "0.2.1"
+rift-plugin = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
@@ -44,7 +44,7 @@ strip = true
 ```
 
 - [`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
-  plugin contract (`rift:plugin@0.2.1`), not the proxy. Each published version
+  plugin contract (`rift:plugin@0.3.0`), not the proxy. Each published version
   has a `sdk/rust/v…` git tag. In a Rift checkout `{ path = "…/sdk/rust" }`
   works as well.
 - The release profile keeps the component small.
@@ -97,7 +97,7 @@ rift_plugin::export!(Hello);
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -206,8 +206,7 @@ let diamond = text::Component::sprite("item/diamond")
 - `text::escape(&str)` escapes text for splicing into markup. An argument
   needs no escaping.
 - `text::render(text, language)`, `text::plain`, `text::to_legacy` and
-  `text::to_mini` (the contract's `text` interface, since 0.2.1: set
-  `min_api = "0.2.1"` in `plugin.toml`) ask Rift to convert text, with
+  `text::to_mini` (the contract's `text` interface) ask Rift to convert text, with
   markup, legacy codes and the plugin's messages resolved in `language`
   (`Some("de")`) or the default. They take `impl Into<Text>` and return
   `Result<String, String>`: compact JSON, the words, `§` codes or markup.

@@ -56,7 +56,7 @@ void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_decision_t *r
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -374,7 +374,7 @@ markup. The tags are listed in [Styled text](text.md).
 
 `rift_text_render(text, language, &out, &err)`, `rift_text_to_plain`,
 `rift_text_to_legacy` and `rift_text_to_mini` are the contract's `text`
-interface (since 0.2.1: set `min_api = "0.2.1"` in `plugin.toml`). Rift
+interface. Rift
 converts `text` with markup, legacy codes and the plugin's messages resolved
 in `language` (`"de"`; `NULL` for the default) into compact JSON, the words,
 `§` codes or markup. `rift_text_to_plain` is not `rift_text_plain`, which

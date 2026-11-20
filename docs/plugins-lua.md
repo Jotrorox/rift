@@ -31,7 +31,7 @@ my-network/
 # plugins/hello-lua/plugin.toml
 name = "hello-lua"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "lua"
 
 [capabilities]

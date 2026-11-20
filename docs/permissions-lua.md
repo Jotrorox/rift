@@ -142,7 +142,7 @@ before the `join` and `after_transfer` callbacks. Setting
 ## Persistent plugins
 
 Persistent [plugins](plugins.md), in Lua or WebAssembly, use the store through
-the `permissions` interface of the plugin contract (`rift:plugin@0.2`):
+the `permissions` interface of the plugin contract (`rift:plugin@0.3`):
 
 | Contract call | In the permission store |
 | --- | --- |

@@ -2,7 +2,7 @@
 
 A plugin is code that receives Rift's events and calls Rift's host API. Every
 plugin uses the same contract, [`wit/rift-plugin.wit`](../wit/rift-plugin.wit)
-(`rift:plugin@0.2.1`): one event schema, one set of answers, one host API. What
+(`rift:plugin@0.3.0`): one event schema, one set of answers, one host API. What
 differs is where the code runs:
 
 | Mode | What it is | Trust | Configured with |
@@ -67,8 +67,8 @@ is at most 64 KiB.
 ```toml
 name = "relaxoban"          # must match the folder plugins/relaxoban
 version = "0.3.1"           # 1–64 letters, digits, '.', '_', '+' or '-'
-api = "0.2"                 # the rift:plugin track this Rift implements
-min_api = "0.2.0"           # optional: the lowest 0.2.x the plugin runs on
+api = "0.3"                 # the rift:plugin track this Rift implements
+min_api = "0.3.0"           # optional: the lowest 0.3.x the plugin runs on
 mode = "persistent"         # or "script"; default "persistent"
 engine = "wasm"             # "lua" or "wasm"; required for persistent plugins
 entry = "relaxoban.wasm"    # default "init.lua" for Lua; required for WebAssembly
@@ -105,8 +105,8 @@ jit = true                  # false: interpret everything so deadlines interrupt
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `name`, `version`, `api` | required | `api` must be `"0.2"`. A manifest that says `"0.1"` is refused with a pointer to [Moving from 0.1](#moving-from-01). |
-| `min_api` | none | An exact version of the track, such as `"0.2.1"`, for a plugin that calls something a later 0.2 release added. An older Rift refuses to load the plugin instead of failing at the first call. `meta.api` returns the version of the running host. |
+| `name`, `version`, `api` | required | `api` must be `"0.3"`, for every engine. A manifest that says `"0.2"` is refused with a pointer to [Moving from 0.2](#moving-from-02), one that says `"0.1"` to [Moving from 0.1](#moving-from-01) as well. |
+| `min_api` | none | An exact version of the track, such as `"0.3.1"`, for a plugin that calls something a later 0.3 release added. An older Rift refuses to load the plugin instead of failing at the first call. Everything in 0.3.0, menus included, needs none. `meta.api` returns the version of the running host. |
 | `mode` | `"persistent"` | A `"script"` manifest may contain only `name`, `version` and `api`; the folder's `init.lua` runs in the sandbox. |
 | `engine` | required | An engine missing from this build is a warning in `rift check`, an error in `rift check --strict`, and refused at startup and reload. |
 | `entry` | `init.lua` (Lua) | A relative path of at most 256 bytes inside the folder, without `..`, not inside `data/` and without hidden (dot) components. |
@@ -156,7 +156,7 @@ underscores (`set_language`).
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `lookup`, `search`, `set-language` | See [Online players API](players-api.md). `target` is a name, a UUID or a connection id. Actions return whether the player was online and take [`text`](plugin-events.md#text). A `title-spec` has an optional title and subtitle (at least one) and times in ticks. `list` and `get` return a `player-info`, the [player table](players-api.md#player-tables). `lookup`, `search` and `set-language` are [the player directory](plugin-events.md#the-player-directory-and-languages). |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `menu`, `update-menu`, `close-menu`, `kick`, `transfer`, `broadcast`, `lookup`, `search`, `set-language` | See [Online players API](players-api.md). `target` is a name, a UUID or a connection id. Actions return whether the player was online and take [`text`](plugin-events.md#text). A `title-spec` has an optional title and subtitle (at least one) and times in ticks. `list` and `get` return a `player-info`, the [player table](players-api.md#player-tables). `lookup`, `search` and `set-language` are [the player directory](plugin-events.md#the-player-directory-and-languages). `menu`, `update-menu` and `close-menu` show [inventory menus](menus.md), whose events come back through the `menu` hook. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable [store](host-services.md#persistent-state) the configuration script uses too. Namespaces are private: `plugin.<name>.<namespace>`, which the script's `rift.store` cannot read or write. Each plugin has its own quota, 4096 entries and 1 MiB unless [`extensions.storage.quota`](host-services.md#limits-and-quotas) sets another. |
 | `permissions` | `has`, `set`, `add-group(uuid, group, expires-at?)`, `remove-group`, `groups`, `list-groups`, `meta`, `set-meta` | Rift's [permission store](permissions-lua.md#persistent-plugins): user nodes, group memberships (until `expires-at` Unix seconds when given, for a rank that runs out) and meta values with contexts and expiry, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
@@ -164,8 +164,8 @@ underscores (`set_language`).
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
 | `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](plugin-operations.md#logs). Control characters are replaced. |
 | `background` | `defer()`, `resolve(ticket, decision)`, `run(payload)`, `is-worker()` | [Background work](plugin-events.md#background-work). |
-| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.1`. |
-| `text` | `render(text, language?)`, `plain`, `to-legacy`, `to-mini` | Since 0.2.1 (set `min_api = "0.2.1"`); what [`rift.text`](text.md#rifttext-in-lua) does in Lua. Each converts [`text`](plugin-events.md#text) with markup, legacy codes and [messages](text.md#plugin-messages) resolved, the plugin's own by unqualified key, in `language` (a tag such as `de` or `de_de`) or the default, and returns compact JSON, the words, `§` codes or markup. An invalid text or language is the error. It works in `init`, `reload` and background workers, so `init` can check a template from the configuration. |
+| `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.3.0`. |
+| `text` | `render(text, language?)`, `plain`, `to-legacy`, `to-mini` | What [`rift.text`](text.md#rifttext-in-lua) does in Lua. Each converts [`text`](plugin-events.md#text) with markup, legacy codes and [messages](text.md#plugin-messages) resolved, the plugin's own by unqualified key, in `language` (a tag such as `de` or `de_de`) or the default, and returns compact JSON, the words, `§` codes or markup. An invalid text or language is the error. It works in `init`, `reload` and background workers, so `init` can check a template from the configuration. |
 
 Calls that wait (bus requests, server operations, store writes) block only the
 plugin's own thread. Persistent plugins get no per-call budgets beyond their
@@ -291,22 +291,44 @@ The WIT keeps guests in C and Go pleasant:
   world `core` is the same without WASI.
 
 Additions keep compiled components loading. Wasmtime matches interface versions
-on the `0.2` track, so a component built against `0.2.0` links against every
-later `0.2` host. An addition may bring new host functions, types and
+on the `0.3` track, so a component built against `0.3.0` links against every
+later `0.3` host. An addition may bring new host functions, types and
 interfaces, but never changes an existing type or adds a case to an existing
 enum or variant, since exports are checked exactly.
 
 A host function a component calls needs a host that has it: such a plugin names
-the release in [`min_api`](#plugintoml). `0.2.1` added the `text` interface,
-so a plugin that calls it sets `min_api = "0.2.1"`. Breaking changes move to
-the next minor version until 1.0.
+the release in [`min_api`](#plugintoml), for example `min_api = "0.3.1"` for
+something 0.3.1 adds. Breaking changes move to the next minor version until
+1.0. A new hook is one, because a component exports exactly what `handler`
+lists. A Rift hosts one track: a 0.3 host loads only `api = "0.3"` plugins.
+
+## Moving from 0.2
+
+`rift:plugin@0.3.0` is 0.2.1 plus [inventory menus](menus.md): the
+`menu-event` record, `players.menu`, `update-menu` and `close-menu`, and the
+`menu` hook in `handler`. Nothing else changed, so the move needs no change in
+a plugin's source. Rift hosts with this contract load only `api = "0.3"`
+plugins, for every engine; a 0.2 manifest is refused with a pointer here, and
+a component built against 0.2 does not link.
+
+| Plugin | What changes |
+| --- | --- |
+| `rift.lua` | Nothing |
+| Persistent Lua | `api = "0.3"` in `plugin.toml` |
+| WebAssembly | `api = "0.3"` in `plugin.toml`, the 0.3.0 SDK and a rebuild. Every SDK gives the `menu` hook a default, as it does for the other hooks |
+
+`min_api` starts again on the new track: a manifest that names a 0.2 version
+is refused, and a plugin that shows menus needs none, because every 0.3 host
+has them. The `text` interface, which needed `min_api = "0.2.1"`, is part of
+0.3.0.
 
 ## Moving from 0.1
 
 `rift:plugin@0.2.0` is 0.1.5 without its duplicates, plus background work, the
-player directory, languages, command aliases and the console. Rift 0.2 hosts
-load only `api = "0.2"` plugins; a 0.1 manifest is refused with a pointer
-here, and a component built against 0.1 does not link.
+player directory, languages, command aliases and the console. A 0.1 plugin
+takes this table and then [Moving from 0.2](#moving-from-02): today's Rift
+refuses a 0.1 manifest with a pointer to both sections, and a component built
+against 0.1 does not link.
 
 | 0.1 | 0.2 |
 | --- | --- |
