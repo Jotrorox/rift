@@ -203,7 +203,12 @@ are right again.
   a cost of at least 1 level by itself. Rift remembers a new text, sends the
   result slot and a cost of 0 again, and reports a `text` event if the menu
   asked for it, at most every 200 ms; a text that has to wait is reported
-  when the interval ends. A cost of 0 hides the "Enchantment cost" line and
+  when the interval ends.
+- Building the result for a new text converts its stack to the client's
+  version, about 40 steps on 1.12, whose client sends a rename on every key.
+  Rift builds it at most every 50 ms per player: a rename in between gets
+  the last result back, and the result for the last text follows when the
+  interval ends. The `text` the plugin gets is always the latest. A cost of 0 hides the "Enchantment cost" line and
   stops the client from taking the result on its own.
 - A rename longer than the client allows (35 UTF-16 units before 1.17, 50
   from 1.17), after the characters the game filters out of names, is ignored

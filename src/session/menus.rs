@@ -57,6 +57,14 @@ const TEXT_EVENT_INTERVAL: Duration =
 /// the backend would create as a real item. A creative player who really
 /// drops or takes an item in that second loses that one action.
 pub(super) const CREATIVE_GRACE: Duration = Duration::from_secs(1);
+/// An anvil's result is built again for a new text at most this often. The
+/// client sends a rename on every key, and building the result converts its
+/// stack down to the client's version (about 40 steps on 1.12), so a client
+/// that types or sends renames fast costs at most this rate. A text that has
+/// to wait is built when the interval ends, so the final one always is;
+/// meanwhile each rename gets the last result back. The plugin's `text` is
+/// the latest at once either way.
+pub(super) const RESULT_INTERVAL: Duration = Duration::from_millis(50);
 /// Rift's container IDs, 101 to 127.
 const CONTAINERS: usize = (packets::LAST_CONTAINER - packets::FIRST_CONTAINER + 1) as usize;
 
@@ -102,6 +110,10 @@ pub(crate) struct OpenMenu {
     /// whether a newer text waits for the next one.
     last_text: Option<Instant>,
     text_pending: bool,
+    /// Anvil: when the result was last built for a new text, and whether a
+    /// newer text waits for it (see [`RESULT_INTERVAL`]).
+    pub(super) result_built: Option<Instant>,
+    pub(super) result_stale: bool,
 }
 
 impl OpenMenu {
@@ -151,6 +163,35 @@ impl OpenMenu {
     fn text_due(&self) -> Option<Instant> {
         let last = self.last_text.filter(|_| self.text_pending)?;
         Some(last + TEXT_EVENT_INTERVAL)
+    }
+
+    /// The player typed a new text: build the result for it now, unless it
+    /// was built within [`RESULT_INTERVAL`]; then it waits for
+    /// [`Self::result_due`].
+    fn typed_result(&mut self, now: Instant, protocol: i32) -> io::Result<()> {
+        self.result_stale = true;
+        if self
+            .result_built
+            .is_some_and(|built| now.duration_since(built) < RESULT_INTERVAL)
+        {
+            return Ok(());
+        }
+        self.fresh_result(now, protocol)
+    }
+
+    /// Build the result for the current text if a newer one waits.
+    fn fresh_result(&mut self, now: Instant, protocol: i32) -> io::Result<()> {
+        if std::mem::take(&mut self.result_stale) {
+            self.result_built = Some(now);
+            self.rebuild(ANVIL_RESULT, protocol)?;
+        }
+        Ok(())
+    }
+
+    /// When the result for the text that waits is built.
+    fn result_due(&self) -> Option<Instant> {
+        let built = self.result_built.filter(|_| self.result_stale)?;
+        Some(built + RESULT_INTERVAL)
     }
 
     /// Build slot `slot`'s stack again after the menu changed.
@@ -469,13 +510,18 @@ impl Menus {
     }
 
     /// When the session has to act on its own next: a waiting inventory
-    /// request, or the last text the player typed in an anvil.
+    /// request, or the last text the player typed in an anvil, to report or
+    /// to build the result for.
     pub(super) fn deadline(&self) -> Option<Instant> {
-        let text = self.open.as_ref().and_then(OpenMenu::text_due);
-        match (self.request.due(), text) {
-            (Some(request), Some(text)) => Some(request.min(text)),
-            (request, text) => request.or(text),
-        }
+        let open = self.open.as_ref();
+        [
+            self.request.due(),
+            open.and_then(OpenMenu::text_due),
+            open.and_then(OpenMenu::result_due),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The backend is about to change: a switch or a reconfiguration. The
@@ -536,6 +582,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             shown,
             last_text: None,
             text_pending: false,
+            result_built: None,
+            result_stale: false,
         };
         if let Err(error) = open.build_stacks(protocol) {
             log_warn!(
@@ -669,6 +717,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             (open.menu, open.shown, open.stacks) = old;
             return Ok(());
         }
+        // Every stack is built for the current text.
+        open.result_stale = false;
         let mut sent = Vec::new();
         let slots: Vec<usize> = if diff.title {
             sent.push(packets::open_screen(
@@ -822,6 +872,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 None => self.menus.request.again = false,
             }
         }
+        if let Some(open) = self.menus.open.as_mut()
+            && open.result_due().is_some_and(|due| due <= now)
+        {
+            open.fresh_result(now, version.number())?;
+            let state = open.next_state();
+            let result = packets::set_slot(
+                version,
+                open.container,
+                state,
+                ANVIL_RESULT as i16,
+                &open.stacks[ANVIL_RESULT],
+            )?;
+            self.client.inject(&result)?;
+            self.client
+                .inject(&packets::anvil_cost(version, open.container)?)?;
+        }
         let undelivered = self.menus.undelivered.load(Ordering::Relaxed);
         if let Some(open) = self.menus.open.as_mut()
             && open.text_due().is_some_and(|due| due <= now)
@@ -935,9 +1001,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             return Ok(SessionEvent::Packet);
         };
         let changed = open.menu.text() != text;
+        let now = Instant::now();
         if changed {
             open.menu.typed(text);
-            open.rebuild(ANVIL_RESULT, protocol)?;
+            open.typed_result(now, protocol)?;
         }
         let state = open.next_state();
         let result = packets::set_slot(
@@ -952,7 +1019,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .inject(&packets::anvil_cost(version, open.container)?)?;
         if changed
             && open.menu.typing()
-            && open.typed_now(Instant::now())
+            && open.typed_now(now)
             && undelivered < menu::MAX_PENDING_EVENTS
         {
             let event = MenuEvent::text(&open.menu);
@@ -1007,6 +1074,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 open.menu.field_from_text();
                 open.rebuild(ANVIL_LEFT, version.number())?;
             }
+            open.fresh_result(Instant::now(), version.number())?;
             sent = vec![ANVIL_LEFT, ANVIL_RIGHT, ANVIL_RESULT];
         }
         let state = open.next_state();

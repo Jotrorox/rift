@@ -1793,7 +1793,9 @@ async fn typing_events_come_at_most_5_a_second_and_always_for_the_final_text() {
         // An unchanged text is no event.
         send(&mut client, &rename(protocol, "abc")).await;
         assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
-        // The last text comes once the interval is over.
+        // The anvil's result for the last text is built first, after its
+        // shorter interval; the last text comes once its interval is over.
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
         let event = delivery(session.forward().await.unwrap()).event;
         assert_eq!(
             (event.kind, event.text.as_deref()),
@@ -2150,6 +2152,57 @@ async fn late_clicks_ask_a_1_17_backend_no_more_often_than_the_interval() {
         assert!(session.menus.request.on_close);
         flush(&mut session).await;
         nothing(&mut backend).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn fast_renames_build_the_result_at_most_every_interval_and_always_for_the_last_text() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 340;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        let mut spec = nick();
+        spec["typing"] = json!(true);
+        show(&mut session, &mut client, spec, owner()).await;
+        let contains = |packet: &Packet, text: &str| {
+            packet
+                .data
+                .windows(text.len())
+                .any(|window| window == text.as_bytes())
+        };
+        // The first rename's result is built at once.
+        send(&mut client, &rename(protocol, "Al")).await;
+        delivery(session.forward().await.unwrap());
+        flush(&mut session).await;
+        let first = drain(&mut client).await;
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(slot_of(protocol, &first[0]).1, RESULT);
+        assert!(contains(&first[0], "Al"));
+        // Renames within the interval get the last result back, unbuilt;
+        // the plugin's text is the latest at once.
+        let open = session.menus.open.as_mut().unwrap();
+        open.result_built = Some(std::time::Instant::now() + Duration::from_secs(3600));
+        for text in ["Ale", "Alex"] {
+            send(&mut client, &rename(protocol, text)).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            let packets = drain(&mut client).await;
+            assert_eq!(packets.len(), 2, "{packets:?}");
+            assert_eq!(slot_of(protocol, &packets[0]).1, RESULT);
+            assert!(contains(&packets[0], "Al") && !contains(&packets[0], "Ale"));
+        }
+        let open = session.menus.open.as_mut().unwrap();
+        assert_eq!(open.menu.text(), "Alex");
+        assert!(open.result_stale);
+        // When the interval ends, the result for the last text goes out.
+        open.result_built = Some(std::time::Instant::now() - menus::RESULT_INTERVAL);
+        session.forward().await.unwrap();
+        flush(&mut session).await;
+        let packets = drain(&mut client).await;
+        assert_eq!(slot_of(protocol, &packets[0]).1, RESULT);
+        assert!(contains(&packets[0], "Alex"), "{packets:?}");
+        assert!(!session.menus.open.as_ref().unwrap().result_stale);
     })
     .await
     .unwrap();
