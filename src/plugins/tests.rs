@@ -1549,7 +1549,10 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
     assert!(runtime.plugins().may_handle(Hook::Chat));
     let statuses = runtime.plugins().statuses();
     assert!(!statuses[0].hooks.contains(&"chat"), "{statuses:?}");
-    assert_eq!(statuses[1].hooks, ["timer", "dialog", "chat", "job_done"]);
+    assert_eq!(
+        statuses[1].hooks,
+        ["timer", "dialog", "chat", "job_done", "menu"]
+    );
     let player = session(&runtime, 1);
     assert!(player.handles_chat());
     assert_eq!(
@@ -1791,7 +1794,10 @@ async fn kick_asks_the_script_then_plugins_that_handle_it() {
     // The script first, then the plugins.
     assert_eq!(statuses[0].hooks, ["kick"]);
     assert!(!statuses[1].hooks.contains(&"kick"), "{statuses:?}");
-    assert_eq!(statuses[2].hooks, ["timer", "dialog", "kick", "job_done"]);
+    assert_eq!(
+        statuses[2].hooks,
+        ["timer", "dialog", "kick", "job_done", "menu"]
+    );
     let player = session(&runtime, 1);
     // The script answers first; the plugin is not asked.
     assert_eq!(

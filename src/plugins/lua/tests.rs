@@ -524,6 +524,128 @@ end)
     assert!(actions.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn plugins_show_menus_and_receive_their_events() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, {
+        id = "servers",
+        title = { mini = "<dark_gray>Choose a server" },
+        layout = { "=========", "= S C M =", "====X====" },
+        keys = {
+            ["="] = { item = "gray_stained_glass_pane", name = " " },
+            S = { item = "grass_block", id = "join", payload = { server = "survival" } },
+            C = { item = "bricks", id = "join", payload = { server = "creative" } },
+            M = { item = "bow", id = "join", payload = { server = "minigames" } },
+            X = { item = "barrier", close = true },
+        },
+        state = { opened = 1 },
+    }))
+    assert(rift.players.menu(ctx.uuid, '{"id":"json","type":"dispenser"}'))
+    local ok, err = pcall(rift.players.menu, ctx.uuid, { id = "servers", keys = 1 })
+    assert(not ok and err:find("keys must be an object"), err)
+    ok, err = pcall(rift.players.menu, ctx.uuid, { id = "nick", type = "anvil" })
+    assert(not ok and err:find("anvil menus are not available yet"), err)
+    assert(rift.players.close_menu(ctx.uuid, "servers"))
+    assert(rift.players.close_menu(ctx.uuid))
+end)
+rift.menus.on("servers", {
+    click = {
+        join = function(ctx)
+            rift.players.message(ctx.uuid, ctx.payload.server .. " " .. ctx.slot .. " " .. ctx.click)
+        end,
+    },
+    close = function(ctx)
+        rift.players.message(ctx.uuid, "closed " .. ctx.reason .. " " .. ctx.state.opened)
+    end,
+})
+rift.on("menu", function(ctx)
+    rift.players.message(ctx.uuid, "seen " .. ctx.menu .. " " .. ctx.kind)
+end)
+local ok, err = pcall(rift.menus.on, "x", { press = function() end })
+assert(not ok and err:find("unknown handler press"), err)
+ok, err = pcall(rift.menus.on, "x", { click = { buy = 1 } })
+assert(not ok and err:find("maps button ids to functions"), err)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 340, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    assert_eq!(shown.owner, owner);
+    assert_eq!(shown.menu.id(), "servers");
+    assert!(shown.menu.title().is_some());
+    let Some(crate::extensions::PlayerAction::Menu(json)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    assert_eq!(json.menu.kind(), crate::menu::Kind::Dispenser);
+    for id in [Some("servers".to_owned()), None] {
+        assert_eq!(
+            actions.try_recv().ok(),
+            Some(crate::extensions::PlayerAction::CloseMenu {
+                owner: owner.clone(),
+                id
+            })
+        );
+    }
+
+    use crate::menu::{Click, CloseReason, Delivery, MenuEvent};
+    let event = MenuEvent::click(&shown.menu, 13, Click::ShiftLeft, None);
+    player
+        .menu(Delivery {
+            owner: owner.clone(),
+            event,
+        })
+        .await
+        .unwrap();
+    let event = MenuEvent::close(&shown.menu, CloseReason::Plugin);
+    player
+        .menu(Delivery {
+            owner: owner.clone(),
+            event,
+        })
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for _ in 0..4 {
+        let message = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        messages.push(message);
+    }
+    let message = crate::extensions::PlayerAction::Message;
+    assert_eq!(
+        messages,
+        [
+            message("creative 13 shift_left".into()),
+            message("seen servers click".into()),
+            message("closed plugin 1".into()),
+            message("seen servers close".into()),
+        ]
+    );
+    // An event for a plugin that is not configured is dropped.
+    player
+        .menu(Delivery {
+            owner: crate::dialog::Owner::Plugin("gone".into()),
+            event: MenuEvent::close(&shown.menu, CloseReason::Player),
+        })
+        .await
+        .unwrap();
+    runtime.plugins().shutdown().await;
+    assert!(actions.try_recv().is_err());
+}
+
 /// A player table carries the client's `locale` once the session published
 /// it; before that it is nil.
 #[tokio::test]

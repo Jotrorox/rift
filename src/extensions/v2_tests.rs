@@ -1517,3 +1517,158 @@ async fn invalid_dialogs_fail_the_callback_and_dialog_handlers_register() {
             .any(|hook| hook == "dialog")
     );
 }
+
+#[tokio::test]
+async fn players_api_shows_menus_and_rift_menus_on_sorts_their_events() {
+    let config = Config::from_lua(
+        r#"rift.setup({ listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' } })
+        rift.on('login', function(ctx)
+            local players = require('rift.players')
+            assert(players.menu('Alice', {
+                id = 'shop', rows = 1, title = { text = 'Shop', color = 'gold' }, state = { page = 1 },
+                slots = {
+                    { slot = 0, item = 'diamond', id = 'buy', payload = { price = 5 } },
+                    { slot = 8, item = 'barrier', close = true },
+                },
+            }))
+            -- JSON text works too; 1.11.2 has no menus.
+            assert(players.menu('Alice', '{"id":"other","type":"hopper"}'))
+            assert(not players.menu('Old', { id = 'x' }))
+            assert(not players.menu('Nobody', { id = 'x' }))
+            assert(players.close_menu('Alice', 'shop'))
+            assert(players.close_menu('Alice'))
+            assert(not players.close_menu('Old'))
+        end)
+        rift.menus.on('shop', {
+            click = {
+                buy = function(ctx)
+                    rift.players.message(ctx.uuid, table.concat({ ctx.kind, ctx.menu, ctx.action, ctx.slot,
+                        ctx.click, ctx.payload.price, ctx.state.page, tostring(ctx.key) }, ':'))
+                end,
+            },
+            close = function(ctx)
+                rift.players.message(ctx.uuid, ctx.kind .. ':' .. ctx.reason .. ':' .. ctx.state.page)
+            end,
+        })
+        rift.menus.on('other', {
+            click = function(ctx) rift.players.message(ctx.uuid, 'any:' .. ctx.action .. ':' .. ctx.key) end,
+        })"#,
+        "menus.lua",
+    )
+    .unwrap();
+    assert!(
+        config
+            .extensions
+            .as_ref()
+            .unwrap()
+            .hook_names()
+            .any(|hook| hook == "menu")
+    );
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (_old, mut old) = runtime
+        .players()
+        .register(10, &[10; 16], "Old", 316, "lobby");
+    let session = runtime.session(context(9)).unwrap();
+    assert_eq!(session.decision("login").await.unwrap(), Action::Continue);
+    assert!(drain(&mut old).is_empty());
+    let actions = drain(&mut alice);
+    assert_eq!(actions.len(), 4, "{actions:?}");
+    let PlayerAction::Menu(shop) = &actions[0] else {
+        panic!("expected a menu, got {:?}", actions[0]);
+    };
+    assert_eq!(shop.owner, crate::dialog::Owner::Script);
+    assert_eq!(shop.menu.id(), "shop");
+    assert_eq!(shop.menu.kind(), crate::menu::Kind::Chest { rows: 1 });
+    let PlayerAction::Menu(other) = &actions[1] else {
+        panic!("expected a menu, got {:?}", actions[1]);
+    };
+    assert_eq!(other.menu.kind(), crate::menu::Kind::Hopper);
+    assert_eq!(
+        actions[2..],
+        [
+            PlayerAction::CloseMenu {
+                owner: crate::dialog::Owner::Script,
+                id: Some("shop".into())
+            },
+            PlayerAction::CloseMenu {
+                owner: crate::dialog::Owner::Script,
+                id: None
+            },
+        ]
+    );
+
+    let deliver = |event| crate::menu::Delivery {
+        owner: crate::dialog::Owner::Script,
+        event,
+    };
+    use crate::menu::{Click, CloseReason, MenuEvent};
+    session
+        .menu(deliver(MenuEvent::click(&shop.menu, 0, Click::Left, None)))
+        .await
+        .unwrap();
+    session
+        .menu(deliver(MenuEvent::close(&shop.menu, CloseReason::Player)))
+        .await
+        .unwrap();
+    // Another menu's handler takes every click as one function.
+    let hopper = crate::menu::Menu::parse(&serde_json::json!({
+        "id": "other", "type": "hopper",
+        "slots": [{"slot": 1, "item": "stone", "id": "go", "clicks": "all"}],
+    }))
+    .unwrap();
+    session
+        .menu(deliver(MenuEvent::click(
+            &hopper,
+            1,
+            Click::NumberKey,
+            Some(3),
+        )))
+        .await
+        .unwrap();
+    // A menu nobody handles, and a button without a handler.
+    session
+        .menu(deliver(MenuEvent::close(&hopper, CloseReason::Server)))
+        .await
+        .unwrap();
+    session
+        .menu(deliver(MenuEvent::click(&shop.menu, 8, Click::Right, None)))
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [
+            PlayerAction::Message("click:shop:buy:0:left:5:1:nil".into()),
+            PlayerAction::Message("close:player:1".into()),
+            PlayerAction::Message("any:go:3".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn invalid_menus_fail_the_callback() {
+    for (menu, message) in [
+        (
+            "{ id = 'nick', type = 'anvil' }",
+            "anvil menus are not available yet",
+        ),
+        (
+            "{ id = 'x', slots = { { slot = 27, item = 'stone' } } }",
+            "slot 27: a chest with 3 rows has slots 0 to 26",
+        ),
+        ("{ id = 'x', layout = { 'ab' } }", "has 9 characters, not 2"),
+    ] {
+        let runtime = runtime(&format!(
+            "api_version=2, login=function(ctx) require('rift.players').menu('Alice', {menu}) end"
+        ));
+        let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+        let error = runtime
+            .session(context(1))
+            .unwrap()
+            .decision("login")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+        assert!(drain(&mut alice).is_empty());
+    }
+}
