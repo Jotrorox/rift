@@ -26,7 +26,7 @@ pub(crate) use packets::{
     ProfileKey, disconnect_reason, login_identity, start_identity, start_profile_key,
     success_identity, without_profile_key,
 };
-pub use packets::{disconnect_component, system_component, validate_component};
+pub use packets::{disconnect_component, system_component, transfer, validate_component};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
 pub(crate) use switching::ChatKind;

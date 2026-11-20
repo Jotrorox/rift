@@ -21,6 +21,19 @@ and the grants a login needs.
 > A timed-out command may already have executed. Check status before retrying
 > a mutation. Rift performs no automatic mutation retry.
 
+## Scopes in a cluster
+
+In a [cluster](clustering.md#subject-scopes) each subject has a scope that
+says whether it crosses peers. On a single Rift the scopes change nothing.
+
+| Scope | Subjects |
+| --- | --- |
+| `local`: answered by the peer the publisher is connected to | `rift.control`, `rift.players` and `rift.network` and everything below them; `rift.server.state`; the permission requests `rift.perms.hello`, `subject.get`, `subject.batch`, `groups.get`, `apply`, `command`, `register` and `context`; `rift.node.<n>.*` other than `cmd` and `state` |
+| `applied`: each peer publishes its own copy to its own subscribers | `rift.events.instances`, `rift.events.permissions`, `rift.events.reload`, `rift.events.servers`, `rift.events.cluster`, `rift.perms.update`, `rift.perms.changes` |
+| `origin`: published where it happens; reaches remote clients on every peer, but Lua and plugins only on their own peer | Every other `rift.events.*`: `players`, `control`, `lifecycle`, `plugins` |
+| `owner`: routed to the peer holding the node's session, or to the leader | `rift.node.<n>.cmd`, `rift.node.<n>.state` |
+| `cluster`: federated by interest | Everything else, including `rift.perms.update.<uuid>`, `rift.perms.update.resync` and `_INBOX.*` |
+
 ## Player API
 
 The `players` interface of the [plugin contract](plugins.md#host-api) is also
@@ -46,7 +59,7 @@ id.
 
 | Subject | Request | Reply `data` | Needs |
 | --- | --- | --- | --- |
-| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774,"visible_to":null,"locale":"en_us"}]` | `players` |
+| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774,"visible_to":null,"locale":"en_us"}]`; on a [cluster](clustering.md) peer each player also has `peer`, the peer holding its connection | `players` |
 | `rift.players.get` | `{"target":"Alice"}` | one player, or `null` | `players` |
 | `rift.players.names` | `{}` or `{"prefix":"Al"}` | sorted names | `players` |
 | `rift.players.message` | `{"target":"Alice","text":"Hello"}` | whether the player was online | `players` |
@@ -141,7 +154,7 @@ listener is disabled.
 | `rift.control.drain` | `{"backend":"lobby","enabled":true}` | Enable/disable draining for a backend | `control` |
 | `rift.control.transfer` | `{"connection_id":123,"backend":"lobby"}` | Transfer an online player with existing protocol/access checks | `control` |
 | `rift.control.reload` | `{}` | Reload the selected configuration file | `control` |
-| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node | `control` |
+| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node; on a [cluster](clustering.md#servers-on-the-peers-own-hosts) peer also `peer` (the peer whose own node runs it, else `null`) | `control` |
 | `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling, node selection and instances | `control` |
 | `rift.control.nodes` | `{}` | [Nodes](nodes.md) with reachability, address, labels, instances, allocated memory and measured host resources | `control` |
 | `rift.control.templates` | `{}` | Templates with their server software and download cache state | `control` |
@@ -151,10 +164,12 @@ listener is disabled.
 | `rift.control.stop` | `{"name":"lobby-1"}` | Request an unused managed server stop and pause automatic wake | `control` |
 | `rift.control.download` | `{"template":"paper","refresh":false}` | Download (or with `refresh`, update) a template's server software | `control` |
 | `rift.control.plugins` | `{"action":"list"}`, or `{"action":"status"\|"logs"\|"restart","name":"hello-lua"}` | [Plugins](plugin-operations.md) with state, restarts and calls; one plugin; its last 200 log lines; or restart a persistent plugin (accepted asynchronously) | `control` |
+| `rift.control.cluster` | `{}` (status), or `{"command":"add","args":["eu-2","10.0.0.2:7444"]}` with `command` one of `status`, `add`, `promote`, `demote`, `remove`, `replace`, `leave`, `transfer-leader` | The same data and commands as [`rift admin cluster`](clustering.md#operating-a-cluster); membership commands run on the leader. `backup` writes a file on the proxy host and is only available through `rift admin` | `control` |
 
-Control requests are serialized, except `create`, `remove` and `download`:
+Control requests are serialized, except `create`, `remove`, `download` and
+`cluster`:
 
-- These three run alongside other control requests, at most 16 at once. Rift
+- These run alongside other control requests, at most 16 at once. Rift
   still applies instance changes one at a time.
 - They reply when the operation finishes, which can include a first-time
   download of up to 15 minutes. Use a request timeout long enough for
@@ -190,6 +205,7 @@ like their other host calls.
 | `rift.events.plugins` | Persistent plugins starting, failing, restarting and stopping, and operator restarts, as described in [plugins](plugin-operations.md) |
 | `rift.events.servers` | Changes to what backends report about themselves (see [server state](#server-state)) |
 | `rift.events.lifecycle` | `ready` and `draining` |
+| `rift.events.cluster` | In a [cluster](clustering.md): `{"event":"leader","term":4,"leader":"eu-2","peer":"eu-1"}` when this peer sees a new leader or term; `{"event":"membership","voters":[…],"learners":[…]}` after a membership change; `{"event":"peer_added"\|"peer_joined"\|"peer_expired","name":"eu-3","incarnation":7}` and `{"event":"peer_removed","name":"eu-3"}` as the peer table changes. Every peer publishes these to its own subscribers (`applied` scope), so each subscriber gets one copy |
 
 These are ephemeral events; query status to get current state.
 

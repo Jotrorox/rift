@@ -14,7 +14,7 @@ use crate::plugins::{
     },
     services::Services,
 };
-use crate::text::Text;
+use crate::{cluster::queues::jobs::Scope, messaging::SubscriptionScope, text::Text};
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -321,6 +321,10 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
         properties.raw_push(entry)?;
     }
     player.raw_set("properties", properties)?;
+    // The cluster peer the player is on; absent without a cluster.
+    if let Some(peer) = &info.peer {
+        player.raw_set("peer", peer.as_str())?;
+    }
     Ok(player)
 }
 
@@ -376,19 +380,20 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
-    // The exact `rift:plugin` version, such as "0.2.0".
+    // The exact `rift:plugin` version, such as "0.2.1".
     meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 
     registration(lua, &rift, state)?;
     helpers(lua, &rift, state)?;
-    crate::text::lua::install(lua, &rift)?;
+    crate::text::lua::install(lua, &rift, Some(spec.name.as_str()))?;
     rift.raw_set("players", players(lua, state)?)?;
     rift.raw_set("store", store(lua, state)?)?;
     rift.raw_set("permissions", permissions(lua, state)?)?;
     rift.raw_set("servers", servers(lua, state)?)?;
     rift.raw_set("timers", timers(lua, state)?)?;
     rift.raw_set("background", background(lua, state)?)?;
+    rift.raw_set("cluster", cluster(lua, state)?)?;
     messaging(lua, &rift, state)?;
     super::http::install(lua, &rift, state, spec.manifest.capabilities.network)?;
 
@@ -560,11 +565,34 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(
             lua,
             state,
-            move |_, (name, every_ms, callback): (Value, Value, Value)| {
-                let (Value::String(name), Value::Function(callback)) = (name, callback) else {
+            move |_, (name, every_ms, options, callback): (Value, Value, Value, Value)| {
+                // `rift.every(name, ms, fn)` or `rift.every(name, ms, { scope = ... }, fn)`.
+                let (options, callback) = match (options, callback) {
+                    (Value::Function(callback), Value::Nil) => (None, callback),
+                    (Value::Table(options), Value::Function(callback)) => (Some(options), callback),
+                    _ => {
+                        return Err(runtime(
+                            "rift.every expects a job name, an interval in milliseconds, optional options and a function",
+                        ));
+                    }
+                };
+                let Value::String(name) = name else {
                     return Err(runtime(
                         "rift.every expects a job name, an interval in milliseconds and a function",
                     ));
+                };
+                let scope = match options {
+                    None => Scope::default(),
+                    Some(options) => {
+                        for pair in options.pairs::<Value, Value>() {
+                            let (key, _) = pair?;
+                            if !matches!(&key, Value::String(key) if key.as_bytes().as_ref() == b"scope") {
+                                return Err(runtime("rift.every options take scope only"));
+                            }
+                        }
+                        let scope: Option<String> = options.get("scope")?;
+                        Scope::parse(scope.as_deref()).map_err(runtime)?
+                    }
                 };
                 let name = name.to_str()?.to_owned();
                 if !crate::extensions::token(&name) {
@@ -589,7 +617,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
                     )));
                 }
                 jobs.insert(name.clone());
-                let handle = every.services.timers().every(ms);
+                let handle = every.services.timers().every_scoped(ms, scope);
                 every.timers.borrow_mut().insert(
                     handle,
                     Timer {
@@ -608,21 +636,41 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
         function(lua, state, move |_, args: MultiValue| {
             let mut args = args.into_iter();
             let subject = args.next().unwrap_or(Value::Nil);
-            let (queue, callback) = match (
+            // The second argument is a queue group or `{ queue = ..., scope = ... }`.
+            let options = |table: &Table| -> mlua::Result<(Option<String>, Option<String>)> {
+                Ok((table.get("queue")?, table.get("scope")?))
+            };
+            let (queue, scope, callback) = match (
                 args.next().unwrap_or(Value::Nil),
                 args.next().unwrap_or(Value::Nil),
             ) {
-                (Value::Function(callback), Value::Nil) => (None, Some(callback)),
+                (Value::Function(callback), Value::Nil) => (None, None, Some(callback)),
                 (Value::String(queue), Value::Function(callback)) => {
-                    (Some(queue.to_str()?.to_owned()), Some(callback))
+                    (Some(queue.to_str()?.to_owned()), None, Some(callback))
                 }
-                (Value::String(queue), Value::Nil) => (Some(queue.to_str()?.to_owned()), None),
-                (Value::Nil, Value::Nil) => (None, None),
+                (Value::String(queue), Value::Nil) => {
+                    (Some(queue.to_str()?.to_owned()), None, None)
+                }
+                (Value::Table(table), Value::Function(callback)) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, Some(callback))
+                }
+                (Value::Table(table), Value::Nil) => {
+                    let (queue, scope) = options(&table)?;
+                    (queue, scope, None)
+                }
+                (Value::Nil, Value::Nil) => (None, None, None),
                 _ => {
                     return Err(runtime(
-                        "rift.subscribe expects a subject, an optional queue group and an optional function",
+                        "rift.subscribe expects a subject, an optional queue group or options table and an optional function",
                     ));
                 }
+            };
+            let scope = match scope {
+                None => SubscriptionScope::Cluster,
+                Some(scope) => scope
+                    .parse::<SubscriptionScope>()
+                    .map_err(|error| runtime(format!("rift.subscribe: {error}")))?,
             };
             let Value::String(subject) = subject else {
                 return Err(runtime("rift.subscribe expects a subject"));
@@ -632,7 +680,7 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
             let handle = subscribe
                 .services
                 .bus()
-                .subscribe(&subject, queue.as_deref())
+                .subscribe_scoped(&subject, queue.as_deref(), scope)
                 .map_err(runtime)?;
             subscribe
                 .subscriptions
@@ -829,7 +877,8 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             },
         )?,
     )?;
-    // A string is plain text and a table a chat component.
+    // A string is plain text and a table a chat component, whose messages
+    // are this plugin's (when unqualified) in the target's language.
     type Send = fn(&Services, &str, Text) -> Result<bool, String>;
     let texts: [(&str, &str, Send); 3] = [
         ("message", "message", |services, target, text| {
@@ -847,7 +896,10 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         api.raw_set(
             name,
             function(lua, state, move |_, (target, text): (String, Value)| {
-                let text = Text::lua(text, label).map_err(runtime)?;
+                let text = services
+                    .players()
+                    .for_target(&target, || Text::lua(text, label))
+                    .map_err(runtime)?;
                 send(&services, &target, text).map_err(runtime)
             })?,
         )?;
@@ -860,7 +912,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 title,
                 subtitle,
                 times,
-            } = crate::extensions::players::title(options)?
+            } = services
+                .players()
+                .for_target(&target, || crate::extensions::players::title(options))?
             else {
                 unreachable!("title builds a title action");
             };
@@ -886,8 +940,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua,
             state,
             move |_, (target, options): (String, Option<Table>)| {
-                let crate::extensions::PlayerAction::TabList(changes) =
-                    crate::extensions::players::tab_list(options)?
+                let crate::extensions::PlayerAction::TabList(changes) = services
+                    .players()
+                    .for_target(&target, || crate::extensions::players::tab_list(options))?
                 else {
                     unreachable!("tab_list builds a tab list action");
                 };
@@ -912,7 +967,9 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             state,
             move |_, (target, name, options): (String, String, Option<Table>)| {
                 let crate::extensions::PlayerAction::BossBar { name, bar } =
-                    crate::extensions::players::boss_bar(name, options)?
+                    services.players().for_target(&target, || {
+                        crate::extensions::players::boss_bar(name, options)
+                    })?
                 else {
                     unreachable!("boss_bar builds a boss bar action");
                 };
@@ -936,11 +993,10 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     api.raw_set(
         "dialog",
         function(lua, state, move |_, (target, spec): (String, Value)| {
-            let dialog = crate::extensions::players::dialog(spec)?;
-            services
-                .players()
-                .show_dialog(&target, dialog)
-                .map_err(runtime)
+            let players = services.players();
+            let dialog =
+                players.for_target(&target, || crate::extensions::players::dialog(spec))?;
+            players.show_dialog(&target, dialog).map_err(runtime)
         })?,
     )?;
     let services = state.services.clone();
@@ -967,7 +1023,8 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua,
             state,
             move |_, (message, server): (Value, Option<String>)| {
-                let message = Text::lua(message, "message").map_err(runtime)?;
+                // Rendered for each recipient by `broadcast_text`.
+                let message = Text::lua_as_written(message, "message").map_err(runtime)?;
                 services
                     .players()
                     .broadcast_text(message, server.as_deref())
@@ -1329,6 +1386,68 @@ fn timers(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     Ok(api)
 }
 
+/// `rift.cluster`: `lease(name, ttl_ms)` returns a fencing token or nil while
+/// another peer holds the lease, `renew(name, token, ttl_ms)` and
+/// `release(name, token)` return whether they took effect, `is_leader()`
+/// (advisory) and `peer()` (nil without a cluster). The lease calls wait for
+/// the cluster's answer.
+fn cluster(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
+    fn ttl(ttl_ms: i64) -> mlua::Result<u64> {
+        u64::try_from(ttl_ms)
+            .map_err(|_| runtime("lease ttl must be a positive number of milliseconds"))
+    }
+    let api = lua.create_table()?;
+    let services = state.services.clone();
+    api.raw_set(
+        "lease",
+        function(lua, state, move |_, (name, ttl_ms): (String, i64)| {
+            services
+                .cluster()
+                .lease(&name, ttl(ttl_ms)?)
+                .map(|token| token.map(|token| i64::try_from(token).unwrap_or(i64::MAX)))
+                .map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "renew",
+        function(
+            lua,
+            state,
+            move |_, (name, token, ttl_ms): (String, i64, i64)| {
+                let Ok(token) = u64::try_from(token) else {
+                    return Ok(false);
+                };
+                services
+                    .cluster()
+                    .renew(&name, token, ttl(ttl_ms)?)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "release",
+        function(lua, state, move |_, (name, token): (String, i64)| {
+            let Ok(token) = u64::try_from(token) else {
+                return Ok(false);
+            };
+            services.cluster().release(&name, token).map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "is_leader",
+        function(lua, state, move |_, ()| Ok(services.cluster().is_leader()))?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "peer",
+        function(lua, state, move |_, ()| Ok(services.cluster().peer()))?,
+    )?;
+    Ok(api)
+}
+
 /// `rift.background`: answers that come later and jobs for the worker
 /// script (`[background]` in the manifest).
 ///
@@ -1359,11 +1478,10 @@ fn background(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 Value::Table(table) if table.contains_key("server")? => "initial_server",
                 _ => "command",
             };
-            let action = crate::extensions::parse_action(hook, decision)?;
-            services
-                .background()
-                .resolve(ticket, action)
-                .map_err(runtime)
+            let background = services.background();
+            let action = background
+                .for_ticket(ticket, || crate::extensions::parse_action(hook, decision))?;
+            background.resolve(ticket, action).map_err(runtime)
         })?,
     )?;
     let run = state.clone();

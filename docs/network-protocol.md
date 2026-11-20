@@ -98,6 +98,16 @@ Rift drops any other NUL-delimited data the client sends after the hostname.
 A client therefore cannot pass BungeeCord-style IP, UUID or skin data to an
 offline backend that has `settings.bungeecord=true`.
 
+A 1.20.5+ client may arrive with the transfer intent (3), sent there by
+another server's Transfer packet. Rift accepts it and passes the intent on to
+the backend, except after a backend switch and for an online-mode login,
+whose backend handshakes carry the login intent (2). On a
+[cluster](clustering.md#rolling-restarts) peer every backend handshake carries
+the login intent: a player that a draining peer hands over arrives with the
+transfer intent, which is no transfer from the backend's point of view, and
+backends need no `accepts-transfers=true`. An older client that sends the
+transfer intent is refused with `login.transfer_version`.
+
 ### BungeeCord and BungeeGuard
 
 With `forwarding.mode = "bungeecord"` or `"bungeeguard"`, Rift itself writes

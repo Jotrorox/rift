@@ -263,6 +263,9 @@ fn captured(prefix: &str) -> Vec<String> {
 
 /// Every hello scenario against one guest.
 pub(crate) async fn hello_conformance(guest: &Guest) {
+    // The reply to /hello comes from the example's messages.toml, which the
+    // test catalogue holds under the guest's name.
+    crate::text::catalog::install_test_catalog();
     let root = directory();
     let config = configure(&root, guest, "", "{ deny = 'Mallory' }");
     let broker = Broker::default();
@@ -327,9 +330,20 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     );
     grant(&runtime, 2, "hello.use");
     assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
+    let words = |action: Action| match action {
+        Action::Message(text) => text.to_string(),
+        other => panic!("{}: {other:?}", guest.name),
+    };
     assert_eq!(
-        player.command("hello").await.unwrap(),
-        Action::Message("Hello, Alex!".into())
+        words(player.command("hello").await.unwrap()),
+        "Hello, Alex!"
+    );
+    // The same message in the language of the player who asked.
+    let mut german = session(&runtime, 2, "Alex");
+    german.context.language = Some("de".into());
+    assert_eq!(
+        words(german.command("hello").await.unwrap()),
+        "Hallo, Alex!"
     );
 
     // join: a welcome message through players.message and a store counter.
@@ -408,6 +422,8 @@ fn example_folder(guest: &Guest) -> PathBuf {
         .unwrap();
     std::fs::write(folder.join("plugin.toml"), manifest).unwrap();
     std::fs::copy(&guest.wasm, folder.join(entry)).unwrap();
+    let messages = crate::text::messages::FILE;
+    std::fs::copy(example.join(messages), folder.join(messages)).unwrap();
     folder
 }
 
@@ -831,6 +847,7 @@ async fn wasm_timings() {
     let Some(guest) = hello_guests().into_iter().next() else {
         return;
     };
+    crate::text::catalog::install_test_catalog();
     let root = directory();
     let config = configure(&root, &guest, "", "{ deny = 'Mallory' }");
     let spec = &config.plugins[0];
@@ -1144,6 +1161,103 @@ async fn components_defer_answers_to_workers_and_use_the_directory() {
         "{:?} {:?}",
         quick.1,
         started.elapsed()
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// What 0.2.1 added, from a component: the `text` interface, with markup
+/// and the plugin's own messages, in `init`, `reload`, a hook and a
+/// background worker.
+#[tokio::test]
+async fn components_convert_text_with_their_own_messages() {
+    let Some(probe) = probe() else { return };
+    crate::text::catalog::install_test_catalog();
+    // Installed as `t`, a plugin with messages in the test catalogue.
+    let guest = Guest {
+        name: "t".into(),
+        wasm: probe.wasm,
+    };
+    let manifest = "min_api = \"0.2.1\"\n[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n";
+    // A template from the configuration that does not render fails `init`.
+    let root = directory();
+    let config = configure(
+        &root,
+        &guest,
+        manifest,
+        r#"{ check = '{"message":"nope"}' }"#,
+    );
+    let runtime =
+        Extensions::with_engines(&config, Broker::default(), None, Engines::builtin()).unwrap();
+    let error = runtime.plugins().start().await.unwrap_err().to_string();
+    assert!(
+        error.contains("text.render") && error.contains("plugin t has no such message"),
+        "{error}"
+    );
+    runtime.plugins().shutdown().await;
+
+    let root = directory();
+    let config = configure(
+        &root,
+        &guest,
+        manifest,
+        r#"{ check = '{"message":"created"}' }"#,
+    );
+    let runtime = start(&config, &Broker::default()).await;
+    let error = instance(&runtime)
+        .reload(r#"{"check":"{\"mini\":\"<bolt>\"}"}"#.into())
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("text.render") && error.contains("unknown tag"),
+        "{error}"
+    );
+    let message = |text: &str| Action::Message(text.into());
+    let words = |action: Action| match action {
+        Action::Message(text) => text.to_string(),
+        other => panic!("{other:?}"),
+    };
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(
+        alex.command(r#"text - {"mini":"<red>Hi"}"#).await.unwrap(),
+        message(r#"{"color":"red","text":"Hi"} | Hi | §cHi | <red>Hi</red>"#)
+    );
+    // The plugin's own message by unqualified key, in the language asked
+    // for, whatever the hook's player reads.
+    let greeting = words(
+        alex.command(r#"text de {"message":"greet","args":{"name":"Alex"}}"#)
+            .await
+            .unwrap(),
+    );
+    assert!(!greeting.contains("error"), "{greeting}");
+    assert_eq!(
+        greeting.split(" | ").nth(1),
+        Some("Hallo Alex."),
+        "{greeting}"
+    );
+    let greeting = words(
+        alex.command(r#"text - {"message":"greet","args":{"name":"Alex"}}"#)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        greeting.split(" | ").nth(1),
+        Some("Hello Alex."),
+        "{greeting}"
+    );
+    // An invalid language or call is each function's error.
+    let invalid = words(alex.command(r#"text d {"mini":"x"}"#).await.unwrap());
+    assert_eq!(invalid.matches("error: text.").count(), 4, "{invalid}");
+    assert!(invalid.contains("a language is"), "{invalid}");
+    let invalid = words(alex.command(r#"text - {"message":"nope"}"#).await.unwrap());
+    assert_eq!(
+        invalid.matches("plugin t has no such message").count(),
+        4,
+        "{invalid}"
+    );
+    // A background worker resolves the plugin's messages too.
+    assert_eq!(
+        alex.command("slow text de").await.unwrap(),
+        message("done: Kein Zutritt.")
     );
     runtime.plugins().shutdown().await;
 }

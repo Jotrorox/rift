@@ -65,6 +65,10 @@ pub(super) trait ProcessBackend: Send + 'static {
     /// `keep_running`; remote ones keep running. Both are adopted again by
     /// the next controller.
     fn survives_controller(&self, server: &Server) -> bool;
+    /// Forget the process this worker owned, without touching it: a cluster
+    /// peer that leads again adopts what the agents report instead of
+    /// trusting what it owned before another peer led.
+    fn forget(&mut self) {}
 }
 
 #[derive(Debug, Default)]
@@ -367,7 +371,7 @@ pub(crate) fn spawn(
 /// pipe, leads its own session instead of only its own group, and neither a
 /// dropped handle nor Rift's death kills it. Its log, isolation and memory
 /// limit (`memory_limit`, with the server's name) are the same.
-fn spawn_with(
+pub(super) fn spawn_with(
     command: &[String],
     directory: &std::path::Path,
     environment: &ProcessEnvironment,
@@ -938,6 +942,12 @@ impl ProcessBackend for Remote {
 
     fn survives_controller(&self, _server: &Server) -> bool {
         true
+    }
+
+    fn forget(&mut self) {
+        self.running = None;
+        self.agent = None;
+        self.revision = 0;
     }
 }
 

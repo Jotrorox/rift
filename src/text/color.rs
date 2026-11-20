@@ -89,18 +89,40 @@ pub fn gradient(stops: &[u32], t: f64) -> u32 {
             let t = t.clamp(0.0, 1.0) * (stops.len() - 1) as f64;
             let index = (t.floor() as usize).min(stops.len() - 2);
             let local = t - index as f64;
-            let (from, to) = (stops[index], stops[index + 1]);
-            let channel = |shift: u32| {
-                let a = f64::from((from >> shift) & 0xff);
-                let b = f64::from((to >> shift) & 0xff);
-                ((a + (b - a) * local).round() as u32) << shift
-            };
-            channel(16) | channel(8) | channel(0)
+            lerp(stops[index], stops[index + 1], local)
         }
     }
 }
 
-/// The colour at `t` (0..=1) of a rainbow starting at hue `phase` (0..=1).
+/// The colour `t` (0..=1) of the way along `stops`, shifted by `phase`
+/// (0..=1), as MiniMessage's gradient does it: the position is
+/// `(t + phase) * (stops - 1)` stops along, and past the last stop it
+/// continues from the last stop back to the first, then on from the first.
+/// With phase 0 this is exactly [`gradient`].
+pub fn gradient_shifted(stops: &[u32], t: f64, phase: f64) -> u32 {
+    if phase == 0.0 || stops.len() < 2 {
+        return gradient(stops, t);
+    }
+    let count = stops.len();
+    let position = (t.clamp(0.0, 1.0) + phase.clamp(0.0, 1.0)) * (count - 1) as f64;
+    let low = position.floor();
+    let high = position.ceil() as usize % count;
+    lerp(stops[low as usize % count], stops[high], position - low)
+}
+
+/// The colour `local` (0..=1) of the way from `from` to `to`, per channel in
+/// RGB, rounded.
+fn lerp(from: u32, to: u32, local: f64) -> u32 {
+    let channel = |shift: u32| {
+        let a = f64::from((from >> shift) & 0xff);
+        let b = f64::from((to >> shift) & 0xff);
+        ((a + (b - a) * local).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+/// The colour at `t` (0..=1) of a rainbow starting at hue `phase` (-1..=1;
+/// a negative phase is the same hue as `1 + phase`).
 pub fn rainbow(t: f64, phase: f64) -> u32 {
     let hue = (t + phase).rem_euclid(1.0) * 6.0;
     let x = 1.0 - (hue % 2.0 - 1.0).abs();
@@ -158,6 +180,12 @@ mod tests {
         assert_eq!(gradient(&stops, 0.5), 0x800080);
         assert_eq!(gradient(&[0xff0000, 0x00ff00, 0x0000ff], 0.5), 0x00ff00);
         assert_eq!(gradient(&[0x123456], 0.7), 0x123456);
+        assert_eq!(gradient_shifted(&stops, 0.5, 0.0), gradient(&stops, 0.5));
+        // Shifted past the last stop, a gradient runs back to the first.
+        assert_eq!(gradient_shifted(&stops, 0.0, 0.5), 0x800080);
+        assert_eq!(gradient_shifted(&stops, 0.5, 0.5), 0x0000ff);
+        assert_eq!(gradient_shifted(&stops, 1.0, 0.5), 0x800080);
+        assert_eq!(gradient_shifted(&stops, 1.0, 1.0), 0xff0000);
         assert_eq!(rainbow(0.0, 0.0), 0xff0000);
         assert_eq!(rainbow(1.0 / 3.0, 0.0), 0x00ff00);
     }

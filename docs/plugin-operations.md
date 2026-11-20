@@ -40,6 +40,7 @@ Each plugin entry, here and in the HTTP API, has these fields:
 | `calls` | Awaited hooks plus queued observer events, timer ticks and bus messages |
 | `last_error`, `hooks`, `commands`, `capabilities` | The last error, and what the plugin registered and was granted |
 | `restartable` | `true` for persistent plugins |
+| `cluster_warning` | In a [cluster](plugins.md#plugins-in-a-cluster), why to check a persistent plugin whose `plugin.toml` does not declare `cluster = true`; otherwise null |
 
 ## Startup
 
@@ -100,7 +101,8 @@ A configuration reload compares the plugin set by name:
 | Nothing (same files, manifest and configuration table) | Untouched; state and commands survive. |
 | Only the configuration table, `hot_reload = true`, running | `reload(config)` is called within `deadlines.reload`; on error the plugin keeps its previous configuration. |
 | Only the configuration table, otherwise | The instance is replaced. |
-| The manifest or any file in the folder except `data/` and hidden (dot) files | The instance is replaced. The folder may not contain symbolic links, hidden ones included. |
+| The manifest or any file in the folder except `data/`, `messages.toml` and hidden (dot) files | The instance is replaced. The folder may not contain symbolic links, hidden ones included. |
+| Only `messages.toml` | Untouched; the new [messages](text.md#plugin-messages) apply with the configuration. |
 | Removed from the configuration | Stopped. |
 | New | Started. |
 

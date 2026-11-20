@@ -2,6 +2,7 @@ package rift
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 )
@@ -51,6 +52,94 @@ func TestTextBuilders(t *testing.T) {
 		`{"text":"c","click_event":{"action":"run_command","command":"/x"},"hover_event":{"action":"show_text","value":"t"}}`)
 	// Invalid UTF-8 and control characters still make valid JSON.
 	same(t, Plain("a\xffb \x1f").JSON(), `"a\ufffdb \u001f"`)
+}
+
+func TestEscape(t *testing.T) {
+	for _, v := range []struct{ in, want string }{
+		{"plain", "plain"},
+		{"a < b", `a \< b`},
+		{"<red>", `\<red>`},
+		{`\`, `\\`},
+		{`\<`, `\\\<`},
+		{"", ""},
+	} {
+		if got := Escape(v.in); got != v.want {
+			t.Errorf("Escape(%q) = %q, want %q", v.in, got, v.want)
+		}
+	}
+}
+
+func TestMessagesAndStyleArguments(t *testing.T) {
+	invited := Msg("party:invited").
+		Arg("from", "Alex").
+		ArgComponent("server", Component("lobby").Color("aqua")).
+		ArgStyle("team", "<#55ffff><bold>")
+	same(t, invited.JSON(), `{
+		"message": "party:invited",
+		"args": {
+			"from": "Alex",
+			"server": {"text": "lobby", "color": "aqua"},
+			"team": {"style": "<#55ffff><bold>"}
+		}
+	}`)
+	if got := Msg("created").Text().JSON(); got != `{"message":"created"}` {
+		t.Errorf("Msg without args = %s", got)
+	}
+	if got := Msg("created").String(); got != `{"message":"created"}` {
+		t.Errorf("Msg.String = %s", got)
+	}
+	same(t, Mini("<team>x</team>").ArgStyle("team", "<red>").JSON(),
+		`{"mini":"<team>x</team>","args":{"team":{"style":"<red>"}}}`)
+	same(t, Mini("<m>").ArgComponent("m", Msg("hi")).JSON(), `{"mini":"<m>","args":{"m":{"message":"hi"}}}`)
+}
+
+func TestComponentContentsStylesAndEvents(t *testing.T) {
+	same(t, Translate("chat.type.text").With(Plain("Alex"), Component("hi").Italic()).Fallback("<Alex> hi").JSON(), `{
+		"translate": "chat.type.text",
+		"with": ["Alex", {"text": "hi", "italic": true}],
+		"fallback": "<Alex> hi"
+	}`)
+	same(t, Keybind("key.jump").JSON(), `{"keybind":"key.jump"}`)
+	same(t, Sprite("item/diamond").JSON(), `{"object":"atlas","sprite":"item/diamond"}`)
+	same(t, Sprite("block/stone").Atlas("minecraft:blocks").JSON(),
+		`{"object":"atlas","sprite":"block/stone","atlas":"minecraft:blocks"}`)
+	same(t, Head("Alex").JSON(), `{"object":"player","player":{"name":"Alex"}}`)
+	same(t, Head("Alex").Hat(false).JSON(), `{"object":"player","player":{"name":"Alex"},"hat":false}`)
+	same(t, Component("x").Font("minecraft:uniform").Decoration("italic", false).Bold().Decoration("bold", false).
+		Field("insertion", `"i"`).JSON(),
+		`{"text":"x","font":"minecraft:uniform","italic":false,"bold":false,"insertion":"i"}`)
+	// The host's <shadow> arithmetic: opacity * 255, rounded, as signed ARGB.
+	for _, v := range []struct {
+		color   string
+		opacity float64
+		want    string
+	}{
+		{"#ff0000", 0.25, "1090453504"},
+		{"#000000", 1, "-16777216"},
+		{"#FFAA00", 0.5, "-2130728448"},
+		{"#123456", 0, "1193046"},
+		{"#ffffff", 2, "-1"},
+		{"#ffffff", math.NaN(), "16777215"},
+		{"red", 0.5, `"red"`},
+		{"#fffff", 0.5, `"#fffff"`},
+		{"#+fffff", 0.5, `"#+fffff"`},
+	} {
+		same(t, Component("x").Shadow(v.color, v.opacity).JSON(), `{"text":"x","shadow_color":`+v.want+`}`)
+	}
+	same(t, Component("x").ChangePage(3).JSON(), `{"text":"x","click_event":{"action":"change_page","page":3}}`)
+	same(t, Component("x").HoverItem("minecraft:diamond", 2).JSON(),
+		`{"text":"x","hover_event":{"action":"show_item","id":"minecraft:diamond","count":2}}`)
+	const uuid = "00000000-0000-0000-0000-000000000001"
+	pig := `{"text":"x","hover_event":{"action":"show_entity","id":"minecraft:pig","uuid":"` + uuid + `"}}`
+	same(t, Component("x").HoverEntity("minecraft:pig", uuid, nil).JSON(), pig)
+	same(t, Component("x").HoverEntity("minecraft:pig", uuid, Text{}).JSON(), pig)
+	same(t, Component("x").HoverEntity("minecraft:pig", uuid, Mini("<red>Bob")).JSON(),
+		`{"text":"x","hover_event":{"action":"show_entity","id":"minecraft:pig","uuid":"`+uuid+`","name":{"mini":"<red>Bob"}}}`)
+	// JSON does not change the builder, so it can be called twice.
+	c := Translate("k").With(Plain("a")).Extra(Plain("b"))
+	if first, second := c.JSON(), c.JSON(); first != second || first != `{"translate":"k","with":["a"],"extra":["b"]}` {
+		t.Errorf("Translate JSON = %s then %s", first, second)
+	}
 }
 
 func TestText(t *testing.T) {

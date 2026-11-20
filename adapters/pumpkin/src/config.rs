@@ -21,6 +21,9 @@ pub const DEFAULT_CONFIG: &str = r#"# Rift permissions for Pumpkin. See docs/per
 
 # host:port of the proxy's messaging listener.
 address = "127.0.0.1:7443"
+# In a Rift cluster, every peer's messaging listener, tried in turn after
+# `address` (RIFT_BUS_ADDRESSES fills it on managed servers).
+# addresses = ["10.0.0.2:7443", "10.0.0.3:7443"]
 # Name the proxy's certificate is verified against.
 server_name = "localhost"
 # PEM file with the proxy's CA or certificate; relative to this folder.
@@ -280,6 +283,7 @@ mod tests {
             ("RIFT_BUS_SERVER_NAME", "rift.internal"),
             ("RIFT_BUS_CERT", "/srv/lobby-3/rift-bus.pem"),
             ("RIFT_BUS_TOKEN", "ri1.lobby-3.1.x"),
+            ("RIFT_BUS_ADDRESSES", "10.0.0.2:7443,10.0.0.3:7443"),
             ("RIFT_SERVER_NAME", "lobby-3"),
             ("RIFT_SERVER_GROUP", "lobby"),
         ]);
@@ -298,6 +302,7 @@ mod tests {
         fs::write(folder.join("config.toml"), "join_timeout_ms = 3000\n").unwrap();
         let config = load_with(&folder, lookup).unwrap();
         assert_eq!(config.address, "10.0.0.2:7443");
+        assert_eq!(config.addresses, ["10.0.0.2:7443", "10.0.0.3:7443"]);
         assert_eq!(config.ca, PathBuf::from("/srv/lobby-3/rift-bus.pem"));
         let _ = fs::remove_dir_all(&folder);
     }

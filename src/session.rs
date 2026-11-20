@@ -447,6 +447,10 @@ pub struct Session<C, B> {
     /// `authentication.signed_chat`: when false, no backend learns the
     /// player's chat key (1.19–1.19.2) or chat session (1.19.3+).
     signed_chat: bool,
+    /// Whether a client that arrived with the transfer intent reaches its
+    /// backends with the login intent: on a cluster peer, whose arrivals
+    /// with the transfer intent may be players another peer handed over.
+    transfers_as_logins: bool,
     forwarding: Option<Forwarding>,
     network: bool,
     bungeecord: bool,
@@ -504,6 +508,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             authenticated_profile: None,
             profile_key: None,
             signed_chat: true,
+            transfers_as_logins: false,
             forwarding: None,
             network: false,
             bungeecord: false,
@@ -667,6 +672,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// the player's chat as unsigned. Set before the first backend login.
     pub fn set_signed_chat(&mut self, signed_chat: bool) {
         self.signed_chat = signed_chat;
+    }
+
+    /// Send backends the login intent although the client arrived with the
+    /// transfer intent; a cluster peer turns this on, since a player handed
+    /// over by another peer is no transfer from the backend's point of view
+    /// and backends without `accepts-transfers=true` refuse that intent. Set
+    /// before the first backend login.
+    pub fn set_transfers_as_logins(&mut self, transfers_as_logins: bool) {
+        self.transfers_as_logins = transfers_as_logins;
     }
 
     /// Whether backends learn this player's chat signing material. A reload
@@ -986,7 +1000,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         });
         let mut handshake = self.handshake.clone();
         handshake.protocol = backend_version.number();
-        if replacing || self.authenticated_profile.is_some() {
+        // A switch, an online-mode login and a cluster peer's arrival with
+        // the transfer intent (possibly a player another peer handed over)
+        // reach the backend as a login; otherwise the client's intent passes.
+        if replacing || self.authenticated_profile.is_some() || self.transfers_as_logins {
             handshake.next_state = NextState::Login;
         }
         if let Some(forwarding) = &self.forwarding
@@ -2190,6 +2207,29 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             crate::text::Text::Plain(text) => self.disconnect(text).await,
             crate::text::Text::Component(component) => self.disconnect_component(component).await,
         }
+    }
+
+    /// Send the client to `host:port` with the Transfer packet and close the
+    /// connection, as a cluster peer does when it drains. `Ok(false)`, with
+    /// nothing written, when this client cannot be transferred now: before
+    /// 1.20.5, or outside configuration and play.
+    pub async fn transfer_client(&mut self, host: &str, port: u16) -> io::Result<bool> {
+        self.client.flush_pending().await?;
+        let state = self.client.state.phase(Direction::Clientbound);
+        let Some(version) = self.version else {
+            return Ok(false);
+        };
+        let Ok(packet) = protocol::transfer(version, state, host, port) else {
+            return Ok(false);
+        };
+        self.client
+            .codec
+            .write(&mut self.client.io, &packet)
+            .await?;
+        self.client.state.close();
+        self.backend = None;
+        self.client.io.shutdown().await?;
+        Ok(true)
     }
 
     async fn disconnect_with(

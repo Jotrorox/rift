@@ -72,6 +72,11 @@ fn private_file(path: &Path, append: bool, truncate: bool) -> io::Result<std::fs
     }
     Ok(file)
 }
+/// Only caller-selected identity, operation and target. No bodies, tokens,
+/// arbitrary diagnostics, queries or console commands are persisted.
+fn audit_record(actor: &str, action: &str, target: &str, outcome: &str, status: u16) -> Value {
+    json!({"timestamp_unix_ms":now(), "actor":actor,"action":action.chars().take(128).collect::<String>(),"target":target.chars().take(512).collect::<String>(),"outcome":outcome,"status":status})
+}
 fn bounded_push(values: &mut VecDeque<Value>, value: Value, limit: usize) {
     values.push_back(value);
     while values.len() > limit {
@@ -150,13 +155,27 @@ impl Store {
             records: Mutex::new(records),
         })
     }
+    /// In a cluster the history is the replicated one (docs/clustering.md,
+    /// "One configuration"); deployments are recorded by the `config`
+    /// entries themselves.
     pub fn deployments(&self) -> Value {
+        if let Some(files) = rift::cluster::files::active() {
+            return files.deployments_value().unwrap_or_else(|error| {
+                json!({"deployments":[],"retained":HISTORY,"durable":true,"replicated":true,"error":error.to_string()})
+            });
+        }
         let records = self.records.lock().unwrap();
         json!({"deployments":records.deployments.iter().rev().map(|value| {
             let mut value = value.clone(); value.as_object_mut().unwrap().remove("source"); value
         }).collect::<Vec<_>>(), "retained":HISTORY, "durable":self.directory.is_some()})
     }
     pub fn source(&self, id: u64) -> Option<String> {
+        if let Some(files) = rift::cluster::files::active() {
+            return files.deployment_source(id).unwrap_or_else(|error| {
+                log_warn!("deployment {id}: {error}");
+                None
+            });
+        }
         self.records
             .lock()
             .unwrap()
@@ -166,6 +185,10 @@ impl Store {
             .and_then(|value| value["source"].as_str().map(str::to_owned))
     }
     pub fn deploy(&self, source: &str, actor: &str, action: &str) -> io::Result<()> {
+        if rift::cluster::files::active().is_some() {
+            // The deployment's `config` entry recorded it on every peer.
+            return Ok(());
+        }
         let mut records = self.records.lock().unwrap();
         records.sequence += 1;
         let value = json!({"id":records.sequence,"timestamp_unix_ms":now(),"actor":actor,"action":action,"revision":control::revision(source),"source":source});
@@ -190,10 +213,21 @@ impl Store {
         outcome: &str,
         status: u16,
     ) -> io::Result<()> {
+        let value = audit_record(actor, action, target, outcome, status);
+        if let Some(files) = rift::cluster::files::active() {
+            // Callers on the runtime use `audit_async`, which waits for the
+            // commit; from elsewhere the record is proposed in the background.
+            let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+                io::Error::other("the replicated audit trail needs the async runtime")
+            })?;
+            runtime.spawn(async move {
+                if let Err(error) = files.audit(value).await {
+                    log_error!("operator audit record not replicated: {error}");
+                }
+            });
+            return Ok(());
+        }
         let mut records = self.records.lock().unwrap();
-        // Only caller-selected identity, operation and target. No bodies, tokens,
-        // arbitrary diagnostics, queries or console commands are persisted.
-        let value = json!({"timestamp_unix_ms":now(), "actor":actor,"action":action.chars().take(128).collect::<String>(),"target":target.chars().take(512).collect::<String>(),"outcome":outcome,"status":status});
         self.append(&records, &value)?;
         bounded_push(&mut records.audit, value, AUDIT);
         Ok(())
@@ -266,6 +300,11 @@ impl Store {
         outcome: &str,
         status: u16,
     ) -> io::Result<()> {
+        if let Some(files) = rift::cluster::files::active() {
+            return files
+                .audit(audit_record(actor, action, target, outcome, status))
+                .await;
+        }
         let store = self.clone();
         let (actor, action, target, outcome) = (
             actor.to_owned(),
@@ -291,18 +330,26 @@ impl Store {
             .map_err(io::Error::other)?
     }
     /// Operator actions and denial summaries, newest first.
+    /// In a cluster the operator actions are the replicated trail; the
+    /// summaries of refused requests stay with each peer.
     pub fn audits(&self) -> Value {
+        let replicated = rift::cluster::files::active().map(|files| {
+            files.audit_records().unwrap_or_else(|error| {
+                log_warn!("replicated audit trail: {error}");
+                Vec::new()
+            })
+        });
+        let durable = self.directory.is_some() || replicated.is_some();
         let records = self.records.lock().unwrap();
-        let mut values: Vec<_> = records
-            .audit
-            .iter()
-            .chain(&records.denials)
-            .cloned()
-            .collect();
+        let mut values: Vec<Value> = match replicated {
+            Some(replicated) => replicated,
+            None => records.audit.iter().cloned().collect(),
+        };
+        values.extend(records.denials.iter().cloned());
         // Stable sort: records with equal timestamps keep their append order.
         values.sort_by_key(|value| value["timestamp_unix_ms"].as_u64().unwrap_or(0));
         values.reverse();
-        json!({"records":values,"durable":self.directory.is_some(),"unrecorded_denials":records.unrecorded_denials})
+        json!({"records":values,"durable":durable,"unrecorded_denials":records.unrecorded_denials})
     }
 }
 

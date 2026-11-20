@@ -44,13 +44,13 @@ final class Session {
         this.timers = timers;
     }
 
-    static Session open(MessagingClient.Settings settings, ExecutorService readers, ScheduledExecutorService timers)
-            throws IOException {
+    static Session open(MessagingClient.Settings settings, MessagingClient.Address address, ExecutorService readers,
+            ScheduledExecutorService timers) throws IOException {
         for (int attempt = 1; ; attempt++) {
             QuicClientConnection connection = QuicClientConnection.newBuilder()
-                    .host(settings.serverName())
-                    .proxy(settings.host())
-                    .port(settings.port())
+                    .host(address.serverName())
+                    .proxy(address.host())
+                    .port(address.port())
                     .applicationProtocol(ALPN)
                     .customTrustStore(settings.trust())
                     .connectTimeout(settings.connectTimeout())
@@ -310,14 +310,18 @@ final class Session {
      * Subscribe and wait for the server's OK. Messages then arrive in order on a reader thread;
      * {@code ended} is called once if the stream ends without {@link Active#close()}.
      */
-    Active subscribe(String pattern, String queue, Consumer<Message> handler, Consumer<Throwable> ended)
-            throws IOException {
+    Active subscribe(String pattern, String queue, SubscriptionScope scope, Consumer<Message> handler,
+            Consumer<Throwable> ended) throws IOException {
         QuicStream stream = connection.createStream(true);
+        Frames.Writer subscribe = new Frames.Writer(Frames.SUBSCRIBE).subject(pattern).string(queue == null ? "" : queue);
+        // The cluster default is left out, so servers from before scopes accept it.
+        if (scope == SubscriptionScope.LOCAL) {
+            subscribe.u8(Frames.SCOPE_LOCAL);
+        }
         // No flush: kwik sends written data right away, and its flush only checks the stream state.
         // The server stops a refused subscription's stream right after its ERROR frame, so a flush
         // could fail on the stopped stream and hide the server's reason.
-        stream.getOutputStream()
-                .write(new Frames.Writer(Frames.SUBSCRIBE).subject(pattern).string(queue == null ? "" : queue).frame());
+        stream.getOutputStream().write(subscribe.frame());
         try {
             Frames.expectOk(read(stream, Frames.MAX_FRAME, IO_DEADLINE));
         } catch (IOException e) {

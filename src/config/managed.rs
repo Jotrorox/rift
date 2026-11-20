@@ -498,19 +498,29 @@ pub(super) fn validate(
             .get(name)
             .ok_or_else(|| format!("{path}: unknown backend"))?;
         if let Some(node) = &server.node {
-            let definition = nodes
-                .get(node)
-                .ok_or_else(|| format!("{path}.node: unknown node {node:?}"))?;
             let port = backend
                 .address()
                 .rsplit_once(':')
                 .and_then(|(_, port)| port.parse::<u16>().ok())
                 .filter(|port| *port != 0);
-            if port.is_none_or(|port| backend.address() != definition.backend_address(port)) {
-                return Err(format!(
-                    "{path}: backend must be the address of node {node:?} ({}) with a nonzero port",
-                    definition.address
-                ));
+            match nodes.get(node) {
+                Some(definition) => {
+                    if port.is_none_or(|port| backend.address() != definition.backend_address(port))
+                    {
+                        return Err(format!(
+                            "{path}: backend must be the address of node {node:?} ({}) with a nonzero port",
+                            definition.address
+                        ));
+                    }
+                }
+                // A peer-node of a cluster whose peers this peer does not
+                // know yet: its address is checked once it does.
+                None if crate::cluster::peer_nodes::may_be_peer(node) => {
+                    if port.is_none() {
+                        return Err(format!("{path}: backend must have a nonzero port"));
+                    }
+                }
+                None => return Err(format!("{path}.node: unknown node {node:?}")),
             }
             for (other_name, other) in backends {
                 if other_name != name && other.address() == backend.address() {
@@ -558,7 +568,15 @@ pub(super) fn validate(
         }
         server.environment.validate(&path)?;
         if server.keep_running {
-            if server.node.is_some() {
+            // A cluster peer's own node stops its servers with the peer
+            // unless they keep running, as on the proxy's host.
+            let on_peer = server.node.as_deref().is_some_and(|node| {
+                nodes.get(node).map_or_else(
+                    || crate::cluster::peer_nodes::may_be_peer(node),
+                    |definition| definition.peer,
+                )
+            });
+            if server.node.is_some() && !on_peer {
                 return Err(format!(
                     "{path}.keep_running: servers on a node already keep running while the proxy restarts; remove it"
                 ));

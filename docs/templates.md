@@ -172,6 +172,21 @@ unit the service account has no home directory, so point
 `Environment=GIT_SSH_COMMAND=ssh -i /etc/rift/deploy_key -o UserKnownHostsFile=/etc/rift/known_hosts`
 at files it can read.
 
+### In a cluster
+
+In a [cluster](clustering.md#templates-and-other-files), `template_storage`
+is the same on every peer: each peer writes it from a replicated manifest of
+every folder's files, and fetches the contents from other peers. Changes
+made through the Files page or `/api/files/templates` on any peer reach all
+of them; files placed into `template_storage` by hand on one host do not
+(they are replaced or removed when the manifest changes that folder).
+
+Git syncs run on the current leader, whichever peer receives
+`rift admin sync` or the API call, so **every voting peer needs `git` and the
+repository's credentials**. A newly elected leader checks out the configured
+sources the cluster has not published yet. Downloaded server software stays
+in each peer's own `software_cache`.
+
 ## Download server software automatically
 
 Instead of a local `server_jar`, a template can name server software. Rift

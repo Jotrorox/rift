@@ -2,16 +2,27 @@
 //!
 //! Core publish never awaits a consumer or disk. Payload clones share their
 //! allocation. Persistence is an explicit operation in [`stream`].
+//!
+//! In a cluster every peer runs its own broker and federates the subjects
+//! whose [`Scope`] allows it through a [`Federation`]; without one the
+//! broker serves only its own subscribers.
 
+pub mod federation;
 pub mod quic;
+pub mod scope;
 pub mod stream;
+pub use federation::{
+    Federation, FederationFrame, ForwardedMessage, InterestEntry, InterestKey, InterestUpdate,
+    OwnerRouter, PeerId,
+};
 pub use rift_messaging::Message;
+pub use scope::{Scope, SubscriptionScope, subject_scope};
 pub use stream::{ConsumerConfig, Delivery, DurableConsumer, Record, Stream, StreamConfig};
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -98,8 +109,23 @@ impl Default for BrokerConfig {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PublishReport {
+    /// Subscribers of this broker that received the message.
     pub delivered: usize,
     pub slow_consumers: usize,
+    /// Peers the message was forwarded to; always zero without a
+    /// [`Federation`].
+    pub forwarded: usize,
+}
+
+/// How a subscription takes part in a cluster; see [`Broker::subscribe_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubscribeOptions {
+    /// Whether messages on user subjects published on other peers arrive.
+    pub scope: SubscriptionScope,
+    /// The subscriber is a remote (QUIC) client of this peer rather than
+    /// in-process code; only clients hear other peers' [`Scope::Origin`]
+    /// events.
+    pub client: bool,
 }
 
 #[derive(Clone)]
@@ -111,6 +137,17 @@ struct Inner {
     config: BrokerConfig,
     registry: RwLock<Registry>,
     next_id: AtomicU64,
+    /// Whether [`Inner::federation`] is set, read without a lock on every
+    /// publish.
+    federated: AtomicBool,
+    federation: RwLock<Option<Arc<dyn Federation>>>,
+    owner_router: RwLock<Option<Arc<dyn OwnerRouter>>>,
+    /// What every other peer's subscribers listen to.
+    remote: RwLock<HashMap<PeerId, RemoteInterest>>,
+    /// Requests waiting on an inbox, by inbox, while federated.
+    pending: Mutex<HashMap<Arc<str>, Pending>>,
+    /// Picks the peer that serves a queue group without local members.
+    queue_cursor: AtomicU64,
 }
 
 #[derive(Default)]
@@ -119,6 +156,10 @@ struct Registry {
     wildcard: Vec<Arc<Entry>>,
     queues: HashMap<Arc<str>, Arc<QueueGroup>>,
     count: usize,
+    /// Subscriptions per announced interest key; see [`Entry::interest`].
+    interest: HashMap<InterestKey, u32>,
+    /// The sequence number of the last interest update sent to peers.
+    interest_sequence: u64,
 }
 
 struct Entry {
@@ -128,11 +169,47 @@ struct Entry {
     sender: mpsc::Sender<Message>,
     slow: Arc<AtomicBool>,
     last_delivery: AtomicU64,
+    scope: SubscriptionScope,
+    client: bool,
+    /// The interest this subscription announces to other peers, `None` when
+    /// nothing it can match ever crosses peers for it.
+    interest: Option<InterestKey>,
 }
 
 struct QueueGroup {
     name: Arc<str>,
     cursor: AtomicU64,
+}
+
+#[derive(Default)]
+struct RemoteInterest {
+    /// The last update applied; `None` before the first full one.
+    sequence: Option<u64>,
+    /// A [`FederationFrame::Resync`] went out and no full update came yet.
+    resync_requested: bool,
+    entries: HashMap<InterestKey, u32>,
+}
+
+/// A request that went to other peers.
+struct Pending {
+    /// The peers it was forwarded to.
+    targets: Vec<PeerId>,
+    /// Peers that answered with no responders, or whose link went down.
+    refusals: mpsc::UnboundedSender<PeerId>,
+}
+
+/// Where a message to route comes from.
+enum Arrival<'a> {
+    /// A publisher of this peer.
+    Local,
+    /// Another peer, which chose `queues` for this peer to serve.
+    Forwarded { queues: &'a [String] },
+}
+
+#[derive(Default)]
+struct Routed {
+    report: PublishReport,
+    targets: Vec<PeerId>,
 }
 
 pub struct Subscription {
@@ -166,6 +243,12 @@ impl Broker {
                 config,
                 registry: RwLock::new(Registry::default()),
                 next_id: AtomicU64::new(1),
+                federated: AtomicBool::new(false),
+                federation: RwLock::new(None),
+                owner_router: RwLock::new(None),
+                remote: RwLock::new(HashMap::new()),
+                pending: Mutex::new(HashMap::new()),
+                queue_cursor: AtomicU64::new(0),
             }),
         })
     }
@@ -174,7 +257,17 @@ impl Broker {
         &self.inner.config
     }
 
+    /// An in-process subscription with [`SubscriptionScope::Cluster`].
     pub fn subscribe(&self, subject: &str, queue: Option<&str>) -> Result<Subscription> {
+        self.subscribe_with(subject, queue, SubscribeOptions::default())
+    }
+
+    pub fn subscribe_with(
+        &self,
+        subject: &str,
+        queue: Option<&str>,
+        options: SubscribeOptions,
+    ) -> Result<Subscription> {
         validate_subject(subject, true, self.inner.config.max_subject_bytes)?;
         if queue.is_some_and(|q| {
             q.is_empty()
@@ -206,6 +299,19 @@ impl Broker {
                 })
                 .clone()
         });
+        // Replies to this peer's own inboxes find it by their prefix alone.
+        let own_inbox = self
+            .inner
+            .federation()
+            .is_some_and(|federation| inbox_peer(subject) == Some(&*federation.local_peer()));
+        let interest = (options.scope == SubscriptionScope::Cluster
+            && !own_inbox
+            && scope::pattern_may_federate(subject, options.client))
+        .then(|| InterestKey {
+            pattern: subject.to_owned(),
+            queue: queue.as_ref().map(|queue| queue.name.to_string()),
+            clients: options.client,
+        });
         let entry = Arc::new(Entry {
             id: self.inner.next_id.fetch_add(1, Ordering::Relaxed),
             pattern: Arc::from(subject),
@@ -213,6 +319,9 @@ impl Broker {
             sender,
             slow: Arc::new(AtomicBool::new(false)),
             last_delivery: AtomicU64::new(0),
+            scope: options.scope,
+            client: options.client,
+            interest: interest.clone(),
         });
         if subject.contains(['*', '>']) {
             registry.wildcard.push(entry.clone());
@@ -224,6 +333,9 @@ impl Broker {
                 .push(entry.clone());
         }
         registry.count += 1;
+        if let Some(key) = interest {
+            self.inner.change_interest(&mut registry, key, true);
+        }
         Ok(Subscription {
             id: entry.id,
             pattern: entry.pattern.clone(),
@@ -252,7 +364,9 @@ impl Broker {
 
     /// [`Broker::publish_with_reply`] on behalf of an authenticated remote
     /// principal, recorded in [`Message::sender`]. Only the QUIC listener
-    /// names a sender; in-process publishers leave it `None`.
+    /// and plugins name a sender; other in-process publishers leave it
+    /// `None`. Peers forward the sender with the message, so every peer's
+    /// permission checks see the same publisher.
     pub fn publish_as(
         &self,
         subject: &str,
@@ -260,87 +374,9 @@ impl Broker {
         payload: Bytes,
         sender: Option<&str>,
     ) -> Result<PublishReport> {
-        validate_subject(subject, false, self.inner.config.max_subject_bytes)?;
-        if let Some(reply) = reply {
-            validate_subject(reply, false, self.inner.config.max_subject_bytes)?;
-        }
-        if payload.len() > self.inner.config.max_payload_bytes {
-            return Err(Error::PayloadTooLarge {
-                size: payload.len(),
-                limit: self.inner.config.max_payload_bytes,
-            });
-        }
-        let registry = self
-            .inner
-            .registry
-            .read()
-            .unwrap_or_else(|p| p.into_inner());
-        let exact = registry
-            .exact
-            .get(subject)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        // No allocation when an exact subject has no listeners and there are no
-        // wildcard listeners. Ordinary fanout requires no temporary candidate list.
-        if exact.is_empty() && registry.wildcard.is_empty() {
-            return Ok(PublishReport::default());
-        }
-        let message = Message {
-            subject: exact
-                .first()
-                .map_or_else(|| Arc::from(subject), |entry| entry.pattern.clone()),
-            reply: reply.map(Arc::from),
-            payload,
-            sender: sender.map(Arc::from),
-        };
-        let mut report = PublishReport::default();
-        let mut queues: HashMap<&str, Vec<&Entry>> = HashMap::new();
-        for entry in exact.iter().chain(
-            registry
-                .wildcard
-                .iter()
-                .filter(|e| subject_matches(&e.pattern, subject)),
-        ) {
-            if entry.slow.load(Ordering::Acquire) || entry.sender.is_closed() {
-                continue;
-            }
-            if let Some(queue) = &entry.queue {
-                queues.entry(&queue.name).or_default().push(entry);
-            } else {
-                deliver(entry, &message, &mut report);
-            }
-        }
-        if !queues.is_empty() {
-            for candidates in queues.values() {
-                let stamp = candidates[0]
-                    .queue
-                    .as_ref()
-                    .unwrap()
-                    .cursor
-                    .fetch_add(1, Ordering::Relaxed)
-                    .wrapping_add(1);
-                // Least recently served is fair even when different subjects
-                // produce overlapping candidate sets for the same queue name.
-                let preferred = candidates
-                    .iter()
-                    .min_by_key(|entry| entry.last_delivery.load(Ordering::Relaxed))
-                    .unwrap();
-                preferred.last_delivery.store(stamp, Ordering::Relaxed);
-                if deliver(preferred, &message, &mut report) {
-                    continue;
-                }
-                for entry in candidates.iter().filter(|entry| entry.id != preferred.id) {
-                    if entry.slow.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    entry.last_delivery.store(stamp, Ordering::Relaxed);
-                    if deliver(entry, &message, &mut report) {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(report)
+        self.inner
+            .route(subject, reply, payload, sender, Arrival::Local)
+            .map(|routed| routed.report)
     }
 
     pub async fn request(
@@ -354,6 +390,10 @@ impl Broker {
 
     /// [`Broker::request`] on behalf of an authenticated remote principal;
     /// see [`Broker::publish_as`].
+    ///
+    /// Fails with [`Error::NoResponders`] at once when neither this peer nor
+    /// any other has a subscriber, and as soon as every peer the request
+    /// went to answered that its subscribers are gone.
     pub async fn request_as(
         &self,
         subject: &str,
@@ -364,15 +404,51 @@ impl Broker {
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random)
             .map_err(|_| Error::Storage("request inbox entropy unavailable".into()))?;
-        let inbox = format!("_INBOX.{:032x}", u128::from_le_bytes(random));
+        let random = u128::from_le_bytes(random);
+        let Some(federation) = self.inner.federation() else {
+            let inbox = format!("_INBOX.{random:032x}");
+            let mut subscription = self.subscribe(&inbox, None)?;
+            let report = self.publish_as(subject, Some(&inbox), payload, sender)?;
+            if report.delivered == 0 {
+                return Err(Error::NoResponders);
+            }
+            return tokio::time::timeout(timeout, subscription.recv())
+                .await
+                .map_err(|_| Error::Timeout)?;
+        };
+        let inbox: Arc<str> =
+            Arc::from(format!("_INBOX.{}.{random:032x}", federation.local_peer()));
         let mut subscription = self.subscribe(&inbox, None)?;
-        let report = self.publish_as(subject, Some(&inbox), payload, sender)?;
-        if report.delivered == 0 {
+        let (refusals_sender, mut refusals) = mpsc::unbounded_channel();
+        let _pending = PendingGuard::register(&self.inner, inbox.clone(), refusals_sender);
+        let routed = self
+            .inner
+            .route(subject, Some(&*inbox), payload, sender, Arrival::Local)?;
+        if routed.report.delivered == 0 && routed.targets.is_empty() {
             return Err(Error::NoResponders);
         }
-        tokio::time::timeout(timeout, subscription.recv())
-            .await
-            .map_err(|_| Error::Timeout)?
+        let remote_only = routed.report.delivered == 0;
+        if remote_only {
+            self.inner.set_targets(&inbox, &routed.targets);
+        }
+        let mut refused: Vec<PeerId> = Vec::new();
+        tokio::time::timeout(timeout, async {
+            loop {
+                tokio::select! {
+                    message = subscription.recv() => return message,
+                    Some(peer) = refusals.recv(), if remote_only => {
+                        if !refused.contains(&peer) {
+                            refused.push(peer);
+                        }
+                        if routed.targets.iter().all(|target| refused.contains(target)) {
+                            return Err(Error::NoResponders);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
     }
 
     pub fn subscription_count(&self) -> usize {
@@ -381,6 +457,543 @@ impl Broker {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .count
+    }
+
+    /// The prefix of this broker's request inboxes: `_INBOX.` alone, or
+    /// `_INBOX.<peer>.` with a federation, so replies from other peers find
+    /// their way back by the prefix alone.
+    pub fn inbox_prefix(&self) -> String {
+        match self.inner.federation() {
+            Some(federation) => format!("_INBOX.{}.", federation.local_peer()),
+            None => "_INBOX.".to_owned(),
+        }
+    }
+
+    /// Join a cluster's bus: from now on, subjects whose [`Scope`] allows it
+    /// cross peers through `federation`, and this broker's interest is sent
+    /// to every peer whose link is up.
+    pub fn set_federation(&self, federation: Arc<dyn Federation>) {
+        let registry = self
+            .inner
+            .registry
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        *self
+            .inner
+            .federation
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(federation.clone());
+        self.inner.federated.store(true, Ordering::Release);
+        for peer in federation.peers() {
+            Inner::send_full_interest(&registry, &*federation, &peer);
+        }
+    }
+
+    /// Leave the cluster's bus: back to serving only this broker's
+    /// subscribers. Requests waiting on other peers time out.
+    pub fn clear_federation(&self) {
+        let _registry = self
+            .inner
+            .registry
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        *self
+            .inner
+            .federation
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.inner.federated.store(false, Ordering::Release);
+        self.inner
+            .remote
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    pub fn federation(&self) -> Option<Arc<dyn Federation>> {
+        self.inner.federation()
+    }
+
+    /// Route [`Scope::Owner`] subjects with `router` while federated.
+    pub fn set_owner_router(&self, router: Arc<dyn OwnerRouter>) {
+        *self
+            .inner
+            .owner_router
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(router);
+    }
+
+    /// The link to `peer` came up (again): forget its old interest, which
+    /// it sends anew, and send it all of ours.
+    pub fn peer_up(&self, peer: &PeerId) {
+        let Some(federation) = self.inner.federation() else {
+            return;
+        };
+        self.inner
+            .remote
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(peer);
+        let registry = self
+            .inner
+            .registry
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        Inner::send_full_interest(&registry, &*federation, peer);
+    }
+
+    /// The link to `peer` went down: stop forwarding to it, and stop
+    /// waiting for its replies.
+    pub fn peer_down(&self, peer: &PeerId) {
+        self.inner
+            .remote
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(peer);
+        let pending = self.inner.pending.lock().unwrap_or_else(|p| p.into_inner());
+        for request in pending.values() {
+            if request.targets.contains(peer) {
+                let _ = request.refusals.send(peer.clone());
+            }
+        }
+    }
+
+    /// A frame `from` another peer, off the cluster's `bus` stream.
+    pub fn handle_federation_frame(&self, from: &PeerId, frame: FederationFrame) {
+        match frame {
+            FederationFrame::Interest(update) => self.inner.receive_interest(from, update),
+            FederationFrame::Message(message) => {
+                let Some(federation) = self.inner.federation() else {
+                    return;
+                };
+                let delivered = self
+                    .inner
+                    .route(
+                        &message.subject,
+                        message.reply.as_deref(),
+                        message.payload,
+                        message.sender.as_deref(),
+                        Arrival::Forwarded {
+                            queues: &message.queues,
+                        },
+                    )
+                    .is_ok_and(|routed| routed.report.delivered > 0);
+                if !delivered && let Some(reply) = message.reply {
+                    federation.send(from, FederationFrame::NoResponders { reply });
+                }
+            }
+            FederationFrame::NoResponders { reply } => {
+                let pending = self.inner.pending.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(request) = pending.get(reply.as_str()) {
+                    let _ = request.refusals.send(from.clone());
+                }
+            }
+            FederationFrame::Resync => {
+                let Some(federation) = self.inner.federation() else {
+                    return;
+                };
+                let registry = self
+                    .inner
+                    .registry
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner());
+                Inner::send_full_interest(&registry, &*federation, from);
+            }
+        }
+    }
+}
+
+impl Inner {
+    fn federation(&self) -> Option<Arc<dyn Federation>> {
+        if !self.federated.load(Ordering::Acquire) {
+            return None;
+        }
+        self.federation
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn owner_router(&self) -> Option<Arc<dyn OwnerRouter>> {
+        self.owner_router
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Count one subscription more or less for `key`, and tell the peers.
+    /// Runs under the registry's write lock, which orders interest updates.
+    fn change_interest(&self, registry: &mut Registry, key: InterestKey, add: bool) {
+        let count = registry.interest.entry(key.clone()).or_insert(0);
+        if add {
+            *count = count.saturating_add(1);
+        } else {
+            *count = count.saturating_sub(1);
+        }
+        let count = *count;
+        if count == 0 {
+            registry.interest.remove(&key);
+        }
+        let Some(federation) = self.federation() else {
+            return;
+        };
+        registry.interest_sequence += 1;
+        let update = InterestUpdate {
+            sequence: registry.interest_sequence,
+            full: false,
+            entries: vec![InterestEntry { key, count }],
+        };
+        for peer in federation.peers() {
+            federation.send(&peer, FederationFrame::Interest(update.clone()));
+        }
+    }
+
+    /// Send `peer` all of this broker's interest, as of the last update.
+    fn send_full_interest(registry: &Registry, federation: &dyn Federation, peer: &PeerId) {
+        let entries = registry
+            .interest
+            .iter()
+            .map(|(key, &count)| InterestEntry {
+                key: key.clone(),
+                count,
+            })
+            .collect();
+        federation.send(
+            peer,
+            FederationFrame::Interest(InterestUpdate {
+                sequence: registry.interest_sequence,
+                full: true,
+                entries,
+            }),
+        );
+    }
+
+    fn receive_interest(&self, from: &PeerId, update: InterestUpdate) {
+        let resync = {
+            let mut remote = self.remote.write().unwrap_or_else(|p| p.into_inner());
+            let interest = remote.entry(from.clone()).or_default();
+            if update.full {
+                interest.entries = update
+                    .entries
+                    .into_iter()
+                    .filter(|entry| entry.count > 0)
+                    .map(|entry| (entry.key, entry.count))
+                    .collect();
+                interest.sequence = Some(update.sequence);
+                interest.resync_requested = false;
+                false
+            } else {
+                let last = interest.sequence;
+                match last {
+                    Some(last) if update.sequence == last.wrapping_add(1) => {
+                        for entry in update.entries {
+                            if entry.count == 0 {
+                                interest.entries.remove(&entry.key);
+                            } else {
+                                interest.entries.insert(entry.key, entry.count);
+                            }
+                        }
+                        interest.sequence = Some(update.sequence);
+                        false
+                    }
+                    // Already covered by a full update.
+                    Some(last) if update.sequence <= last => false,
+                    // A gap, or nothing to apply it to: ask once for all of it.
+                    _ => !std::mem::replace(&mut interest.resync_requested, true),
+                }
+            }
+        };
+        if resync && let Some(federation) = self.federation() {
+            federation.send(from, FederationFrame::Resync);
+        }
+    }
+
+    fn set_targets(&self, inbox: &str, targets: &[PeerId]) {
+        if let Some(request) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(inbox)
+        {
+            request.targets = targets.to_vec();
+        }
+    }
+
+    /// Deliver to this broker's subscribers and, for a local publisher,
+    /// forward to the peers that should see the message.
+    fn route(
+        &self,
+        subject: &str,
+        reply: Option<&str>,
+        payload: Bytes,
+        sender: Option<&str>,
+        arrival: Arrival<'_>,
+    ) -> Result<Routed> {
+        validate_subject(subject, false, self.config.max_subject_bytes)?;
+        if let Some(reply) = reply {
+            validate_subject(reply, false, self.config.max_subject_bytes)?;
+        }
+        if payload.len() > self.config.max_payload_bytes {
+            return Err(Error::PayloadTooLarge {
+                size: payload.len(),
+                limit: self.config.max_payload_bytes,
+            });
+        }
+        // Only a local publisher's messages travel on: one hop, no loops.
+        let federation = match arrival {
+            Arrival::Local => self.federation(),
+            Arrival::Forwarded { .. } => None,
+        };
+        let scope = match (&federation, &arrival) {
+            (None, Arrival::Local) => Scope::Cluster,
+            _ => subject_scope(subject),
+        };
+        if let Some(federation) = &federation
+            && scope == Scope::Owner
+            && let Some(router) = self.owner_router()
+            && let Some(peer) = router.route(subject)
+            && peer != federation.local_peer()
+        {
+            federation.send(
+                &peer,
+                FederationFrame::Message(ForwardedMessage {
+                    subject: subject.to_owned(),
+                    reply: reply.map(str::to_owned),
+                    payload,
+                    sender: sender.map(str::to_owned),
+                    origin: federation.local_peer().to_string(),
+                    queues: Vec::new(),
+                }),
+            );
+            return Ok(Routed {
+                report: PublishReport {
+                    forwarded: 1,
+                    ..PublishReport::default()
+                },
+                targets: vec![peer],
+            });
+        }
+        let mut report = PublishReport::default();
+        // Queue groups served here, which no other peer serves again.
+        let mut served: Vec<Arc<str>> = Vec::new();
+        {
+            let registry = self.registry.read().unwrap_or_else(|p| p.into_inner());
+            let exact = registry
+                .exact
+                .get(subject)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            // No allocation when an exact subject has no listeners and there are no
+            // wildcard listeners. Ordinary fanout requires no temporary candidate list.
+            if exact.is_empty() && registry.wildcard.is_empty() {
+                if federation.is_none() {
+                    return Ok(Routed::default());
+                }
+            } else {
+                let message = Message {
+                    subject: exact
+                        .first()
+                        .map_or_else(|| Arc::from(subject), |entry| entry.pattern.clone()),
+                    reply: reply.map(Arc::from),
+                    payload: payload.clone(),
+                    sender: sender.map(Arc::from),
+                };
+                let mut queues: HashMap<&str, Vec<&Entry>> = HashMap::new();
+                for entry in exact.iter().chain(
+                    registry
+                        .wildcard
+                        .iter()
+                        .filter(|e| subject_matches(&e.pattern, subject)),
+                ) {
+                    if entry.slow.load(Ordering::Acquire)
+                        || entry.sender.is_closed()
+                        || !eligible(entry, &arrival, scope)
+                    {
+                        continue;
+                    }
+                    if let Some(queue) = &entry.queue {
+                        queues.entry(&queue.name).or_default().push(entry);
+                    } else {
+                        deliver(entry, &message, &mut report);
+                    }
+                }
+                for candidates in queues.values() {
+                    let group = candidates[0].queue.as_ref().unwrap();
+                    let stamp = group.cursor.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                    // Least recently served is fair even when different subjects
+                    // produce overlapping candidate sets for the same queue name.
+                    let preferred = candidates
+                        .iter()
+                        .min_by_key(|entry| entry.last_delivery.load(Ordering::Relaxed))
+                        .unwrap();
+                    preferred.last_delivery.store(stamp, Ordering::Relaxed);
+                    let mut done = deliver(preferred, &message, &mut report);
+                    if !done {
+                        for entry in candidates.iter().filter(|entry| entry.id != preferred.id) {
+                            if entry.slow.load(Ordering::Acquire) {
+                                continue;
+                            }
+                            entry.last_delivery.store(stamp, Ordering::Relaxed);
+                            if deliver(entry, &message, &mut report) {
+                                done = true;
+                                break;
+                            }
+                        }
+                    }
+                    if done && federation.is_some() {
+                        served.push(group.name.clone());
+                    }
+                }
+            }
+        }
+        let Some(federation) = federation else {
+            return Ok(Routed {
+                report,
+                targets: Vec::new(),
+            });
+        };
+        if !matches!(scope, Scope::Cluster | Scope::Origin) {
+            return Ok(Routed {
+                report,
+                targets: Vec::new(),
+            });
+        }
+        let local = federation.local_peer();
+        // Peers to forward to: whether their plain subscribers want it, and
+        // the queue groups they serve.
+        let mut plans: HashMap<PeerId, (bool, Vec<String>)> = HashMap::new();
+        match inbox_peer(subject) {
+            // A reply goes to the peer named by its inbox, interest or not.
+            Some(peer) if peer == &*local => {}
+            Some(peer) if federation.peers().iter().any(|p| &**p == peer) => {
+                plans.insert(Arc::from(peer), (true, Vec::new()));
+            }
+            _ => {
+                let remote = self.remote.read().unwrap_or_else(|p| p.into_inner());
+                let clients_only = scope == Scope::Origin;
+                let mut groups: HashMap<&str, Vec<(&PeerId, u64)>> = HashMap::new();
+                for (peer, interest) in remote.iter() {
+                    for (key, &count) in &interest.entries {
+                        if count == 0
+                            || (clients_only && !key.clients)
+                            || !subject_matches(&key.pattern, subject)
+                        {
+                            continue;
+                        }
+                        match &key.queue {
+                            None => plans.entry(peer.clone()).or_default().0 = true,
+                            Some(group) if !served.iter().any(|name| **name == **group) => {
+                                let weights = groups.entry(group.as_str()).or_default();
+                                match weights.last_mut() {
+                                    Some((last, weight)) if Arc::ptr_eq(*last, peer) => {
+                                        *weight += u64::from(count);
+                                    }
+                                    _ => weights.push((peer, u64::from(count))),
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+                // One member across the cluster: a peer chosen by its share
+                // of the group's members.
+                for (group, weights) in groups {
+                    let total: u64 = weights.iter().map(|(_, weight)| weight).sum();
+                    let mut pick = self.queue_cursor.fetch_add(1, Ordering::Relaxed) % total;
+                    for (peer, weight) in weights {
+                        if pick < weight {
+                            plans
+                                .entry(peer.clone())
+                                .or_default()
+                                .1
+                                .push(group.to_owned());
+                            break;
+                        }
+                        pick -= weight;
+                    }
+                }
+            }
+        }
+        let mut targets = Vec::with_capacity(plans.len());
+        for (peer, (_, queues)) in plans {
+            federation.send(
+                &peer,
+                FederationFrame::Message(ForwardedMessage {
+                    subject: subject.to_owned(),
+                    reply: reply.map(str::to_owned),
+                    payload: payload.clone(),
+                    sender: sender.map(str::to_owned),
+                    origin: local.to_string(),
+                    queues,
+                }),
+            );
+            targets.push(peer);
+        }
+        report.forwarded = targets.len();
+        Ok(Routed { report, targets })
+    }
+}
+
+/// Whether a message that `arrival` brings may reach `entry`. A local
+/// publisher's messages reach every subscriber, as on a single Rift.
+fn eligible(entry: &Entry, arrival: &Arrival<'_>, scope: Scope) -> bool {
+    let Arrival::Forwarded { queues } = arrival else {
+        return true;
+    };
+    entry.scope == SubscriptionScope::Cluster
+        && match scope {
+            Scope::Cluster | Scope::Owner => true,
+            // In-process code sees only its own peer's events, so plugin
+            // code across the cluster sees each event once.
+            Scope::Origin => entry.client,
+            Scope::Local | Scope::Applied => false,
+        }
+        && entry.queue.as_ref().is_none_or(|group| {
+            scope == Scope::Owner || queues.iter().any(|queue| *queue == *group.name)
+        })
+}
+
+/// The peer named by an `_INBOX.<peer>.<id>` reply subject.
+fn inbox_peer(subject: &str) -> Option<&str> {
+    let mut tokens = subject.strip_prefix("_INBOX.")?.split('.');
+    let peer = tokens.next()?;
+    tokens.next().is_some().then_some(peer)
+}
+
+/// Unregisters a [`Pending`] request when the request ends.
+struct PendingGuard<'a> {
+    inner: &'a Inner,
+    inbox: Arc<str>,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn register(
+        inner: &'a Inner,
+        inbox: Arc<str>,
+        refusals: mpsc::UnboundedSender<PeerId>,
+    ) -> Self {
+        inner
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                inbox.clone(),
+                Pending {
+                    targets: Vec::new(),
+                    refusals,
+                },
+            );
+        Self { inner, inbox }
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.inbox);
     }
 }
 
@@ -439,14 +1052,23 @@ impl Subscription {
         self.receiver.close();
         if let Some(broker) = self.broker.upgrade() {
             let mut registry = broker.registry.write().unwrap_or_else(|p| p.into_inner());
-            if self.pattern.contains(['*', '>']) {
-                registry.wildcard.retain(|e| e.id != self.id);
+            let removed = if self.pattern.contains(['*', '>']) {
+                let position = registry.wildcard.iter().position(|e| e.id == self.id);
+                position.map(|index| registry.wildcard.remove(index))
             } else if let Some(entries) = registry.exact.get_mut(&self.pattern) {
-                entries.retain(|e| e.id != self.id);
+                let removed = entries
+                    .iter()
+                    .position(|e| e.id == self.id)
+                    .map(|index| entries.remove(index));
                 if entries.is_empty() {
                     registry.exact.remove(&self.pattern);
                 }
-            }
+                removed
+            } else {
+                None
+            };
+            // The entry goes before its queue group is checked for other members.
+            let interest = removed.and_then(|entry| entry.interest.clone());
             registry.count -= 1;
             if let Some(name) = &self.queue_name
                 && registry
@@ -455,6 +1077,9 @@ impl Subscription {
                     .is_some_and(|queue| Arc::strong_count(queue) == 1)
             {
                 registry.queues.remove(name);
+            }
+            if let Some(key) = interest {
+                broker.change_interest(&mut registry, key, false);
             }
         }
     }
@@ -500,6 +1125,9 @@ pub(crate) fn subject_matches(pattern: &str, subject: &str) -> bool {
     }
     subject.next().is_none()
 }
+
+#[cfg(test)]
+mod federation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -604,7 +1232,8 @@ mod tests {
             report,
             PublishReport {
                 delivered: 1,
-                slow_consumers: 1
+                slow_consumers: 1,
+                forwarded: 0,
             }
         );
         assert!(matches!(a.recv().await, Err(Error::SlowConsumer)));

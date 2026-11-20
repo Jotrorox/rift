@@ -1,4 +1,4 @@
-//! Engine-neutral mirrors of the `rift:plugin@0.2.0` WIT types
+//! Engine-neutral mirrors of the `rift:plugin@0.2.1` WIT types
 //! (`wit/rift-plugin.wit`). Engines translate their own values (Lua tables,
 //! wasmtime bindgen records) into these; the host never sees engine values.
 //! Core types are reused where their shape already matches the contract.
@@ -16,7 +16,7 @@ pub use crate::{
 pub const API_VERSION: &str = "0.2";
 /// The exact `rift:plugin` package version, for a manifest's `min_api` and
 /// `meta.api`.
-pub const CONTRACT_VERSION: &str = "0.2.0";
+pub const CONTRACT_VERSION: &str = "0.2.1";
 
 /// `major.minor.patch` as numbers, or `None` for anything else.
 pub fn parse_version(version: &str) -> Option<[u32; 3]> {
@@ -84,6 +84,10 @@ pub struct PlayerInfo {
     /// plugin set, else the client's locale.
     #[serde(default)]
     pub language: Option<String>,
+    /// The cluster peer the player is connected to; absent without a
+    /// cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
 }
 
 /// One signed property of a player's profile, such as `textures`.
@@ -468,6 +472,31 @@ impl Event {
             Self::Chat(_) => Hook::Chat,
             Self::Kick(_) => Hook::Kick,
             Self::Job(..) => Hook::Job,
+        }
+    }
+
+    /// The language of the player the event is about, as `ctx.language`
+    /// reports it; `None` for events about no player.
+    pub fn language(&self) -> Option<&str> {
+        match self {
+            Self::Login(context)
+            | Self::InitialServer(context)
+            | Self::BeforeTransfer(context)
+            | Self::Command(context)
+            | Self::Suggest(context)
+            | Self::Join(context)
+            | Self::AfterTransfer(context)
+            | Self::Disconnect(context)
+            | Self::Dialog(context)
+            | Self::Chat(context)
+            | Self::Kick(context) => context.language.as_deref(),
+            Self::Route(_)
+            | Self::Status(_)
+            | Self::Http(_)
+            | Self::Message(_)
+            | Self::Timer(_)
+            | Self::Event(_)
+            | Self::Job(..) => None,
         }
     }
 }

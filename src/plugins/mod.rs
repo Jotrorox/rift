@@ -380,6 +380,7 @@ impl Host {
                 commands: self.script.commands().iter().cloned().collect(),
                 capabilities: Some("sandboxed".into()),
                 restartable: false,
+                cluster_warning: None,
             });
         }
         let monitor = self.monitor();
@@ -416,6 +417,10 @@ impl Host {
                 }),
                 capabilities: Some(instance.spec().manifest.describe_capabilities()),
                 restartable: true,
+                cluster_warning: cluster_warning(
+                    &instance.spec().manifest,
+                    crate::cluster::global().is_some(),
+                ),
             });
         }
         let hooks: Vec<&'static str> = self
@@ -437,6 +442,7 @@ impl Host {
                 commands: Vec::new(),
                 capabilities: None,
                 restartable: false,
+                cluster_warning: None,
             });
         }
         statuses
@@ -1076,8 +1082,12 @@ impl Host {
                     Event::Status(input.clone()),
                     |reply| match reply {
                         Reply::Status(None) => Ok(None),
+                        // A ping carries no locale: the default language.
                         Reply::Status(Some(changes)) => {
-                            crate::server_list::status_override_json(changes).map(Some)
+                            crate::text::rendering(Some(instance.name()), None, || {
+                                crate::server_list::status_override_json(changes)
+                            })
+                            .map(Some)
                         }
                         other => Err(mismatch(Hook::Status, &other)),
                     },
@@ -1150,6 +1160,15 @@ pub struct PluginStatus {
     /// The effective grants, as `rift check` prints them.
     pub capabilities: Option<String>,
     pub restartable: bool,
+    /// In a cluster, for a persistent plugin whose `plugin.toml` does not
+    /// declare `cluster = true`: why an operator should check it.
+    pub cluster_warning: Option<&'static str>,
+}
+
+/// [`PluginStatus::cluster_warning`] for a plugin with `manifest`, when
+/// this process is a cluster peer (`clustered`).
+pub fn cluster_warning(manifest: &manifest::Manifest, clustered: bool) -> Option<&'static str> {
+    (clustered && !manifest.cluster_aware).then_some(manifest::NOT_CLUSTER_AWARE)
 }
 
 /// Queue an observer event for one plugin and count it.

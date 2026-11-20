@@ -31,6 +31,8 @@ final class Frames {
     static final int DELIVERY = 14;
     static final int ACK = 15;
     static final int CONSUMER_DELETE = 16;
+    /** SUBSCRIBE's optional last field for a local subscription; omitted for the cluster default. */
+    static final int SCOPE_LOCAL = 1;
 
     static final int MAX_PAYLOAD = 1024 * 1024;
     static final int MAX_FRAME = MAX_PAYLOAD + 64 * 1024;
@@ -50,6 +52,11 @@ final class Frames {
 
         Writer(int opcode) {
             body.write(opcode);
+        }
+
+        Writer u8(int value) {
+            body.write(value);
+            return this;
         }
 
         Writer u16(int value) {

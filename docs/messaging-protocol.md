@@ -114,7 +114,7 @@ stream with ERROR when possible.
 | 3 | ERROR | code:u16, message:str | server response; code 1 permission, 2 operation/protocol |
 | 4 | PUBLISH | subject:str, reply:str, payload | none on success; ERROR closes stream on failure |
 | 5 | PUBLISH_ACK | subject:str, reply:str, payload | OK after live broker acceptance |
-| 6 | SUBSCRIBE | pattern:str, queue:str | OK after registration, followed by MESSAGE frames |
+| 6 | SUBSCRIBE | pattern:str, queue:str, [scope:u8] | OK after registration, followed by MESSAGE frames |
 | 7 | MESSAGE | subject:str, reply:str, payload | server delivery/response |
 | 8 | PING | empty | OK after all preceding commands on this stream |
 | 9 | REQUEST | timeout_ms:u32, subject:str, payload | one MESSAGE, or ERROR |
@@ -147,6 +147,11 @@ stream with ERROR when possible.
 - SUBSCRIBE converts its stream into a delivery stream. The client retains
   both halves for its lifetime, then sends STOP_SENDING/reset on
   cancellation.
+- SUBSCRIBE may end with a `scope` byte: `0` for `cluster`, `1` for
+  `local` (see [clusters](#clusters)); other values are rejected. Without
+  it the subscription is `cluster`. Clients send the byte only for `local`,
+  so servers from before scopes keep accepting every other subscription;
+  such a server rejects a `local` one as a trailing field.
 - Other operations use one stream per call; clients can finish their sending
   half after writing the command.
 - A reply to REQUEST uses the MESSAGE layout with the generated inbox
@@ -169,6 +174,42 @@ stream with ERROR when possible.
 
 This standalone store does not implement distributed replication, consensus
 or clustered failover.
+
+## Clusters
+
+In a [cluster](clustering.md) every peer runs this listener over its own
+broker, and the brokers federate. Clients see one bus, with these
+differences:
+
+- **Scopes.** Every subject has a
+  [scope](clustering.md#subject-scopes). Rift's request subjects
+  (`rift.control.*`, `rift.players.*`, `rift.network.*`, permission
+  requests, `rift.server.state`) are answered by the peer the client is
+  connected to. Events about replicated state (`rift.events.instances`,
+  `permissions`, `reload`, `servers`, `cluster`, and `rift.perms.update`)
+  come from that peer only, once. Session events (`rift.events.players`,
+  `control`, `lifecycle`, `plugins`) arrive from every peer. User subjects
+  cross peers for `cluster` subscriptions and stay on the publisher's peer
+  for `local` ones.
+- **Request and reply.** REQUEST works across peers unchanged. Inboxes the
+  server makes are `_INBOX.<peer>.<random>`, routed back by that prefix.
+  A client that makes its own inbox subscribes to it before publishing the
+  request: the server announces the subscription to the other peers before
+  it forwards any later publication of that client, so the reply finds the
+  inbox.
+- **No responders.** REQUEST fails with `no responders available` at once
+  when no peer has a subscriber, and as soon as every peer the request went
+  to answered that its subscribers left.
+- **Publishers.** A message keeps its authenticated principal on every
+  peer, so a responder's permission checks give the same answer wherever
+  the publisher is connected.
+- **Several addresses.** Give clients every peer's address. The Rust
+  `Client::connect_any` and the Java client's `addAddress` connect to the
+  first that accepts and move on to the next when a connection fails;
+  subscriptions are made again on the new connection, and messages
+  published in between are lost (live delivery is at most once). The
+  certificate must name every address a client dials, or each address
+  carries its own TLS server name.
 
 ## Limits and lifecycle
 
@@ -230,6 +271,14 @@ assert_eq!(&*message.subject, "game.score.player42");
 
 - The client applies 30-second operation deadlines; REQUEST uses its supplied
   timeout plus five seconds for transport.
+- `Client::connect` holds one connection and does not reconnect.
+  `Client::connect_any` takes a list of `ServerAddress`es (address and TLS
+  server name), such as the peers of a cluster, and reconnects to the next
+  one in turn when its connection ends. A waiting
+  `RemoteSubscription::recv()` subscribes again on the new connection;
+  other operations fail while no connection is up and are never retried.
+- `Client::subscribe_scoped` takes a `SubscriptionScope` (`Cluster`, the
+  default of `subscribe`, or `Local`).
 - `RemoteSubscription::recv()` is cancellation safe.
 - Cancelling a write can leave a partially written frame, so a `Publisher`
   marks itself unusable after any failed or cancelled operation; create a new

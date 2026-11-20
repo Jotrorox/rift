@@ -22,21 +22,39 @@
 //! version in `rift_schema`. SQLite files written before that table existed
 //! kept the instance schema version in `PRAGMA user_version`; it seeds the
 //! `instances` row once.
+//!
+//! # Writes
+//!
+//! Every write is a typed [`Operation`] run through [`Database::run`]. The
+//! database's [`Executor`] decides where it runs; the default one,
+//! [`Local`], executes it on this connection in one transaction and then
+//! calls the apply hooks ([`Database::on_change`]) of the tables it changed,
+//! still holding the connection. Components keep their in-memory mirrors
+//! current only through those hooks, so a write that arrives from elsewhere
+//! (a changeset applied with [`changeset::apply_changeset`], followed by
+//! [`Database::fire`]) refreshes them exactly as a local one does.
+pub mod changeset;
 pub mod copy;
 pub(crate) mod mariadb;
+pub mod operation;
 pub(crate) mod postgres;
 mod value;
 
+pub use operation::{ChangedTables, Executor, Local, Operation, Outcome};
 pub(crate) use value::params;
 pub use value::{Error, FromValue, Kind, OptionalExtension, Result, Row, RowIndex, ToValue, Value};
 
 use crate::provisioning;
 use rusqlite::{Connection, OpenFlags};
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, TryLockError},
+    sync::{
+        Arc, Mutex, MutexGuard, RwLock, TryLockError,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -114,6 +132,14 @@ impl Dialect {
         match self {
             Self::Sqlite | Self::Mariadb => format!("instr({haystack}, {needle})"),
             Self::Postgres => format!("strpos({haystack}, {needle})"),
+        }
+    }
+
+    /// The length of the text `expr` in bytes of UTF-8.
+    pub fn octets(self, expr: &str) -> String {
+        match self {
+            Self::Sqlite => format!("length(CAST({expr} AS BLOB))"),
+            Self::Postgres | Self::Mariadb => format!("octet_length({expr})"),
         }
     }
 
@@ -485,9 +511,32 @@ impl Conn {
         })
     }
 
+    /// A SQLite connection opened elsewhere (such as a state machine's
+    /// writer), so [`operation::execute_operation`] and [`changeset`] can
+    /// use it. Foreign keys must be on, as [`Database::open`] sets them.
+    pub fn from_sqlite(connection: Connection) -> Self {
+        Self(Backend::Sqlite(connection))
+    }
+
+    /// The SQLite connection back, `None` for a server backend.
+    pub fn into_sqlite(self) -> Option<Connection> {
+        match self.0 {
+            Backend::Sqlite(connection) => Some(connection),
+            Backend::Postgres(_) | Backend::Mariadb(_) => None,
+        }
+    }
+
     /// The SQLite connection, for file-only pragmas.
     pub(crate) fn sqlite(&self) -> Option<&Connection> {
         match &self.0 {
+            Backend::Sqlite(connection) => Some(connection),
+            Backend::Postgres(_) | Backend::Mariadb(_) => None,
+        }
+    }
+
+    /// The SQLite connection, mutably (for the backup API's restore).
+    pub(crate) fn sqlite_mut(&mut self) -> Option<&mut Connection> {
+        match &mut self.0 {
             Backend::Sqlite(connection) => Some(connection),
             Backend::Postgres(_) | Backend::Mariadb(_) => None,
         }
@@ -524,18 +573,100 @@ impl Drop for Transaction<'_> {
     }
 }
 
-#[derive(Debug)]
+/// How a SQLite file is opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// One connection for reads and writes, `journal_mode=DELETE` and
+    /// `synchronous=FULL`: a single Rift.
+    #[default]
+    Single,
+    /// A replica of the cluster's state machine: WAL with
+    /// `synchronous=NORMAL` (an entry lost in a crash is applied again from
+    /// the Raft log), one writer connection ([`Database::lock`]) and
+    /// [`READERS`] read-only connections ([`Database::read`]). Every table
+    /// must have a primary key, since changesets skip tables without one.
+    Replicated,
+}
+
+/// Read connections of a [`Mode::Replicated`] database.
+pub const READERS: usize = 4;
+
+/// Identifies a hook registered with [`Database::on_change`].
+pub type HookId = u64;
+
+/// What an apply hook is told.
+#[derive(Debug, Clone, Copy)]
+pub struct Change<'a> {
+    /// The tables the write changed.
+    pub tables: &'a ChangedTables,
+    /// The operation, when the write was one ([`Database::run`], or an
+    /// applied log entry that carries its operations).
+    pub operation: Option<&'a Operation>,
+    /// The operation's result.
+    pub outcome: Option<&'a Outcome>,
+    /// Full reload: the whole database may have changed (after a snapshot
+    /// install). Every hook is called, and `tables` is empty.
+    pub reload: bool,
+}
+
+type HookFn = dyn Fn(&Conn, &Change<'_>) + Send + Sync;
+
+struct Hook {
+    id: HookId,
+    tables: BTreeSet<String>,
+    callback: Arc<HookFn>,
+}
+
 pub struct Database {
     /// The file path or the URL without its password, for messages.
     label: String,
     /// The SQLite file, if this is one.
     path: Option<PathBuf>,
+    /// The only connection, or the writer of a replicated database.
     connection: Mutex<Conn>,
+    /// Read-only connections of a replicated database; empty otherwise.
+    readers: Vec<Mutex<Conn>>,
+    next_reader: AtomicUsize,
+    mode: Mode,
+    executor: RwLock<Arc<dyn Executor>>,
+    hooks: RwLock<Vec<Hook>>,
+    next_hook: AtomicU64,
     // The OS releases this lock even after a crash. Keep the lock file in place.
     _lock: Option<File>,
 }
 
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("label", &self.label)
+            .field("path", &self.path)
+            .field("mode", &self.mode)
+            .field("readers", &self.readers.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Database {
+    fn with_connection(
+        label: String,
+        path: Option<PathBuf>,
+        connection: Conn,
+        lock: Option<File>,
+    ) -> Self {
+        Self {
+            label,
+            path,
+            connection: Mutex::new(connection),
+            readers: Vec::new(),
+            next_reader: AtomicUsize::new(0),
+            mode: Mode::Single,
+            executor: RwLock::new(Arc::new(Local)),
+            hooks: RwLock::new(Vec::new()),
+            next_hook: AtomicU64::new(1),
+            _lock: lock,
+        }
+    }
+
     /// Open the database at `location` for this process: lock it, create
     /// what is missing and check it.
     pub fn connect(location: &Location) -> io::Result<Self> {
@@ -583,16 +714,16 @@ impl Database {
                 (label, Backend::Mariadb(session))
             }
         };
-        Ok(Self {
-            label,
-            path: None,
-            connection: Mutex::new(Conn(backend)),
-            _lock: None,
-        })
+        Ok(Self::with_connection(label, None, Conn(backend), None))
     }
 
     /// Lock, open (creating it if needed) and check a SQLite file.
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with(path, Mode::Single)
+    }
+
+    /// [`Database::open`] in `mode`.
+    pub fn open_with(path: &Path, mode: Mode) -> io::Result<Self> {
         let path = provisioning::checked_path(path)?;
         fs::create_dir_all(path.parent().unwrap())?;
         let lock = private_file(&lock_path(&path))?;
@@ -613,14 +744,84 @@ impl Database {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| invalid(format!("instance database {}: {e}", path.display())))?;
-        let database = Self {
-            label: path.display().to_string(),
-            path: Some(path),
-            connection: Mutex::new(Conn(Backend::Sqlite(connection))),
-            _lock: Some(lock),
-        };
+        let mut database = Self::with_connection(
+            path.display().to_string(),
+            Some(path.clone()),
+            Conn(Backend::Sqlite(connection)),
+            Some(lock),
+        );
+        database.mode = mode;
         database.prepare(true)?;
+        if mode == Mode::Replicated {
+            for _ in 0..READERS {
+                let reader = database.reader(&path)?;
+                database.readers.push(Mutex::new(reader));
+            }
+            changeset::assert_primary_keys(&database.lock()).map_err(|e| database.error(e))?;
+        }
         Ok(database)
+    }
+
+    /// A read connection of a replicated database at `path`.
+    fn reader(&self, path: &Path) -> io::Result<Conn> {
+        let reader = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| self.error(e))?;
+        reader
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|e| self.error(e))?;
+        reader
+            .execute_batch("PRAGMA query_only=ON;")
+            .map_err(|e| self.error(e))?;
+        Ok(Conn(Backend::Sqlite(reader)))
+    }
+
+    /// Replace the writer of a replicated database, which the caller holds
+    /// as `writer`, and its read connections with fresh ones after the
+    /// file's contents were replaced through the writer (a snapshot install
+    /// with the backup API): no statement cached against the old contents
+    /// survives. The file itself is never renamed or replaced, so this works
+    /// while other handles to it are open (which Windows requires). A read
+    /// connection still in use after a short wait is left as it is; SQLite
+    /// prepares its statements again when it sees the new schema.
+    pub fn reopen(&self, writer: &mut Conn) -> io::Result<()> {
+        let path = match (&self.path, self.mode) {
+            (Some(path), Mode::Replicated) => path.clone(),
+            _ => return Err(self.error("only a replicated SQLite file is reopened")),
+        };
+        let fresh = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| self.error(e))?;
+        fresh
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|e| self.error(e))?;
+        fresh
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            )
+            .map_err(|e| self.error(e))?;
+        *writer = Conn(Backend::Sqlite(fresh));
+        for reader in &self.readers {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let guard = loop {
+                match reader.try_lock() {
+                    Ok(guard) => break Some(guard),
+                    Err(TryLockError::Poisoned(error)) => break Some(error.into_inner()),
+                    Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(TryLockError::WouldBlock) => break None,
+                }
+            };
+            if let Some(mut guard) = guard {
+                *guard = self.reader(&path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Open an existing SQLite file read-only, without locking, checking or
@@ -634,25 +835,25 @@ impl Database {
         connection
             .busy_timeout(Duration::from_secs(2))
             .map_err(|e| invalid(format!("instance database {}: {e}", path.display())))?;
-        Ok(Self {
-            label: path.display().to_string(),
-            path: Some(path.to_owned()),
-            connection: Mutex::new(Conn(Backend::Sqlite(connection))),
-            _lock: None,
-        })
+        Ok(Self::with_connection(
+            path.display().to_string(),
+            Some(path.to_owned()),
+            Conn(Backend::Sqlite(connection)),
+            None,
+        ))
     }
 
     /// A private in-memory SQLite database, for configurations without a
     /// file and for tests.
     pub fn memory() -> Self {
-        let database = Self {
-            label: ":memory:".into(),
-            path: None,
-            connection: Mutex::new(Conn(Backend::Sqlite(
+        let database = Self::with_connection(
+            ":memory:".into(),
+            None,
+            Conn(Backend::Sqlite(
                 Connection::open_in_memory().expect("in-memory SQLite"),
-            ))),
-            _lock: None,
-        };
+            )),
+            None,
+        );
         database
             .prepare(false)
             .expect("in-memory SQLite accepts the schema table");
@@ -673,7 +874,10 @@ impl Database {
             .map_err(|e| self.error(e))?;
         if durable {
             sqlite
-                .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
+                .execute_batch(match self.mode {
+                    Mode::Single => "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;",
+                    Mode::Replicated => "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+                })
                 .map_err(|e| self.error(e))?;
             let check: String = sqlite
                 .query_row("PRAGMA integrity_check", [], |r| r.get(0))
@@ -716,11 +920,190 @@ impl Database {
         self.lock().dialect()
     }
 
-    /// The connection, for one statement or transaction at a time.
+    /// How this database was opened. PostgreSQL and in-memory databases are
+    /// always [`Mode::Single`].
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The connection, for one statement or transaction at a time. In a
+    /// replicated database this is the writer.
     pub fn lock(&self) -> MutexGuard<'_, Conn> {
         self.connection
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// A connection for reads: one of the read connections of a replicated
+    /// database (a free one if any is), otherwise [`Database::lock`]. Reads
+    /// see every committed write.
+    pub fn read(&self) -> MutexGuard<'_, Conn> {
+        if self.readers.is_empty() {
+            return self.lock();
+        }
+        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..self.readers.len() {
+            match self.readers[(start + offset) % self.readers.len()].try_lock() {
+                Ok(reader) => return reader,
+                Err(TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        self.readers[start % self.readers.len()]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    // Writes.
+
+    /// Run `operation` through this database's executor: locally with the
+    /// default [`Local`], on the cluster leader with the cluster's.
+    pub fn run(&self, operation: Operation) -> io::Result<Outcome> {
+        self.executor().run(self, operation, None)
+    }
+
+    /// [`Database::run`], giving up at `deadline` (for Lua callbacks and
+    /// plugin hooks) with [`io::ErrorKind::TimedOut`].
+    pub fn run_until(&self, operation: Operation, deadline: Instant) -> io::Result<Outcome> {
+        self.executor().run(self, operation, Some(deadline))
+    }
+
+    fn executor(&self) -> Arc<dyn Executor> {
+        self.executor
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Replace the executor; [`Local`] until then.
+    pub fn set_executor(&self, executor: Arc<dyn Executor>) {
+        *self
+            .executor
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = executor;
+    }
+
+    /// Execute `operation` on this connection, as [`Local`] does: in one
+    /// transaction that commits unless the outcome is a failure (which is
+    /// rolled back and returned as a normal result), then call the hooks of
+    /// the tables it changed while still holding the connection. With a
+    /// `deadline`, waiting for the connection and committing both stop once
+    /// it passes.
+    pub fn execute_locally(
+        &self,
+        operation: Operation,
+        deadline: Option<Instant>,
+    ) -> io::Result<Outcome> {
+        let mut connection = match deadline {
+            Some(deadline) => self.lock_until(deadline)?,
+            None => self.lock(),
+        };
+        let outcome = {
+            let transaction = connection
+                .transaction_immediate()
+                .map_err(|e| self.error(e))?;
+            let outcome = operation::execute_operation(&transaction, &operation);
+            if outcome.failed() {
+                // Dropping the transaction rolls it back.
+                return Ok(outcome);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "script deadline exceeded",
+                ));
+            }
+            transaction.commit().map_err(|e| self.error(e))?;
+            outcome
+        };
+        let tables = operation.tables();
+        self.fire(
+            &connection,
+            &Change {
+                tables: &tables,
+                operation: Some(&operation),
+                outcome: Some(&outcome),
+                reload: false,
+            },
+        );
+        Ok(outcome)
+    }
+
+    // Apply hooks.
+
+    /// Call `hook` after every write that changes one of `tables`, and on a
+    /// full reload. Hooks run in registration order on the writing thread,
+    /// holding the connection, which they get as their first argument: a
+    /// hook reads through it and must not lock the database or run an
+    /// operation itself. Keep the returned id to [`Database::remove_hook`]:
+    /// a hook must not own the database (through an `Arc`), or neither is
+    /// ever dropped.
+    pub fn on_change(
+        &self,
+        tables: &[&str],
+        hook: impl Fn(&Conn, &Change<'_>) + Send + Sync + 'static,
+    ) -> HookId {
+        let id = self.next_hook.fetch_add(1, Ordering::Relaxed);
+        self.hooks
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Hook {
+                id,
+                tables: tables.iter().map(|table| (*table).to_owned()).collect(),
+                callback: Arc::new(hook),
+            });
+        id
+    }
+
+    pub fn remove_hook(&self, id: HookId) {
+        self.hooks
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|hook| hook.id != id);
+    }
+
+    /// Call the hooks `change` concerns: those of a changed table, or every
+    /// hook on a reload. The caller holds `connection` (the writer) and has
+    /// committed the change. Local writes do this themselves; the cluster
+    /// calls it after applying a log entry.
+    pub fn fire(&self, connection: &Conn, change: &Change<'_>) {
+        let hooks: Vec<Arc<HookFn>> = self
+            .hooks
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|hook| {
+                change.reload
+                    || hook
+                        .tables
+                        .iter()
+                        .any(|table| change.tables.contains(table))
+            })
+            .map(|hook| hook.callback.clone())
+            .collect();
+        for hook in hooks {
+            hook(connection, change);
+        }
+    }
+
+    /// Call every hook in full reload mode, as after a snapshot install.
+    pub fn reload_all(&self) {
+        let connection = self.lock();
+        self.reload_all_on(&connection);
+    }
+
+    /// [`Database::reload_all`] while the caller holds the connection.
+    pub fn reload_all_on(&self, connection: &Conn) {
+        let tables = ChangedTables::default();
+        self.fire(
+            connection,
+            &Change {
+                tables: &tables,
+                operation: None,
+                outcome: None,
+                reload: true,
+            },
+        );
     }
 
     /// [`Database::lock`], giving up at `deadline` (for Lua callbacks).
@@ -761,16 +1144,30 @@ impl Database {
         io::Error::other(format!("instance database {}: {error}", self.label))
     }
 
-    /// Bring `component` to version `latest`. `upgrade(dialect, from)`
-    /// returns the SQL that turns version `from` (0 when the component is
-    /// new) into `latest`; it runs in one transaction with the version
-    /// update. A database written by a newer Rift is refused.
+    /// Bring `component` to version `latest` when this process opens it.
+    /// `upgrade(dialect, from)` returns the SQL that turns version `from` (0
+    /// when the component is new) into `latest`; it runs in one transaction
+    /// with the version update (see [`migrate_component`]). A database
+    /// written by a newer Rift is refused.
+    ///
+    /// A [`Mode::Replicated`] database is only checked: a cluster changes a
+    /// schema by applying a `migrate` entry on every peer at the same index,
+    /// so a component that is not at `latest` yet is an error here.
     pub fn migrate(
         &self,
         component: &str,
         latest: u32,
         upgrade: impl FnOnce(Dialect, u32) -> String,
     ) -> io::Result<()> {
+        if self.mode == Mode::Replicated {
+            let version = version(&self.read(), component).map_err(|e| self.error(e))?;
+            if version == latest {
+                return Ok(());
+            }
+            return Err(self.error(format!(
+                "{component} is at schema version {version}, this Rift needs {latest}; in a cluster the leader migrates it once every peer supports that version"
+            )));
+        }
         let mut connection = self.lock();
         let version = version(&connection, component).map_err(|e| self.error(e))?;
         if version == latest {
@@ -781,22 +1178,50 @@ impl Database {
                 "unsupported schema version {version} of {component}"
             )));
         }
-        let dialect = connection.dialect();
         let transaction = connection
             .transaction_immediate()
             .map_err(|e| self.error(e))?;
-        transaction
-            .execute_batch(&upgrade(dialect, version))
-            .map_err(|e| self.error(e))?;
-        transaction
-            .execute(
-                "INSERT INTO rift_schema (component, version) VALUES (?1, ?2)
-                 ON CONFLICT(component) DO UPDATE SET version = excluded.version",
-                params![component, latest],
-            )
+        migrate_component(&transaction, component, latest, latest, upgrade)
             .map_err(|e| self.error(e))?;
         transaction.commit().map_err(|e| self.error(e))
     }
+}
+
+/// Bring `component` to `to_version` inside the caller's transaction:
+/// run `upgrade(dialect, from)`, the SQL that turns version `from` into
+/// `latest` (the version this Rift writes), and record the version. Nothing
+/// happens when the component is at `to_version` already; a component newer
+/// than `latest`, or a target other than `latest`, is refused. `true` when
+/// the schema changed. Each component's `migrate` function is built on this,
+/// for startup and for a replicated `migrate` entry alike.
+pub fn migrate_component(
+    connection: &Conn,
+    component: &str,
+    to_version: u32,
+    latest: u32,
+    upgrade: impl FnOnce(Dialect, u32) -> String,
+) -> Result<bool> {
+    let current = version(connection, component)?;
+    if current == to_version {
+        return Ok(false);
+    }
+    if current > latest {
+        return Err(Error::other(format!(
+            "unsupported schema version {current} of {component}"
+        )));
+    }
+    if to_version != latest {
+        return Err(Error::other(format!(
+            "{component} cannot be migrated to version {to_version}; this Rift writes version {latest}"
+        )));
+    }
+    connection.execute_batch(&upgrade(connection.dialect(), current))?;
+    connection.execute(
+        "INSERT INTO rift_schema (component, version) VALUES (?1, ?2)
+         ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        params![component, latest],
+    )?;
+    Ok(true)
 }
 
 /// The schema version of `component`, 0 when it has no tables yet. Works on
@@ -880,6 +1305,9 @@ pub(crate) fn test_server_or_skip(test: &str) -> Option<Location> {
     }
     location
 }
+
+#[cfg(test)]
+mod seam_tests;
 
 #[cfg(test)]
 mod tests {

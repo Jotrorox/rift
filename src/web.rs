@@ -53,6 +53,54 @@ pub struct App {
     local_token: Arc<str>,
     local_token_announced: Arc<std::sync::atomic::AtomicBool>,
 }
+/// On a cluster peer: apply deployments through this configuration
+/// service's reload, and report every configuration it publishes (its
+/// source and where its files are) to the cluster (docs/clustering.md,
+/// "Configuration and files"). The web token needs nothing here: it comes
+/// from the configuration, which every peer runs, while the random local
+/// token stays with each process.
+fn follow_cluster(
+    files: &'static Arc<rift::cluster::files::FilesState>,
+    current: &watch::Receiver<Arc<Snapshot>>,
+    commands: &control::Sender,
+    path: Option<PathBuf>,
+) {
+    let sender = commands.clone();
+    files.set_reloader(Arc::new(
+        move || -> rift::cluster::transport::BoxFuture<'static, Result<(), String>> {
+            let sender = sender.clone();
+            Box::pin(async move {
+                let (reply, result) = oneshot::channel();
+                sender
+                    .send(control::Command {
+                        operation: control::Operation::Reload,
+                        reply,
+                        actor: "cluster".to_owned(),
+                    })
+                    .await
+                    .map_err(|_| "the configuration service stopped".to_owned())?;
+                match result.await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(error)) => Err(error.message),
+                    Err(_) => Err("the configuration service stopped".to_owned()),
+                }
+            })
+        },
+    ));
+    let mut current = current.clone();
+    tokio::spawn(async move {
+        loop {
+            let snapshot = current.borrow_and_update().clone();
+            files.configure(&snapshot.config, path.as_deref());
+            if let Some(source) = snapshot.source.as_deref() {
+                files.report_running(source);
+            }
+            if current.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
 /// A random 256-bit token as 64 hex digits.
 fn generate_token() -> io::Result<String> {
     let mut random = [0u8; 32];
@@ -107,6 +155,9 @@ impl App {
         let workflows = Arc::new(store);
         if let Some(source) = current.borrow().source.as_deref() {
             workflows.deploy(source, "system", "startup")?;
+        }
+        if let Some(files) = rift::cluster::files::global() {
+            follow_cluster(files, &current, &commands, path.clone());
         }
         Ok(Self {
             current,
@@ -570,6 +621,12 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/players/{player}/kick", post(kick_player))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
+            .route("/api/cluster", get(cluster))
+            .route(
+                "/api/cluster/transfer-leader",
+                post(cluster_transfer_leader),
+            )
+            .route("/api/cluster/peers/{name}/leave", post(cluster_leave))
             .route("/api/nodes/warm", post(warm_templates))
             .route("/api/nodes/plan", get(node_plan))
             .route("/api/plugins", get(plugin_list))
@@ -835,6 +892,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         // Node agents fetch template files with their messaging token.
         if access.is_none() && !supplied.is_empty() {
             for (name, definition) in &snapshot.config.nodes {
+                // A cluster peer's own node has no token.
+                if definition.peer {
+                    continue;
+                }
                 if std::env::var(&definition.token_env)
                     .is_ok_and(|token| equal_token(token.as_bytes(), supplied.as_bytes()))
                 {
@@ -910,6 +971,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
                 ["api", "audit"] => "audit",
+                // Leadership transfers and drains; the status is `read`.
+                ["api", "cluster", _, ..] => "cluster",
                 _ => "read",
             }
         };
@@ -1045,6 +1108,19 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // Cluster changes concern every peer: unrestricted operators only.
+            ["api", "cluster", "peers", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.groups.is_none(),
+                    if peer_argument(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            ["api", "cluster", _, ..] => (access.groups.is_none(), String::new()),
             ["api", "groups", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -1085,6 +1161,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "nodes", _, "cordon"] => "cordon_node",
             ["api", "nodes", _, "drain"] => "drain_node",
             ["api", "nodes", _, "uncordon"] => "uncordon_node",
+            ["api", "cluster", "transfer-leader"] => "transfer_leader",
+            ["api", "cluster", "peers", _, "leave"] => "leave_peer",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "template-sources", _, "sync"] => "sync_template_source",
@@ -1347,9 +1425,18 @@ async fn player_action(
     };
     let mut request = value;
     request["target"] = json!(player);
-    let decoded =
-        rift::players_service::Request::decode(&operation, request.to_string().as_bytes());
-    let result = decoded.and_then(|request| request.execute(app.snapshot().extensions.players()));
+    let snapshot = app.snapshot();
+    let players = snapshot.extensions.players();
+    let decoded = rift::players_service::Request::decode_for(
+        &operation,
+        request.to_string().as_bytes(),
+        players,
+    );
+    // Waits for the answer when the player is on another cluster peer.
+    let result = match decoded {
+        Ok(request) => request.run(players).await,
+        Err(error) => Err(error),
+    };
     match result {
         Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
         Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),
@@ -1367,6 +1454,74 @@ async fn service_groups(
     Extension(access): Extension<Access>,
 ) -> Json<Value> {
     Json(visible_groups(&app.snapshot(), &access))
+}
+
+/// The cluster this peer belongs to: members, roles, leader, term, indexes
+/// and lag (`rift admin cluster`). `{"enabled": false}` on a single Rift.
+async fn cluster(State(app): State<App>) -> Json<Value> {
+    Json(match rift::cluster::global() {
+        Some(cluster) => {
+            let mut status = cluster.status();
+            admin::peer_players(&app.snapshot(), &mut status);
+            status["enabled"] = json!(true);
+            status
+        }
+        None => json!({"enabled": false}),
+    })
+}
+
+/// `POST /api/cluster/transfer-leader` with `{}` (the best caught-up voter)
+/// or `{"peer": name}`: `rift admin cluster transfer-leader [<name>]`.
+async fn cluster_transfer_leader(body: Result<Json<Value>, JsonRejection>) -> Response {
+    let value = match payload(body, &["peer"]) {
+        Ok(value) => value,
+        Err(failure) => return failure.into_response(),
+    };
+    let mut args = vec!["transfer-leader".to_owned()];
+    match value.get("peer") {
+        None => {}
+        Some(Value::String(peer)) if peer_argument(peer) => {
+            args.push(peer.clone());
+        }
+        Some(_) => return error(StatusCode::BAD_REQUEST, "peer must be a peer name"),
+    }
+    cluster_admin(&args).await
+}
+
+/// `POST /api/cluster/peers/{name}/leave` with `{}`: `rift admin cluster
+/// leave <name>`. The peer drains: it hands its players to other peers,
+/// then its process exits.
+async fn cluster_leave(
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(failure) = payload(body, &[]) {
+        return failure.into_response();
+    }
+    if !peer_argument(&name) {
+        return error(StatusCode::BAD_REQUEST, "expected a peer name");
+    }
+    cluster_admin(&["leave".to_owned(), name]).await
+}
+
+/// A peer name that `rift admin cluster` cannot mistake for a flag.
+fn peer_argument(name: &str) -> bool {
+    rift::cluster::settings::valid_peer_name(name) && !name.starts_with('-')
+}
+
+/// A membership command run as `rift admin cluster` runs it: a follower
+/// forwards it to the leader.
+async fn cluster_admin(args: &[String]) -> Response {
+    let Some(cluster) = rift::cluster::global() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "this Rift is not a cluster peer: it has no cluster.toml",
+        );
+    };
+    match cluster.admin(args).await {
+        Ok(value) => Json(value).into_response(),
+        Err(message) => error(StatusCode::CONFLICT, message),
+    }
 }
 
 async fn nodes(State(app): State<App>) -> Json<Value> {
@@ -2163,8 +2318,21 @@ async fn warm_templates(
     };
     let operation_id = id.clone();
     tokio::spawn(async move {
-        let reply = admin::warm_templates(&snapshot, template.as_deref())
-            .await
+        // A cluster follower has the leader warm them.
+        let warmed = match crate::cluster_runtime::follower() {
+            Some(coordination) => {
+                crate::cluster_runtime::forward(
+                    &coordination,
+                    crate::cluster_runtime::WARM,
+                    &access.name,
+                    json!({ "template": template }),
+                    admin::DOWNLOAD_DEADLINE,
+                )
+                .await
+            }
+            None => admin::warm_templates(&snapshot, template.as_deref()).await,
+        };
+        let reply = warmed
             .map(|value| value.to_string())
             .map_err(|message| control::Error {
                 status: 502,
@@ -2241,8 +2409,13 @@ async fn move_server(
     if !snapshot.config.managed_servers.contains_key(&name) {
         return error(StatusCode::NOT_FOUND, format!("unknown server {name:?}"));
     }
+    // A cluster follower hands the move to the leader, which alone sees the
+    // nodes as they are and checks it there.
+    let follower = crate::cluster_runtime::follower();
     // Refuse what can be refused now, before tracking an operation.
-    if let Err(message) = crate::moving::check(&snapshot, &name, &node, copy) {
+    if follower.is_none()
+        && let Err(message) = crate::moving::check(&snapshot, &name, &node, copy)
+    {
         return error(StatusCode::CONFLICT, message);
     }
     let group = snapshot
@@ -2262,12 +2435,20 @@ async fn move_server(
             copy,
             keep_source,
         };
-        let committer = crate::moving::Committer::Control {
-            commands: &app.commands,
-            actor: access.name.clone(),
+        let moved = match follower {
+            Some(coordination) => {
+                crate::cluster_runtime::forward_move(coordination, access.name.clone(), request)
+                    .await
+            }
+            None => {
+                let committer = crate::moving::Committer::Control {
+                    commands: &app.commands,
+                    actor: access.name.clone(),
+                };
+                crate::moving::run(snapshot, committer, request).await
+            }
         };
-        let reply = crate::moving::run(snapshot, committer, request)
-            .await
+        let reply = moved
             .map(|value| value.to_string())
             .map_err(|message| control::Error {
                 status: 409,
@@ -2293,13 +2474,28 @@ async fn move_server(
 /// Cancel the running move of a server before its commit; the move's
 /// operation then fails and the server stays on its old node.
 async fn cancel_move(
+    Extension(access): Extension<Access>,
     Path(name): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     if let Err(failure) = payload(body, &[]) {
         return failure.into_response();
     }
-    match crate::moving::cancel(&name) {
+    // A cluster follower asks the leader, which runs every move.
+    let cancelled = match crate::cluster_runtime::follower() {
+        Some(coordination) => {
+            crate::cluster_runtime::forward(
+                &coordination,
+                crate::cluster_runtime::MOVE_CANCEL,
+                &access.name,
+                json!({ "server": name }),
+                crate::cluster_runtime::SHORT_WAIT,
+            )
+            .await
+        }
+        None => crate::moving::cancel(&name),
+    };
+    match cancelled {
         Ok(value) => Json(value).into_response(),
         Err(message) => error(StatusCode::CONFLICT, message),
     }
@@ -2647,7 +2843,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","POST|DELETE /api/servers/{name}/move","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/cluster","POST /api/cluster/transfer-leader","POST /api/cluster/peers/{name}/leave","POST /api/nodes/warm","GET /api/nodes/plan","POST /api/nodes/{name}/cordon","POST /api/nodes/{name}/drain","POST /api/nodes/{name}/uncordon","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

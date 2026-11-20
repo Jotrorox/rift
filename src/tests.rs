@@ -456,3 +456,133 @@ async fn status_hook_overrides_fields_and_falls_back_on_nil_or_failure() {
     .await
     .unwrap();
 }
+
+/// Claims shared with other processes, as a cluster peer's are: a single
+/// Rift's table that says it is networked.
+struct NetworkedClaims(rift::players::claims::LocalClaims);
+
+impl rift::players::claims::Claims for NetworkedClaims {
+    fn propose(
+        &self,
+        op: rift::players::claims::ClaimOp,
+    ) -> rift::players::claims::ClaimFuture<Result<(), rift::players::claims::Refusal>> {
+        rift::players::claims::Claims::propose(&self.0, op)
+    }
+
+    fn release(&self, key: String, holder: rift::players::claims::Holder) {
+        rift::players::claims::Claims::release(&self.0, key, holder);
+    }
+
+    fn live(&self) -> Vec<rift::players::claims::ClaimRecord> {
+        rift::players::claims::Claims::live(&self.0)
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<rift::players::claims::ClaimChange> {
+        rift::players::claims::Claims::subscribe(&self.0)
+    }
+
+    fn networked(&self) -> bool {
+        true
+    }
+}
+
+fn login_start_774(name: &str) -> Packet {
+    let mut data = Vec::new();
+    rift::protocol::write_string(name, &mut data);
+    data.extend([7; 16]);
+    Packet::new(0, data)
+}
+
+/// A connection to `snapshot`'s proxy, handled by the real login path.
+async fn connection_to(
+    snapshot: Arc<runtime::Snapshot>,
+) -> (TcpStream, tokio::task::JoinHandle<io::Result<(u64, u64)>>) {
+    let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = frontend.local_addr().unwrap();
+    let client = TcpStream::connect(address).await.unwrap();
+    let (mut accepted, peer) = frontend.accept().await.unwrap();
+    let proxy = tokio::spawn(async move {
+        runtime::handle(
+            &mut accepted,
+            "default",
+            snapshot,
+            &[address],
+            Arc::new(metrics::Metrics::default()),
+            &mut events::Connection::new("default", peer),
+        )
+        .await
+    });
+    (client, proxy)
+}
+
+/// A cluster peer whose configuration a single Rift passes through without
+/// reading the login's name (tests/cluster.rs runs one) still claims every
+/// name before a backend sees the login, and sends its backends a login for
+/// a client that arrived with the transfer intent.
+#[tokio::test]
+async fn a_cluster_peer_claims_every_name_before_the_backend_and_sends_it_logins() {
+    timeout(Duration::from_secs(10), async {
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config =
+            Config::from_addresses("127.0.0.1:0", &backend.local_addr().unwrap().to_string())
+                .unwrap();
+        let snapshot = Arc::new(runtime::Snapshot::new(config, None).unwrap());
+        assert!(!snapshot.players.clustered());
+        assert!(!snapshot.players.claims_before_backend(false));
+        snapshot.players.set_claims(Arc::new(NetworkedClaims(
+            rift::players::claims::LocalClaims::default(),
+        )));
+        assert!(snapshot.players.clustered());
+        // Another peer holds the name: refused before any backend contact.
+        let held = snapshot.players.reserve_name("Twin").unwrap();
+        let codec = Codec::default();
+        let (mut client, proxy) = connection_to(snapshot.clone()).await;
+        codec
+            .write(&mut client, &handshake(NextState::Login, 774))
+            .await
+            .unwrap();
+        codec
+            .write(&mut client, &login_start_774("twin"))
+            .await
+            .unwrap();
+        let packet = Reader::default()
+            .read(&mut client, codec)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(packet.id, 0);
+        let reason = read_string(&mut packet.data.as_slice(), 32767)
+            .unwrap()
+            .to_owned();
+        assert!(reason.contains("already connected"), "{reason}");
+        assert!(proxy.await.unwrap().is_err());
+        assert!(
+            timeout(Duration::from_millis(200), backend.accept())
+                .await
+                .is_err()
+        );
+        drop(held);
+        // A client handed over by another peer reaches the backend as a login.
+        let (mut client, _proxy) = connection_to(snapshot.clone()).await;
+        codec
+            .write(&mut client, &handshake(NextState::Transfer, 774))
+            .await
+            .unwrap();
+        codec
+            .write(&mut client, &login_start_774("Moved"))
+            .await
+            .unwrap();
+        let (mut upstream, _) = backend.accept().await.unwrap();
+        let sent = Reader::default()
+            .read(&mut upstream, codec)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Handshake::decode(&sent).unwrap().next_state,
+            NextState::Login
+        );
+    })
+    .await
+    .unwrap();
+}

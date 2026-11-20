@@ -41,16 +41,24 @@ const MAX_LUA_VALUES: usize = 8192;
 pub(crate) const CLICK_PREFIX: &str = "rift:dialog/";
 
 /// Who showed a dialog, and therefore receives its clicks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
     /// The configuration script (`rift.on("dialog", ...)`).
     Script,
     /// A persistent plugin, by name.
     Plugin(String),
+    /// The script (`plugin` is `None`) or a plugin of another cluster peer,
+    /// which showed the dialog to a player of this peer: clicks go back to
+    /// that peer, if it still runs as `incarnation`.
+    Remote {
+        peer: u16,
+        incarnation: u64,
+        plugin: Option<String>,
+    },
 }
 
 /// The kind of an input, for typing the values a click reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Kind {
     Text,
     Boolean,
@@ -59,7 +67,7 @@ enum Kind {
 }
 
 /// One plugin action of a dialog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Callback {
     /// The action name the plugin wrote.
     id: String,
@@ -73,8 +81,11 @@ struct Callback {
     inputs: Vec<(String, Kind)>,
 }
 
-/// A validated dialog, ready to send to any 1.21.6+ client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A validated dialog, ready to send to any 1.21.6+ client. Serializable,
+/// so that a peer of a cluster can show it to another peer's player; the
+/// serial only has to tell this dialog's clicks from another's on one
+/// session, so serials from different peers may meet without harm.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Dialog {
     serial: u64,
     wire: Value,

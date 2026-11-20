@@ -175,7 +175,16 @@ pub struct Manifest {
     /// `Some` exactly for `engine = "wasm"`.
     pub wasm: Option<WasmOptions>,
     pub background: Background,
+    /// `cluster = true` (or `"aware"`): the plugin declares that it works in
+    /// a cluster of several proxies, where every peer runs its own instance
+    /// (docs/plugins.md, "Plugins in a cluster"). Every plugin loads either
+    /// way; a cluster flags the ones without the declaration.
+    pub cluster_aware: bool,
 }
+
+/// What a cluster shows for a plugin without `cluster = true` in its
+/// `plugin.toml`.
+pub const NOT_CLUSTER_AWARE: &str = "not declared cluster-aware (plugin.toml has no cluster = true): every peer runs its own instance, so network-wide state it keeps in memory differs per peer; check the plugin, then declare it";
 
 /// `[background]`: workers for jobs queued with `background.run`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -210,6 +219,26 @@ struct Raw {
     capabilities: Option<RawCapabilities>,
     lua: Option<RawLua>,
     wasm: Option<RawWasm>,
+    cluster: Option<RawCluster>,
+}
+
+/// `cluster = true | false | "aware"`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawCluster {
+    Flag(bool),
+    Word(String),
+}
+
+fn cluster_aware(raw: Option<RawCluster>) -> Result<bool, String> {
+    match raw {
+        None | Some(RawCluster::Flag(false)) => Ok(false),
+        Some(RawCluster::Flag(true)) => Ok(true),
+        Some(RawCluster::Word(word)) if word == "aware" => Ok(true),
+        Some(RawCluster::Word(_)) => Err(
+            "cluster must be true or \"aware\" (the plugin works with one instance per cluster peer), or false".into(),
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -337,6 +366,7 @@ impl Manifest {
                 ));
             }
         }
+        let cluster_aware = cluster_aware(raw.cluster)?;
         let mode = match raw.mode.as_deref() {
             None | Some("persistent") => Mode::Persistent,
             Some("script") => Mode::Script,
@@ -377,6 +407,7 @@ impl Manifest {
                 lua: None,
                 wasm: None,
                 background: Background::default(),
+                cluster_aware,
             });
         }
         let engine = match raw.engine.as_deref() {
@@ -511,6 +542,7 @@ impl Manifest {
             capabilities,
             lua,
             wasm,
+            cluster_aware,
         })
     }
 
@@ -705,6 +737,35 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
+
+    #[test]
+    fn the_cluster_declaration_is_optional_and_strict() {
+        assert!(!Manifest::parse(MINIMAL, "relaxoban").unwrap().cluster_aware);
+        for (value, aware) in [("true", true), ("\"aware\"", true), ("false", false)] {
+            let text = format!("{MINIMAL}cluster = {value}\n");
+            let manifest = Manifest::parse(&text, "relaxoban").unwrap();
+            assert_eq!(manifest.cluster_aware, aware, "{value}");
+        }
+        for value in ["\"yes\"", "1", "{ aware = true }"] {
+            let text = format!("{MINIMAL}cluster = {value}\n");
+            assert!(Manifest::parse(&text, "relaxoban").is_err(), "{value}");
+        }
+        // Script-mode plugins declare it the same way.
+        let script = Manifest::parse(
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\ncluster = true\n",
+            "a",
+        )
+        .unwrap();
+        assert!(script.cluster_aware);
+        // Only a cluster flags a plugin, and only one without the declaration.
+        let plain = Manifest::parse(MINIMAL, "relaxoban").unwrap();
+        assert_eq!(
+            crate::plugins::cluster_warning(&plain, true),
+            Some(NOT_CLUSTER_AWARE)
+        );
+        assert_eq!(crate::plugins::cluster_warning(&plain, false), None);
+        assert_eq!(crate::plugins::cluster_warning(&script, true), None);
+    }
 
     #[test]
     fn defaults_follow_the_contract() {
@@ -931,7 +992,17 @@ jit = false
             with("min_api = \"0.2.0\"").unwrap().min_api.as_deref(),
             Some("0.2.0")
         );
+        // 0.2.1 added the `text` interface; a plugin that calls it says so.
+        assert_eq!(
+            with("min_api = \"0.2.1\"").unwrap().min_api.as_deref(),
+            Some("0.2.1")
+        );
         assert_eq!(Manifest::parse(MINIMAL, "relaxoban").unwrap().min_api, None);
+        let newer = with("min_api = \"0.2.2\"").unwrap_err();
+        assert!(
+            newer.contains("needs rift:plugin 0.2.2") && newer.contains("implements 0.2.1"),
+            "{newer}"
+        );
         let newer = with("min_api = \"0.2.99\"").unwrap_err();
         assert!(
             newer.contains("needs rift:plugin 0.2.99") && newer.contains("Update Rift"),

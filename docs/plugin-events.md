@@ -94,8 +94,15 @@ sample lines), the contract has one type, `text`:
 
 - `plain(string)`: 1–1024 bytes, shown exactly as written.
 - `json(string)`: a JSON text component of at most 32 KiB, for colors, hover
-  text and click events, the `mini` and `legacy`
+  text and click events, the `mini`, `legacy` and `message`
   [authoring objects](text.md) included.
+
+A `message` object, such as `{"message": "invited", "args": {"from": "Steve"}}`,
+sends one of the plugin's own messages (a key without `:`) or any catalog's
+by qualified key. Rift renders it at the call: a decision or tooltip in the
+language of the player the event is about, a player action in the target's,
+a broadcast in each recipient's, and a `status` answer in the default
+([whose language](text.md#whose-language)).
 
 Lua writes a string or a component table ([rich text](players-api.md#rich-text)).
 Clients see the status version and sample lines as `§` codes.
@@ -337,3 +344,5 @@ a player's choice. `set-language` stores a tag of 2–16 bytes of `a-z0-9_`
 - Rift's own messages to that player (queue notices, refusals, `/server`
   output) come from [`text.languages`](text.md#languages): the exact tag, then
   its language (`de` for `de_at`), then `text.messages`.
+- [Plugin messages](text.md#plugin-messages) sent to that player follow the
+  same order ([whose language](text.md#whose-language)).

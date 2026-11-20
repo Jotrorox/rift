@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.0` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.1` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -44,7 +44,7 @@ Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.2.0
+go get github.com/Jotrorox/rift/sdk/go@v0.2.1
 ```
 
 ## Writing a plugin
@@ -110,10 +110,12 @@ Everything shown to a player is a `rift.Text`:
 
 - `rift.Plain("...")` is shown exactly as written and never read as markup.
 - `rift.JSON("...")` is a JSON text component written by hand.
-- `rift.Mini` (markup, with `Arg`/`ArgComponent`), `rift.Legacy` (`&` codes)
-  and `rift.Component` (fields, click and hover events, children) build a
-  component, escaped and without `encoding/json`; their `Text()` method
-  returns it.
+- `rift.Mini` (markup, with `Arg`/`ArgComponent`/`ArgStyle`), `rift.Legacy`
+  (`&` codes), `rift.Msg` (a message from the plugin's `messages.toml`) and
+  `rift.Component`, `rift.Translate`, `rift.Keybind`, `rift.Sprite`,
+  `rift.Head` (fields, click and hover events, children) build a component,
+  escaped and without `encoding/json`; their `Text()` method returns it.
+- `rift.Escape` escapes text for splicing into markup.
 
 ```go
 msg := rift.Mini("<gold>Hi <player>!").Arg("player", ctx.Name)

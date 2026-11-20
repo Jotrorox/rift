@@ -256,6 +256,25 @@ impl ProtocolVersion {
     pub fn nbt_components(self) -> bool {
         self.0 >= 765
     }
+    /// The clientbound Transfer packet's id in `state`: `None` before
+    /// 1.20.5 and outside configuration and play. Checked against the
+    /// packet lists in crates/rift-translation/data.
+    pub fn transfer_id(self, state: State) -> Option<i32> {
+        if !self.has_transfer() {
+            return None;
+        }
+        match state {
+            State::Configuration => Some(if self.0 < 777 { 0x0b } else { 0x0c }),
+            State::Play => Some(match self.0 {
+                766..=767 => 0x73,
+                768..=772 => 0x7a,
+                773..=774 => 0x7f,
+                775..=776 => 0x81,
+                _ => 0x84,
+            }),
+            _ => None,
+        }
+    }
     /// Plugin-message packet IDs, independently mapped in each direction.
     /// Checked against Velocity's StateRegistry and the pinned 26.2/26.3
     /// Mojang GameProtocols artifacts (see docs/network-protocol.md).
@@ -498,6 +517,27 @@ pub(crate) fn disconnect_text(
         state != State::Login && version.is_some_and(ProtocolVersion::nbt_components),
         &mut data,
     )?;
+    Ok(Packet::new(id, data))
+}
+
+/// The clientbound Transfer packet: the client closes this connection and
+/// connects to `host:port` with the transfer intent. 1.20.5+ clients in
+/// configuration or play only.
+pub fn transfer(
+    version: ProtocolVersion,
+    state: State,
+    host: &str,
+    port: u16,
+) -> io::Result<Packet> {
+    let id = version
+        .transfer_id(state)
+        .ok_or_else(|| invalid("transfer needs a 1.20.5+ client in configuration or play"))?;
+    if host.is_empty() || host.len() > 32767 {
+        return Err(invalid("invalid transfer host"));
+    }
+    let mut data = Vec::new();
+    write_string(host, &mut data);
+    write_varint(i32::from(port), &mut data);
     Ok(Packet::new(id, data))
 }
 

@@ -1083,9 +1083,21 @@ fn copy(from: &Path, to: &Path) {
     }
 }
 
+/// The words of the text an action shows, which a `message` object
+/// resolves to.
+fn words(action: Action) -> String {
+    match action {
+        Action::Message(text) | Action::Deny(text) => text.to_string(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
 /// The shared example spec (`examples/plugins/README.md`): `example` is a
 /// ready plugin folder, copied into a fresh configuration directory.
 pub(crate) async fn hello_example(engines: Engines, example: &Path) {
+    // The reply to /hello comes from the example's messages.toml, which the
+    // test catalogue holds; plugin threads render with the installed one.
+    crate::text::catalog::install_test_catalog();
     let root = directory();
     let folder = root
         .join("plugins")
@@ -1139,8 +1151,15 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
     let mut player = session(&runtime, 1);
     assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
     assert_eq!(
-        player.command("hello").await.unwrap(),
-        Action::Message("Hello, Player1!".into())
+        words(player.command("hello").await.unwrap()),
+        "Hello, Player1!"
+    );
+    // The same reply in the language of the player who asked.
+    let mut german = session(&runtime, 1);
+    german.context.language = Some("de".into());
+    assert_eq!(
+        words(german.command("hello").await.unwrap()),
+        "Hallo, Player1!"
     );
     let suggestions = player.suggest("hello", "pl", Vec::new).await.unwrap();
     assert_eq!(suggestions.len(), 1);

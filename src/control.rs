@@ -2,7 +2,6 @@
 use rift::config::Config;
 use std::{
     fs::{self, OpenOptions},
-    hash::{Hash, Hasher},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -85,6 +84,9 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
     }
     if config.messaging != previous.messaging {
         return Err("messaging changes require a restart".into());
+    }
+    if config.cluster != previous.cluster {
+        return Err("cluster changes require a restart of every peer".into());
     }
     nodes_compatible(config, previous)?;
     let names = config
@@ -180,10 +182,9 @@ pub fn read_source(path: &Path) -> io::Result<String> {
 }
 
 pub fn revision(source: &str) -> String {
-    // An opaque content revision, not an authentication credential.
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hash);
-    format!("{:016x}", hash.finish())
+    // An opaque content revision, not an authentication credential. The
+    // cluster records the same revision with each deployment.
+    rift::cluster::files::revision(source)
 }
 
 pub struct Candidate {
@@ -193,12 +194,31 @@ pub struct Candidate {
     pub save: bool,
 }
 
+/// Build the candidate of a configuration transaction. `actor` is who asked,
+/// for the deployment history of a cluster.
+///
+/// In a cluster (docs/clustering.md, "One configuration") a new source is
+/// a deployment: it is evaluated as every member would (a shared section
+/// that depends on `rift.peer` refuses it), proposed as a `config` entry and
+/// written to `rift.lua` by this peer's deployer once committed; the
+/// candidate returned here then applies it on this peer, and every other
+/// peer reloads to it. A reload whose file is an older deployment (the
+/// deployer is about to replace it) applies the last deployment instead of
+/// proposing the old one again. Must run on a blocking thread of the
+/// runtime (it waits for the commit).
 pub fn prepare_with_instances(
     path: &Path,
     active_source: &str,
     operation: Operation,
     previous: &Config,
+    actor: &str,
 ) -> Result<Candidate, Error> {
+    let action = match &operation {
+        Operation::Reload => "reload",
+        Operation::Rollback { .. } => "rollback",
+        _ => "save",
+    };
+    let reload = matches!(operation, Operation::Reload);
     let disk = read_source(path)?;
     let (source, save) = match operation {
         Operation::Reload => (disk.clone(), false),
@@ -230,12 +250,62 @@ pub fn prepare_with_instances(
             ));
         }
     };
+    if let Some(files) = rift::cluster::files::active() {
+        return prepare_in_cluster(files, path, source, disk, previous, actor, action, reload);
+    }
     let config = Config::from_lua_at_with_instances(&source, path, previous)?;
     Ok(Candidate {
         source,
         config,
         previous_disk: disk,
         save,
+    })
+}
+
+/// [`prepare_with_instances`] on a cluster peer.
+#[allow(clippy::too_many_arguments)]
+fn prepare_in_cluster(
+    files: &rift::cluster::files::FilesState,
+    path: &Path,
+    mut source: String,
+    disk: String,
+    previous: &Config,
+    actor: &str,
+    action: &str,
+    reload: bool,
+) -> Result<Candidate, Error> {
+    let unavailable = |error: io::Error| Error {
+        status: 503,
+        message: format!("cluster: {error}"),
+    };
+    let latest = files.latest_deployment().map_err(unavailable)?;
+    if reload
+        && let Some(latest) = &latest
+        && source != latest.source
+        && files.was_deployed(&source).map_err(unavailable)?
+    {
+        source = latest.source.clone();
+    }
+    let config = Config::from_lua_at_with_instances(&source, path, previous)?;
+    let deployed = latest
+        .as_ref()
+        .is_some_and(|latest| latest.source == source);
+    if !deployed {
+        live_compatible(&config, previous).map_err(Error::invalid)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error {
+            status: 500,
+            message: "cluster deployments need the async runtime".into(),
+        })?;
+        runtime
+            .block_on(files.deploy(&source, path, actor, action))
+            .map_err(Error::conflict)?;
+    }
+    // The deployer writes rift.lua; nothing is saved here.
+    Ok(Candidate {
+        source,
+        config,
+        previous_disk: disk,
+        save: false,
     })
 }
 

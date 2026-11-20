@@ -51,6 +51,10 @@ pub struct MessagingPrincipal {
 pub struct MessagingSubscription {
     pub subject: String,
     pub queue: Option<String>,
+    /// In a cluster, whether messages on user subjects published on other
+    /// peers arrive (`"cluster"`, the default) or only this peer's
+    /// (`"local"`).
+    pub scope: crate::messaging::SubscriptionScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,15 +525,22 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
     for subscription in array(&values, "messaging", "subscriptions", 1024)? {
         fields(
             &subscription,
-            &["subject", "queue"],
+            &["subject", "queue", "scope"],
             "messaging.subscriptions",
         )?;
+        let scope = match optional_string(&subscription, "messaging.subscriptions", "scope")? {
+            None => crate::messaging::SubscriptionScope::Cluster,
+            Some(scope) => scope
+                .parse()
+                .map_err(|error| format!("messaging.subscriptions.scope: {error}"))?,
+        };
         config.subscriptions.push(MessagingSubscription {
             subject: string(
                 subscription.raw_get("subject").map_err(|e| e.to_string())?,
                 "messaging.subscriptions.subject",
             )?,
             queue: optional_string(&subscription, "messaging.subscriptions", "queue")?,
+            scope,
         });
     }
     if let Some(streams) = options_map(&values, "streams")? {

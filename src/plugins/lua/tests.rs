@@ -717,7 +717,7 @@ async fn aliases_the_console_the_directory_and_background_work_reach_lua() {
             (
                 "init.lua",
                 r#"
-assert(rift.meta.api == "0.2.0")
+assert(rift.meta.api == "0.2.1")
 assert(not rift.background.is_worker())
 assert(not pcall(rift.on, "work", function() end), "work belongs in the worker script")
 rift.command("whois", {
@@ -898,6 +898,148 @@ end })
     assert!(
         text.starts_with("false ") && text.contains("[background] workers"),
         "{text}"
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// A plugin's own messages, by unqualified key, in the language of the
+/// player who sees them: a message to one player, a broadcast to two, and a
+/// decision.
+#[tokio::test]
+async fn messages_render_in_the_language_of_each_recipient() {
+    crate::text::catalog::install_test_catalog();
+    let root = folder(
+        "[deadlines]\ncommand = 5000\nlogin = 5000\n",
+        &[(
+            "init.lua",
+            r#"
+rift.command("greet", { permission = "", run = function(ctx)
+    local sent = rift.players.message(ctx.args, { message = "greet", args = { name = ctx.name } })
+    return { message = tostring(sent) }
+end })
+rift.command("all", { permission = "", run = function(ctx)
+    return { message = tostring(rift.players.broadcast({ message = "greet", args = { name = "all" } })) }
+end })
+rift.command("bad", { permission = "", run = function(ctx)
+    local ok, err = pcall(rift.players.message, ctx.args, { message = "nope" })
+    return { message = tostring(ok) .. " " .. tostring(err) }
+end })
+rift.on("login", function(ctx)
+    return { deny = { message = "denied" } }
+end)
+"#,
+        )],
+    );
+    let runtime = started(&root, "{}", &Broker::default()).await;
+    let players = runtime.players();
+    let (alex_handle, mut alex_queue) = players.register(7, &[7; 16], "Alex", 774, "lobby");
+    alex_handle.set_locale(Some("de_DE"));
+    let (_steve_handle, mut steve_queue) = players.register(8, &[8; 16], "Steve", 774, "lobby");
+    let words = |queue: &mut tokio::sync::mpsc::Receiver<crate::extensions::PlayerAction>| {
+        std::iter::from_fn(|| queue.try_recv().ok())
+            .map(|action| match action {
+                crate::extensions::PlayerAction::Message(text) => text.to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let message = |text: &str| Action::Message(text.into());
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(alex.command("greet Alex").await.unwrap(), message("true"));
+    assert_eq!(alex.command("greet Steve").await.unwrap(), message("true"));
+    assert_eq!(words(&mut alex_queue), ["Hallo Alex."]);
+    assert_eq!(words(&mut steve_queue), ["Hello Alex."]);
+    // One call, each player in their own language.
+    assert_eq!(alex.command("all").await.unwrap(), message("2"));
+    assert_eq!(words(&mut alex_queue), ["Hallo all."]);
+    assert_eq!(words(&mut steve_queue), ["Hello all."]);
+    // A bad call fails at the call.
+    let Action::Message(failed) = alex.command("bad Steve").await.unwrap() else {
+        panic!("expected a message");
+    };
+    let failed = failed.to_string();
+    assert!(
+        failed.starts_with("false ") && failed.contains("plugin t has no such message"),
+        "{failed}"
+    );
+    assert!(words(&mut steve_queue).is_empty());
+    // A decision is in the language of the player it is about.
+    let denied = |language: Option<&str>| {
+        let mut player = session(&runtime, 9, "Blocked");
+        player.context.language = language.map(str::to_owned);
+        async move {
+            match player.decision("login").await.unwrap() {
+                Action::Deny(text) => text.to_string(),
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    assert_eq!(denied(Some("de_at")).await, "Kein Zutritt.");
+    assert_eq!(denied(None).await, "No entry.");
+    runtime.plugins().shutdown().await;
+}
+
+/// `rift.text` in a persistent plugin resolves the plugin's own messages by
+/// unqualified key, in the language asked for, in `init`, in hooks and in
+/// background workers alike.
+#[tokio::test]
+async fn rift_text_resolves_the_plugins_own_messages() {
+    crate::text::catalog::install_test_catalog();
+    let root = folder(
+        "[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n",
+        &[
+            (
+                "init.lua",
+                r#"
+local greet = rift.text.message("greet", { name = "init" })
+assert(greet.message == "greet" and greet.args.name == "init")
+-- In init, outside any hook.
+local at_init = rift.text.render(greet, "de")
+assert(rift.text.plain(at_init) == "Hallo init.", rift.text.plain(at_init))
+assert(rift.text.plain(greet) == "Hello init.")
+assert(not pcall(rift.text.render, rift.text.message("nope")))
+assert(not pcall(rift.text.plain, greet, "not a language"))
+rift.command("words", { permission = "", run = function(ctx)
+    local language = ctx.args ~= "" and ctx.args or nil
+    return { message = rift.text.plain(rift.text.message("created"), language) .. " "
+        .. rift.text.to_mini({ mini = "<red>x" }) }
+end })
+rift.command("slow", { permission = "", run = function(ctx)
+    local ticket = rift.background.defer()
+    rift.background.run(ctx.args, function(result, err)
+        rift.background.resolve(ticket, { message = result or ("failed: " .. err) })
+    end)
+    return { message = "ignored" }
+end })
+"#,
+            ),
+            (
+                "worker.lua",
+                r#"
+rift.on("work", function(language)
+    return rift.text.plain({ message = "denied" }, language)
+end)
+"#,
+            ),
+        ],
+    );
+    let runtime = started(&root, "{}", &Broker::default()).await;
+    let message = |text: &str| Action::Message(text.into());
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(
+        alex.command("words de").await.unwrap(),
+        message("Erstellt. <red>x</red>")
+    );
+    // Without a language: the default, whatever the hook's player reads.
+    let mut german = session(&runtime, 8, "Jonas");
+    german.context.language = Some("de".into());
+    assert_eq!(
+        german.command("words").await.unwrap(),
+        message("Created. <red>x</red>")
+    );
+    assert_eq!(
+        alex.command("slow de").await.unwrap(),
+        message("Kein Zutritt.")
     );
     runtime.plugins().shutdown().await;
 }

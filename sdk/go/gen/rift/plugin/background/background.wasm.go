@@ -6,20 +6,20 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.0".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.1".
 
-//go:wasmimport rift:plugin/background@0.2.0 defer
+//go:wasmimport rift:plugin/background@0.2.1 defer
 //go:noescape
 func wasmimport_Defer(result *cm.Result[string, uint64, string])
 
-//go:wasmimport rift:plugin/background@0.2.0 resolve
+//go:wasmimport rift:plugin/background@0.2.1 resolve
 //go:noescape
 func wasmimport_Resolve(ticket0 uint64, decision0 uint32, decision1 uint32, decision2 uint32, decision3 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/background@0.2.0 run
+//go:wasmimport rift:plugin/background@0.2.1 run
 //go:noescape
 func wasmimport_Run(payload0 *uint8, payload1 uint32, result *cm.Result[string, uint64, string])
 
-//go:wasmimport rift:plugin/background@0.2.0 is-worker
+//go:wasmimport rift:plugin/background@0.2.1 is-worker
 //go:noescape
 func wasmimport_IsWorker() (result0 uint32)

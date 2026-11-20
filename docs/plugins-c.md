@@ -86,6 +86,7 @@ Rust, Go and Lua examples.
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
 | `log` | `rift_log(RIFT_INFO, "format %d", value)`. |
+| `text` | `rift_text_render`, `rift_text_to_plain`, `rift_text_to_legacy`, `rift_text_to_mini` (since 0.2.1); see [converting text](#converting-text). |
 | configuration JSON | `rift_json_get_string(&config, "key", &out)` reads one top-level string; use cJSON or jsmn for more. |
 | `dialog`, `players.dialog` | [Dialogs](dialogs.md): `rift_show_dialog(&target, json)` and `rift_plugin_players_clear_dialog`; clicks reach `exports_rift_plugin_handler_dialog(rift_dialog_response_t *)`, which owns its argument (free it with `rift_dialog_response_free`). The weak default ignores clicks. No registration needed. |
 
@@ -321,20 +322,91 @@ char *sub = rift_legacy_marker("§7Have fun", "§");
 rift_text_t subtitle = rift_text_json(sub);
 rift_title(&ctx->uuid, NULL, &subtitle, 10, 70, 20);
 free(sub);
+
+// A message from the plugin's messages.toml, written as {"message": "...", "args": {...}}.
+rift_msg_t msg = rift_msg("invited");
+rift_msg_arg(&msg, "from", "Alex");
+rift_msg_arg_style(&msg, "team", "<#55ffff><bold>");  // a style argument
+char *invited = rift_msg_finish(&msg);
+rift_message(&ctx->uuid, rift_text_json(invited));
+free(invited);
+
+// Other contents: a translation with an argument and a fallback.
+rift_component_t t = rift_translate("multiplayer.player.joined");
+rift_component_with_text(&t, "Alex");
+rift_component_fallback(&t, "Alex joined");
+char *joined = rift_component_finish(&t);
+free(joined);
+
+// Text you splice into markup yourself: < becomes \< and \ becomes \\.
+char *safe = rift_text_escape(line);
+free(safe);
 ```
 
-- The component setters are `rift_component_color`, `_bold`, `_italic`,
-  `_underlined`, `_strikethrough`, `_obfuscated`, `_run_command`,
-  `_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_hover_text`
-  (plain), `_hover` (a component as JSON), `_insertion`, `_extra` (a child as
-  JSON), `_extra_text` and `_field` (any other key, raw JSON). Call each at
-  most once.
+- `rift_mini` takes `rift_mini_arg` (shown as written),
+  `rift_mini_arg_component` and `rift_mini_arg_style` (a
+  [style argument](text.md#style-arguments): markup made only of formatting tags).
+  `rift_msg(key)` takes `rift_msg_arg`, `rift_msg_arg_component` and
+  `rift_msg_arg_style`, and `rift_msg_finish` returns the JSON. A message
+  comes from the plugin's `messages.toml`; see [plugin messages](text.md#plugin-messages). It is
+  `rift_msg` because `rift_message` sends a player text.
+- `rift_text_escape(text)` returns a malloc'd copy escaped for splicing into
+  markup. An argument needs no escaping.
+- The component builders, each `rift_component_*` setter called at most once:
+
+  | Kind | Functions |
+  | --- | --- |
+  | Content | `rift_component(text)`, `rift_translate(key)` with `rift_component_with` (JSON), `_with_text` and `_fallback`, `rift_keybind(key)`, `rift_sprite(sprite)` with `rift_component_atlas`, `rift_head(name)` with `rift_component_hat(&c, false)` |
+  | Style | `rift_component_color`, `_bold`, `_italic`, `_underlined`, `_strikethrough`, `_obfuscated`, `_decoration(&c, name, on)` (`false` turns it off; use it instead of `_bold` and the others, not as well), `_font`, `_shadow(&c, "#rrggbb", opacity)`, `_insertion` |
+  | Click | `_run_command`, `_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_change_page(&c, page)` |
+  | Hover | `_hover_text` (plain), `_hover` (a component as JSON), `_hover_item(&c, id, count)`, `_hover_entity(&c, type, uuid, name_json)` (`name_json` may be NULL) |
+  | Other | `_extra` (a child as JSON), `_extra_text`, `_field` (any other key, raw JSON) |
+
+  Sprites and heads need 1.21.9 or newer; older clients drop them.
 - `rift_string_quote` turns a `rift_string_t` into an owned JSON string.
 
 Rift reads markup only from an explicit `mini` object. A bare JSON string, as
 in `rift_text_json("\"<red>hi\"")`, is shown as written, and so is all plain
 text. Pass player input with `rift_mini_arg`, never by formatting it into the
 markup. The tags are listed in [Styled text](text.md).
+
+## Converting text
+
+`rift_text_render(text, language, &out, &err)`, `rift_text_to_plain`,
+`rift_text_to_legacy` and `rift_text_to_mini` are the contract's `text`
+interface (since 0.2.1: set `min_api = "0.2.1"` in `plugin.toml`). Rift
+converts `text` with markup, legacy codes and the plugin's messages resolved
+in `language` (`"de"`; `NULL` for the default) into compact JSON, the words,
+`§` codes or markup. `rift_text_to_plain` is not `rift_text_plain`, which
+makes a plain text view.
+
+- `text` is borrowed, like every argument of a host function.
+- On success the function returns true and `out` is yours: free it with
+  `rift_string_free`.
+- On failure it returns false with `out` empty, and the host's error is in
+  `err`, yours to free; with `err` NULL the error is logged at warn level.
+
+Use them for text that leaves through a bus payload, an HTTP response or a
+log line, and in `init` to check a template from the configuration:
+
+```c
+// In exports_rift_plugin_handler_init(config_json, ret, err):
+rift_string_t json;
+if (!rift_text_render(rift_text_json(template_json), NULL, &json, err)) {
+  return false;  // init fails with the host's error, which the bindings free
+}
+rift_string_free(&json);
+
+// The plugin's own message `created` without formatting, in German.
+rift_msg_t msg = rift_msg("created");
+char *created = rift_msg_finish(&msg);
+rift_string_t line;
+if (rift_text_to_plain(rift_text_json(created), "de", &line, NULL)) {
+  rift_log(RIFT_INFO, "German: " RIFT_STR_FMT, RIFT_STR_ARG(line));
+  rift_string_free(&line);
+}
+free(created);
+```
 
 ## Memory ownership
 

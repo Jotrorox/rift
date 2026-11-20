@@ -252,6 +252,9 @@ impl Queue {
 pub(crate) struct Pending {
     pub(crate) hook: super::api::Hook,
     pub(crate) reply: oneshot::Sender<Result<Reply, CallError>>,
+    /// The language of the player the call is about, for text in a
+    /// deferred answer.
+    pub(crate) language: Option<String>,
 }
 
 /// Undelivered background jobs per plugin.
@@ -300,6 +303,15 @@ impl Background {
             deferred.insert(ticket, pending);
         }
         Ok(())
+    }
+
+    /// The language of the player a deferred call is about.
+    pub(crate) fn language(&self, ticket: u64) -> Option<String> {
+        self.deferred
+            .lock()
+            .unwrap()
+            .get(&ticket)
+            .and_then(|pending| pending.language.clone())
     }
 
     /// `background.resolve`: false when nobody waits for `ticket` any more.
@@ -1103,15 +1115,28 @@ impl Worker {
                         continue;
                     }
                     self.shared.state.lock().unwrap().calls += 1;
+                    let language = event.language().map(str::to_owned);
                     // The reply slot is in reach of `background.defer` while
                     // the engine runs; a deferred call keeps it.
                     if let Some(reply) = reply {
-                        *self.shared.background.current.lock().unwrap() =
-                            Some(Pending { hook, reply });
+                        *self.shared.background.current.lock().unwrap() = Some(Pending {
+                            hook,
+                            reply,
+                            language: language.clone(),
+                        });
                     }
                     let awaited = self.shared.background.current.lock().unwrap().is_some();
-                    let result = guarded(|| engine.call(*event))
-                        .unwrap_or_else(|panic| Err(CallError::Fatal(panic)));
+                    // Text the plugin answers with (a decision, a tooltip)
+                    // names its own messages and renders in the language of
+                    // the player the event is about.
+                    let result = guarded(|| {
+                        crate::text::rendering(
+                            Some(self.spec.name.as_str()),
+                            language.as_deref(),
+                            || engine.call(*event),
+                        )
+                    })
+                    .unwrap_or_else(|panic| Err(CallError::Fatal(panic)));
                     let reply = self
                         .shared
                         .background

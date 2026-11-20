@@ -13,7 +13,9 @@
 //!     every other hook.
 //! - `login(ctx)` returns `deny("You are not welcome here.")` when `ctx.name`
 //!   equals the configured `deny` name exactly, otherwise `continue`.
-//! - `command(ctx)` returns `message("Hello, <ctx.name>!")`.
+//! - `command(ctx)` returns the message `greeting` with the argument `name`
+//!   set to `ctx.name`, which Rift renders from `messages.toml` in the
+//!   player's language (`Hello, <ctx.name>!` by default).
 //! - `join(ctx)` calls `players::message(ctx.uuid, "Welcome, <ctx.name>!")`,
 //!   then `store::increment("hello", "joins", 1)`. Host errors are ignored.
 //! - `message(msg)`: when `msg.reply` is set, publishes `msg.payload`
@@ -25,7 +27,7 @@
 
 use rift_plugin::{
     Action, BusMessage, CommandSpec, Context, Hook, Plugin, Registration, SuggestKind, bus,
-    players, store, timers,
+    players, store, text, timers,
 };
 use serde::Deserialize;
 
@@ -70,7 +72,8 @@ impl Plugin for Hello {
     }
 
     fn command(&mut self, ctx: Context) -> Action {
-        Action::message(format!("Hello, {}!", ctx.name))
+        // The text lives in messages.toml, translated per player.
+        Action::message(text::message("greeting").arg("name", ctx.name))
     }
 
     fn join(&mut self, ctx: Context) {
