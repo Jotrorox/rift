@@ -414,7 +414,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 
     /// Write what Rift queued for the client now. Cancel-safe: what is not
     /// written stays queued for the next forward.
-    async fn flush_injected(&mut self) -> io::Result<()> {
+    pub(super) async fn flush_injected(&mut self) -> io::Result<()> {
         poll_fn(|cx| self.client.poll_replies(cx)).await
     }
 
