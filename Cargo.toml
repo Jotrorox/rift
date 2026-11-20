@@ -91,9 +91,9 @@ tokio-rustls = { version = "0.26", default-features = false }
 rcgen.workspace = true
 http = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-wasmtime = { version = "50.0.2", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
-wasmtime-wasi = { version = "50.0.2", optional = true, default-features = false, features = ["p2"] }
-wasmtime-wasi-http = { version = "50.0.2", optional = true, default-features = false, features = ["default-send-request", "p2"] }
+wasmtime = { version = "50.0.3", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "50.0.3", optional = true, default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50.0.3", optional = true, default-features = false, features = ["default-send-request", "p2"] }
 # Clustering (docs/clustering.md): Raft, and the tokio runtime openraft runs on.
 openraft = { version = "0.10.0", default-features = false, features = ["tokio-rt", "serde"] }
 openraft-rt-tokio = "0.10.0"
