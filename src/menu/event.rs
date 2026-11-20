@@ -19,7 +19,7 @@ use std::{
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Click,
-    /// Anvil typing (not reported yet).
+    /// Anvil typing, for menus with `typing`.
     Text,
     Close,
 }
@@ -104,7 +104,7 @@ impl MenuEvent {
             click: None,
             key: None,
             payload: None,
-            text: None,
+            text: (menu.kind() == super::Kind::Anvil).then(|| menu.text().to_owned()),
             reason: None,
             state: menu.state().cloned(),
             ticket: Ticket::default(),
@@ -122,6 +122,11 @@ impl MenuEvent {
             payload: action.and_then(|button| button.action.payload.clone()),
             ..Self::of(menu, EventKind::Click)
         }
+    }
+
+    /// What the player typed in the anvil `menu`.
+    pub fn text(menu: &Menu) -> Self {
+        Self::of(menu, EventKind::Text)
     }
 
     /// The end of `menu`.

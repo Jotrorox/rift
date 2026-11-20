@@ -432,6 +432,30 @@ impl super::Menu {
             Some(None) => None,
             None => return Err(invalid(&format!("slot {slot} is outside the menu"))),
         };
+        if let Some(stack) = &stack
+            && self.kind() == super::Kind::Anvil
+            && slot == super::ANVIL_LEFT
+            && protocol < JSON_NAMES
+        {
+            // A 1.12 anvil puts the `§` string of the left item's name into
+            // its text field as it is, and sends it back so.
+            return Ok(encode_named(protocol, stack, self.field())?.into());
+        }
         cache.encode(protocol, stack.as_ref())
     }
+}
+
+/// `stack` as a client before 1.13 reads it, named exactly `name`, without
+/// the reset that keeps other names upright. Uncached: an anvil's left item
+/// changes with every text Rift puts in the field.
+fn encode_named(protocol: i32, stack: &ItemStack, name: &str) -> io::Result<Vec<u8>> {
+    let mut converted = convert(protocol, stack)?;
+    if let Some(Nbt::Compound(tag)) = converted.as_mut().and_then(|stack| stack.tag.as_mut())
+        && let Some(display) = tag.compound_mut("display")
+    {
+        display.insert("Name", Nbt::String(name.to_owned()));
+    }
+    let mut writer = Writer::new();
+    item::write(protocol, converted.as_ref(), &mut writer)?;
+    Ok(writer.into_inner())
 }

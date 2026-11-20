@@ -776,6 +776,91 @@ fn an_anvil_with_buttons_keeps_its_left_slot_filled() {
 }
 
 #[test]
+fn an_anvil_result_is_never_empty() {
+    // A left button alone gets the default result, a copy of it.
+    let left_only = parse(json!({
+        "id": "a", "type": "anvil", "text": "x", "layout": ["P  "],
+        "keys": {"P": {"item": "name_tag"}},
+    }));
+    let result = button(&left_only, ANVIL_RESULT);
+    assert_eq!(result.look.item, "name_tag");
+    assert_eq!(result.look.name, Some(Text::Plain("x".into())));
+    assert_eq!(result.action.id.as_deref(), Some(ANVIL_SUBMIT));
+    // Emptying a custom result brings the default back.
+    let mut custom = parse(
+        json!({"id": "a", "type": "anvil", "slots": [{"slot": 2, "item": "lime_dye", "id": "ok"}]}),
+    );
+    custom
+        .apply(&patch(json!({"slots": [{"slot": 2, "empty": true}]})))
+        .unwrap();
+    assert_eq!(item(&custom, ANVIL_RESULT), Some("paper"));
+    custom.typed("abc".into());
+    assert_eq!(
+        button(&custom, ANVIL_RESULT).look.name,
+        Some(Text::Plain("abc".into()))
+    );
+}
+
+#[test]
+fn every_anvil_event_carries_the_text() {
+    let mut menu = parse(json!({"id": "nick", "type": "anvil", "text": "Steve", "state": 1}));
+    menu.typed("Alex".into());
+    let click = MenuEvent::click(&menu, ANVIL_RESULT, Click::Left, None);
+    assert_eq!(click.text.as_deref(), Some("Alex"));
+    assert_eq!(click.action.as_deref(), Some(ANVIL_SUBMIT));
+    let text = MenuEvent::text(&menu);
+    assert_eq!(text.kind, EventKind::Text);
+    assert_eq!(
+        (text.text.as_deref(), text.state),
+        (Some("Alex"), Some(json!(1)))
+    );
+    let close = MenuEvent::close(&menu, CloseReason::Player);
+    assert_eq!(close.text.as_deref(), Some("Alex"));
+    // Other menus carry none.
+    let chest = parse(json!({"id": "a"}));
+    assert_eq!(MenuEvent::close(&chest, CloseReason::Player).text, None);
+}
+
+#[test]
+fn the_field_follows_the_text_only_when_rift_sends_the_left_slot() {
+    let mut menu = parse(json!({"id": "nick", "type": "anvil", "text": "Steve"}));
+    menu.typed("Alex".into());
+    assert_eq!((menu.text(), menu.field()), ("Alex", "Steve"));
+    menu.field_from_text();
+    assert_eq!(menu.field(), "Alex");
+    assert_eq!(
+        button(&menu, ANVIL_LEFT).look.name,
+        Some(Text::Plain("Alex".into()))
+    );
+    // A client before 1.17 takes 35 characters.
+    let mut long = parse(json!({"id": "a", "type": "anvil", "text": "x".repeat(50)}));
+    long.fit_text(754);
+    assert_eq!((long.text().len(), long.field().len()), (35, 35));
+    long.fit_text(777);
+    assert_eq!(long.text().len(), 35);
+}
+
+#[test]
+fn renames_are_filtered_and_over_long_ones_ignored() {
+    assert_eq!(anvil_rename(777, "a\u{7}b§c").as_deref(), Some("abc"));
+    assert_eq!(anvil_rename(777, "").as_deref(), Some(""));
+    assert_eq!(
+        anvil_rename(777, &"x".repeat(50)).map(|text| text.len()),
+        Some(50)
+    );
+    assert_eq!(anvil_rename(777, &"x".repeat(51)), None);
+    assert_eq!(
+        anvil_rename(754, &"x".repeat(35)).map(|text| text.len()),
+        Some(35)
+    );
+    assert_eq!(anvil_rename(754, &"x".repeat(36)), None);
+    assert_eq!(
+        anvil_rename(335, &format!("{}§§", "x".repeat(35))).map(|text| text.len()),
+        Some(35)
+    );
+}
+
+#[test]
 fn anvil_fields_are_checked() {
     assert_eq!(
         error(json!({"id": "a", "text": "x"})),

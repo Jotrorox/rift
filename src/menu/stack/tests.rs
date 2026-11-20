@@ -582,3 +582,30 @@ fn menus_hand_out_their_slots_for_a_protocol() {
     assert_eq!(&*menu.slot_stack(1, 777, &no_heads, &cache).unwrap(), &[0]);
     assert!(menu.slot_stack(5, 777, &no_heads, &cache).is_err());
 }
+
+#[test]
+fn an_anvil_s_left_item_is_named_exactly_on_1_12() {
+    let menu = Menu::parse(&json!({"id": "nick", "type": "anvil", "text": "Steve"})).unwrap();
+    let cache = StackCache::new(16);
+    let left = |protocol| {
+        decode(
+            protocol,
+            &menu
+                .slot_stack(crate::menu::ANVIL_LEFT, protocol, &no_heads, &cache)
+                .unwrap(),
+        )
+    };
+    // 1.12 fills the field with the `§` string as it is.
+    assert_eq!(display(&left(340)).str("Name"), Some("Steve"));
+    // Other names, and the result, stay upright.
+    let result = decode(
+        340,
+        &menu
+            .slot_stack(crate::menu::ANVIL_RESULT, 340, &no_heads, &cache)
+            .unwrap(),
+    );
+    assert_eq!(display(&result).str("Name"), Some("§rSteve"));
+    // From 1.13 names are components, whose text the field shows.
+    let name = display(&left(393)).str("Name").unwrap().to_owned();
+    assert!(name.contains("\"Steve\""), "{name}");
+}

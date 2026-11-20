@@ -515,7 +515,6 @@ impl Menu {
             menu.typing = typing;
         }
         if anvil {
-            menu.default_result = menu.slots.iter().all(Option::is_none);
             menu.fill_anvil();
         }
         Ok(menu)
@@ -572,6 +571,31 @@ impl Menu {
     pub fn typed(&mut self, text: String) {
         if self.kind == Kind::Anvil {
             self.text = text;
+            self.fill_anvil();
+        }
+    }
+
+    /// Anvil: the text Rift last put in the field, as the left item's name.
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    /// Anvil: name the left item after what the field holds, for when Rift
+    /// sends that slot again anyway. The client then fills the field with
+    /// what the player typed instead of an older text.
+    pub fn field_from_text(&mut self) {
+        if self.kind == Kind::Anvil && self.field != self.text {
+            self.field = self.text.clone();
+            self.fill_anvil();
+        }
+    }
+
+    /// Anvil: cut the text to what a client on `protocol` takes, as its
+    /// field would.
+    pub fn fit_text(&mut self, protocol: i32) {
+        if self.kind == Kind::Anvil {
+            self.text = clean_anvil_text(protocol, &self.text);
+            self.field = clean_anvil_text(protocol, &self.field);
             self.fill_anvil();
         }
     }
@@ -702,9 +726,14 @@ impl Menu {
     }
 
     /// The anvil's rules: the left slot always holds an item, named after
-    /// the text Rift put in the field; the default result is a copy of it
-    /// named after what the field holds.
+    /// the text Rift put in the field; the result is never empty (the client
+    /// draws a red cross over the arrow then), so without a button of the
+    /// plugin's it holds the default result, a copy of the left item named
+    /// after what the field holds.
     fn fill_anvil(&mut self) {
+        if self.slots[ANVIL_RESULT].is_none() {
+            self.default_result = true;
+        }
         let left = self.slots[ANVIL_LEFT].get_or_insert_with(|| Button {
             look: Look::of("paper"),
             action: Action::default(),
@@ -797,6 +826,15 @@ pub fn clean_anvil_text(protocol: i32, text: &str) -> String {
         clean.push(c);
     }
     clean
+}
+
+/// The text of an anvil rename from a client on `protocol`, as the game
+/// takes it: without the characters it filters out of names, and `None`
+/// when that is still longer than the client's limit, which the game
+/// ignores too (a vanilla client never sends one).
+pub fn anvil_rename(protocol: i32, name: &str) -> Option<String> {
+    let clean: String = name.chars().filter(|c| allowed_character(*c)).collect();
+    (clean.encode_utf16().count() <= anvil_text_limit(protocol)).then_some(clean)
 }
 
 /// `SharedConstants.isAllowedChatCharacter`.
