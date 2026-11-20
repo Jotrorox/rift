@@ -310,7 +310,9 @@ pub struct Look {
     pub item: Item,
     pub count: u8,
     /// `None` keeps the item's own name; an empty plain text is no name.
+    #[serde(with = "exact_text::option")]
     pub name: Option<Text>,
+    #[serde(with = "exact_text::list")]
     pub lore: Vec<Text>,
     /// `None` keeps the item's own glint.
     pub glint: Option<bool>,
@@ -392,6 +394,7 @@ pub struct Button {
 pub struct Menu {
     id: String,
     kind: Kind,
+    #[serde(with = "exact_text::option")]
     title: Option<Text>,
     state: Option<Value>,
     /// Anvil: what the text field holds.
@@ -435,6 +438,7 @@ pub struct Patch {
     /// Slot numbers as written and what they get: `None` empties them.
     slots: Vec<(Vec<i64>, Option<Button>)>,
     keys: Vec<(char, Button)>,
+    #[serde(with = "exact_text::patch")]
     title: Option<Option<Text>>,
     state: Option<Value>,
     text: Option<String>,
@@ -1311,5 +1315,110 @@ mod item_name {
         rift_translation::codec::item::newest::item_id(&name)
             .and_then(rift_translation::codec::item::newest::item_name)
             .ok_or_else(|| D::Error::custom(format!("unknown item {name:?}")))
+    }
+}
+
+/// Texts as their variant: untagged, a component that is a JSON string
+/// would come back as plain text, which a stack spells differently.
+mod exact_text {
+    use crate::text::Text;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    #[derive(Serialize, Deserialize)]
+    enum Exact {
+        Plain(String),
+        Component(Value),
+    }
+
+    impl From<&Text> for Exact {
+        fn from(text: &Text) -> Self {
+            match text {
+                Text::Plain(text) => Self::Plain(text.clone()),
+                Text::Component(value) => Self::Component(value.clone()),
+            }
+        }
+    }
+
+    impl From<Exact> for Text {
+        fn from(text: Exact) -> Self {
+            match text {
+                Exact::Plain(text) => Self::Plain(text),
+                Exact::Component(value) => Self::Component(value),
+            }
+        }
+    }
+
+    pub mod option {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            text: &Option<Text>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            text.as_ref().map(Exact::from).serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Text>, D::Error> {
+            Ok(Option::<Exact>::deserialize(deserializer)?.map(Text::from))
+        }
+    }
+
+    pub mod list {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(texts: &[Text], serializer: S) -> Result<S::Ok, S::Error> {
+            texts
+                .iter()
+                .map(Exact::from)
+                .collect::<Vec<_>>()
+                .serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Vec<Text>, D::Error> {
+            Ok(Vec::<Exact>::deserialize(deserializer)?
+                .into_iter()
+                .map(Text::from)
+                .collect())
+        }
+    }
+
+    /// A patch's title: absent, emptied or set. Nested options would lose
+    /// "emptied" in JSON.
+    pub mod patch {
+        use super::*;
+
+        #[derive(Serialize, Deserialize)]
+        enum Title {
+            Keep,
+            Empty,
+            Set(Exact),
+        }
+
+        pub fn serialize<S: Serializer>(
+            title: &Option<Option<Text>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match title {
+                None => Title::Keep,
+                Some(None) => Title::Empty,
+                Some(Some(text)) => Title::Set(text.into()),
+            }
+            .serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Option<Text>>, D::Error> {
+            Ok(match Title::deserialize(deserializer)? {
+                Title::Keep => None,
+                Title::Empty => Some(None),
+                Title::Set(text) => Some(Some(text.into())),
+            })
+        }
     }
 }

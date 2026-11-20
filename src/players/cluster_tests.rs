@@ -115,6 +115,7 @@ async fn next(session: &mut Session) -> PlayerAction {
 #[derive(Default)]
 struct Hooks {
     clicks: Mutex<Vec<(Owner, Context)>>,
+    menus: Mutex<Vec<(Owner, Context)>>,
 }
 
 impl SessionHooks for Hooks {
@@ -131,6 +132,11 @@ impl SessionHooks for Hooks {
 
     fn dialog(&self, context: Context, owner: Owner) -> RouteFuture<io::Result<()>> {
         self.clicks.lock().unwrap().push((owner, context));
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn menu(&self, context: Context, owner: Owner) -> RouteFuture<io::Result<()>> {
+        self.menus.lock().unwrap().push((owner, context));
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -496,6 +502,127 @@ async fn actions_for_another_peers_players_reach_their_sessions() {
 }
 
 #[tokio::test]
+async fn menus_for_another_peers_players_bring_their_events_back() {
+    use crate::menu::{Click, CloseReason, Menu, MenuEvent, Patch};
+    let cluster = MemoryCluster::new();
+    let a = peer(&cluster, 1, 1);
+    let b = peer(&cluster, 2, 1);
+    let a_hooks = Arc::new(Hooks::default());
+    a.set_session_hooks(a_hooks.clone());
+    let mut alice = login(&b, 1, 1, "Alice", "lobby").await.unwrap();
+    let mut old = login_with(&b, 2, 3, "Old", "lobby", 316).await.unwrap();
+    cluster.pump();
+    let remote = Owner::Remote {
+        peer: 1,
+        incarnation: 1,
+        plugin: Some("shop".into()),
+    };
+    let spec = json!({
+        "id": "shop", "rows": 1, "title": "Shop", "state": {"page": 1},
+        "slots": [
+            {"slot": 0, "item": "diamond", "id": "buy", "payload": {"price": 5}},
+            {"slot": 1, "item": "player_head", "head": {"player": "Alice"}},
+        ],
+    });
+    let menu = Menu::parse(&spec).unwrap();
+    let owner = Owner::Plugin("shop".into());
+
+    // Shown from A to a player of B: the menu crosses whole.
+    assert!(
+        a.menu("Alice", Some(menu.clone()), owner.clone(), None)
+            .unwrap()
+    );
+    let PlayerAction::Menu(shown) = next(&mut alice).await else {
+        panic!("expected a menu");
+    };
+    assert_eq!(shown.owner, remote);
+    assert_eq!(*shown.menu, menu);
+    // A client older than 1.12 gets none.
+    assert!(
+        !a.menu("Old", Some(menu.clone()), owner.clone(), None)
+            .unwrap()
+    );
+
+    // A patch and a close cross too.
+    let patch = Patch::parse(&json!({"title": "Sold", "state": {"page": 2}})).unwrap();
+    assert!(
+        a.update_menu("Alice", "shop", patch.clone(), owner.clone())
+            .unwrap()
+    );
+    let PlayerAction::UpdateMenu(update) = next(&mut alice).await else {
+        panic!("expected an update");
+    };
+    assert_eq!(
+        (update.owner.clone(), update.id.as_str(), &*update.patch),
+        (remote.clone(), "shop", &patch)
+    );
+    assert!(!a.update_menu("Old", "shop", patch, owner.clone()).unwrap());
+    assert!(
+        a.menu("Alice", None, owner.clone(), Some("shop".into()))
+            .unwrap()
+    );
+    assert_eq!(
+        next(&mut alice).await,
+        PlayerAction::CloseMenu {
+            owner: remote.clone(),
+            id: Some("shop".into())
+        }
+    );
+
+    // B's session reports the events to the owner it was given: back to A.
+    let Owner::Remote {
+        peer,
+        incarnation,
+        plugin,
+    } = remote
+    else {
+        unreachable!();
+    };
+    for event in [
+        MenuEvent::click(&menu, 0, Click::Left, None),
+        MenuEvent::close(&menu, CloseReason::Plugin),
+    ] {
+        let context = Context {
+            id: alice.connection,
+            name: "Alice".into(),
+            menu: Some(event),
+            ..Context::default()
+        };
+        b.route_menu_event(peer, incarnation, plugin.clone(), context)
+            .await
+            .unwrap();
+    }
+    let events = a_hooks.menus.lock().unwrap().clone();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|(owner, context)| {
+        *owner == Owner::Plugin("shop".into()) && context.name == "Alice"
+    }));
+    let click = events[0].1.menu.as_ref().unwrap();
+    assert_eq!(
+        (click.action.as_deref(), &click.payload, &click.state),
+        (
+            Some("buy"),
+            &Some(json!({"price": 5})),
+            &Some(json!({"page": 1}))
+        )
+    );
+    assert_eq!(
+        events[1].1.menu.as_ref().unwrap().reason,
+        Some(CloseReason::Plugin)
+    );
+    // A restarted A no longer gets them.
+    assert_eq!(
+        b.route_menu_event(peer, incarnation + 1, plugin, Context::default())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(a_hooks.clicks.lock().unwrap().is_empty());
+    assert!(old.actions.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn every_peer_counts_and_lists_the_whole_network() {
     let cluster = MemoryCluster::new();
     let a = peer(&cluster, 1, 1);
@@ -817,6 +944,55 @@ fn player_actions_and_their_answers_cross_the_wire() {
             },
         },
         PlayerAction::ClearDialog,
+        PlayerAction::Menu(crate::menu::Shown {
+            menu: Arc::new(
+                crate::menu::Menu::parse(&json!({
+                    "id": "shop", "type": "hopper", "title": {"text": "Shop", "bold": true},
+                    "state": {"page": 1},
+                    "slots": [{
+                        "slot": 0, "item": "leather_helmet", "name": "Hat", "lore": ["a", "b"],
+                        "glint": true, "model": {"floats": [1.5], "strings": ["x"]},
+                        "item_model": "rift:hat", "color": "#112233", "details": true,
+                        "id": "buy", "payload": {"price": 5}, "clicks": "all", "close": true,
+                    }, {
+                        "slot": 1, "item": "player_head",
+                        "head": {"texture": "abc", "signature": "def"},
+                    }],
+                }))
+                .unwrap(),
+            ),
+            owner: Owner::Plugin("shop".into()),
+            heads: Arc::new(BTreeMap::from([(
+                "Alice".to_owned(),
+                crate::menu::Textures {
+                    value: "v".into(),
+                    signature: None,
+                },
+            )])),
+        }),
+        PlayerAction::UpdateMenu(crate::menu::Update {
+            owner: Owner::Script,
+            id: "shop".into(),
+            patch: Arc::new(
+                crate::menu::Patch::parse(&json!({
+                    "slots": [{"slots": [1, 2], "item": "stone"}, {"slot": 3, "empty": true}],
+                    "keys": {"#": {"item": "apple"}},
+                    "title": "New", "state": [1, 2],
+                }))
+                .unwrap(),
+            ),
+            heads: Arc::default(),
+        }),
+        PlayerAction::UpdateMenu(crate::menu::Update {
+            owner: Owner::Script,
+            id: "shop".into(),
+            patch: Arc::new(crate::menu::Patch::parse(&json!({"title": ""})).unwrap()),
+            heads: Arc::default(),
+        }),
+        PlayerAction::CloseMenu {
+            owner: Owner::Script,
+            id: None,
+        },
     ] {
         let request = WireRequest {
             incarnation: 3,
