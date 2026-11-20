@@ -5,9 +5,9 @@
 > the branch that adds inventory menus. It describes the plugin API first,
 > because that is the part to agree on, and then how the proxy would do it.
 > [Decisions](#decisions) records what the owner chose, and
-> [to verify](#to-verify) lists the client and server behavior this design
-> relies on but that has not been checked against the game's code yet. The
-> page grows with the branch and becomes the user guide when it merges.
+> [what was checked](#what-was-checked) says how the client and server
+> behavior this design relies on was confirmed. The page grows with the
+> branch and becomes the user guide when it merges.
 
 An inventory menu is a chest-style screen whose slots hold items that act as
 buttons: a server selector, a shop page, a confirmation, a text prompt in an
@@ -124,11 +124,11 @@ is decoration.
 | --- | --- | --- |
 | `id` | required | 1–64 characters of `a-z`, `0-9`, `_`, `-`, `.`, `/`. Names the menu in every event. Showing a menu with the `id` of the menu the player has open [redraws it in place](#changing-an-open-menu) |
 | `type` | `"chest"` | `chest`, `hopper`, `dispenser` or `anvil` |
-| `rows` | lines of `layout`, else 3 | Chest only: 1 to 6 |
+| `rows` | lines of `layout`, else 3 | Chest only: 1 to 6. With a `layout` it must be the number of its lines |
 | `title` | empty | [Text](plugin-events.md#text): a string or a component, including `{ mini = ... }` |
 | `layout` | none | Lines of characters, one per slot. See the table below |
 | `keys` | none | The button each layout character stands for. A space is always an empty slot; every other character in the layout needs an entry |
-| `slots` | none | A list of buttons placed by number, each with `slot = n` or `slots = { n, ... }`. Placed after the layout, so they replace what the layout put there |
+| `slots` | none | A list of buttons placed by number, each with `slot = n` or `slots = { n, ... }`. Placed after the layout, so they replace what the layout put there. `{ slot = n, empty = true }` empties one |
 | `state` | none | Any JSON value of at most 16 KiB that Rift keeps with the menu and hands back in every event. See [state](#state-and-payloads) |
 | `text` | `""` | Anvil only: what the text field starts with |
 | `typing` | `false` | Anvil only: report a `text` event while the player types |
@@ -150,10 +150,10 @@ A button is an item with an optional action.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `item` | required | An item name of the newest supported version, such as `diamond_sword`; `minecraft:` is optional. A client that lacks the item gets the [stand-in](translation.md#what-players-get) that translation already uses |
-| `count` | 1 | 1 to 99. Clients before 1.20.5 show at most 64 |
-| `name` | the item's own name | Text. Not italic unless the text says so (vanilla italicizes renamed items) |
+| `count` | 1 | 1 to 99. Clients before 1.20.5 get at most 64 |
+| `name` | the item's own name | Text. Not italic unless the text says so (vanilla italicizes renamed items). On 1.12 a name without a color is white |
 | `lore` | none | A list of up to 32 texts, one per line. Not italic unless the text says so |
-| `glint` | the item's own | `true` adds the enchantment glint, `false` removes it |
+| `glint` | the item's own | `true` adds the enchantment glint. `false` removes an item's own glint on 1.20.5 and newer; older clients keep it |
 | `model` | none | Custom model data for resource packs: a number, or `{ floats, flags, strings, colors }` for 1.21.4 and newer |
 | `item_model` | none | A model ID for 1.21.2 and newer. Older clients ignore it |
 | `head` | none | For `player_head`: `{ player = "<name or UUID>" }` uses the skin of an online player, `{ texture = "<value>", signature = "<optional>" }` a texture property as head databases publish it |
@@ -162,8 +162,8 @@ A button is an item with an optional action.
 | `tooltip` | `true` | `false` hides the tooltip altogether on 1.20.5 and newer; older clients get an empty name |
 | `id` | none | The action name reported when the button is clicked: the same character set as a menu `id`. Without one the button is decoration and its clicks are not reported |
 | `payload` | none | Any JSON value of at most 4 KiB, handed back with the click. Rift keeps it; the client never sees it |
-| `clicks` | the four mouse clicks | The [click kinds](#click-kinds) that report: a list, or `"all"` |
-| `close` | `false` | Close the menu when the button is clicked, without waiting for the plugin. A button with `close` needs no `id` |
+| `clicks` | the four mouse clicks | The [click kinds](#click-kinds) that report: a list, or `"all"`. Needs an `id` |
+| `close` | `false` | Close the menu when the button is clicked with one of the four mouse clicks, without waiting for the plugin. A button with `close` needs no `id` |
 
 Names and lore are checked like every other [styled text](text.md) and are
 spelled for each player's client version by the same code that converts a
@@ -214,7 +214,7 @@ and in persistent Lua plugins.
 | --- | --- | --- |
 | `left`, `right` | Clicks | yes |
 | `shift_left`, `shift_right` | Clicks while holding Shift | yes |
-| `middle` | Clicks the wheel. Newer clients send it only in creative mode | no |
+| `middle` | Clicks the wheel. Clients from 1.18 send it only in creative mode | no |
 | `drop`, `drop_all` | Presses Q, or Ctrl+Q, over the slot | no |
 | `number_key` | Presses 1 to 9 over the slot; `key` says which | no |
 | `offhand` | Presses F over the slot (1.16 and newer clients) | no |
@@ -285,7 +285,9 @@ rift.menus.on("kits", {
 **Redraw.** Call `menu` again with the same `id`. If the player still has
 that menu open, Rift compares the new definition with what the client shows
 and sends only the difference: changed slots, and the title if it changed.
-The screen does not close and the mouse does not move. If the type or the
+The screen does not close and the mouse does not move. A new title makes the
+client build the screen again, so Rift then sends every slot once more; in an
+anvil the text stays, with the text cursor at its end. If the type or the
 number of rows changed, or the player has closed the menu meanwhile, the menu
 opens anew. Redrawing is the simple way to change anything, and the paged
 list above uses it.
@@ -348,6 +350,11 @@ rift.menus.on("nick", {
 - The client limits the text to 50 characters, 35 before 1.17. Rift enforces
   the same limit and removes control characters. The text is still player
   input.
+- Clients from 1.13 to 1.19.4 do not tell the server when the field becomes
+  empty. A player there who deletes everything is reported with the last
+  character, so check a minimum length where it matters.
+- On 1.12 and 1.13 the screen is always titled "Repair & Name", whatever
+  `title` says, and on 1.12 the player has to click the field before typing.
 - The client redraws the result and an "Enchantment cost" line by itself on
   every keystroke. Rift corrects both at once, but a custom result item can
   flicker for a moment while the player types.
@@ -453,7 +460,7 @@ not know, so a plugin author never compares strings.
 
 #### Moving from 0.2
 
-0.3.0 is 0.2.0 plus the `menu` hook and the three functions. Nothing else
+0.3.0 is 0.2.1 plus the `menu` hook and the three functions. Nothing else
 changes, so the move needs no change in a plugin's source:
 
 | Plugin | What changes |
@@ -540,9 +547,9 @@ packets.
 | Step | To the client | From the client (never forwarded) |
 | --- | --- | --- |
 | Open | `open_screen` with Rift's container ID, the menu type and the title; then one `container_set_slot` per filled menu slot | |
-| Redraw or patch | `container_set_slot` for changed slots; `open_screen` again with the same ID for a new title | |
-| Click | The slots the click could have changed, again, and an empty cursor | `container_click` |
-| Anvil | The result slot and a cost of 0 (`container_set_data`) after each keystroke | `rename_item`; the `MC\|ItemName` plugin message on 1.12 |
+| Redraw or patch | `container_set_slot` for changed slots. For a new title `open_screen` again with the same ID and then every slot, because the client builds the menu anew | |
+| Click | The slots the click could have changed, again, and an empty cursor | `container_click`; `set_creative_mode_slot` from 1.21.2 |
+| Anvil | The result slot and a cost of 0 (`container_set_data`) after each change of the text | `rename_item`; the `MC\|ItemName` plugin message on 1.12 |
 | Close | `container_close` when Rift closes the menu | `container_close` when the player does |
 
 `rift-translation` already reads and writes all of these in every protocol's
@@ -551,7 +558,7 @@ differences:
 
 | | 1.12–1.13.2 | 1.14–1.16.5 | 1.17 | 1.17.1–1.21.1 | 1.21.2 and newer |
 | --- | --- | --- | --- | --- | --- |
-| Menu type | A window name and a slot count | A `menu` registry ID | same | same | same |
+| Menu type | A window name and a slot count (0 for an anvil) | A `menu` registry ID | same | same | same |
 | Container ID | A byte | A byte | A byte | A byte | A VarInt |
 | A click names | An action number and the clicked stack | same | The slots it changed | The slots it changed and a state ID | same; stacks are hashes from 1.21.5 |
 | Empty the cursor | `container_set_slot` with container −1 | same | same | same | `set_cursor_item` |
@@ -569,7 +576,8 @@ and remembers, per slot, the state in which the slot's `id`, `payload` or
 the stale click that is [dropped](#click-kinds).
 
 **Opening over a backend screen.** If the backend has a container open when
-Rift opens a menu, the client replaces it without telling anyone. Rift sends
+Rift opens a menu, the client replaces it without telling anyone and drops
+what the player held on the cursor on its side only. Rift sends
 the backend the `container_close` the client would have sent on Escape, so
 the backend's idea of the player stays right. For this Rift remembers the ID
 of the backend's open container: one integer per session, read from
@@ -577,19 +585,38 @@ of the backend's open container: one integer per session, read from
 
 ### Clicks and what the client predicts
 
-The client does not wait for the server. When the player clicks an item, the
-client moves it at once: onto the cursor, into the inventory rows with a
-shift-click, into the hotbar with a number key. Rift has to put the picture
-back, because nothing really moved.
+The client does not wait for the server. It applies every click to its own
+copy of the screen first and then sends it, whatever the click is. Rift has
+to put the picture back, because nothing really moved.
 
-- **Menu slots and cursor.** Rift knows what every menu slot holds, so it
-  re-sends the slots the click could have changed and an empty cursor. From
-  1.17 the click lists the slots; before that Rift re-sends the clicked slot,
-  or all menu slots for the click kinds that can touch several.
+| The click | What the client changed on its side |
+| --- | --- |
+| Left or right click | The clicked slot and the cursor |
+| Shift-click on a menu slot | The clicked slot and any slots of the inventory rows |
+| Number key, or F from 1.16 | The clicked slot and one hotbar slot or the off hand |
+| Q or Ctrl+Q | The clicked slot |
+| Middle click | The cursor, in creative mode |
+| Double click | The cursor and every slot that holds the same item, inventory rows included |
+| Drag | The slots dragged over and the cursor |
+
+- **Menu slots.** Rift knows what every menu slot holds and re-sends the ones
+  the click could have changed. From 1.17 the click lists the slots the
+  client changed. Before that Rift re-sends the clicked slot, or all menu
+  slots for a double click or a drag.
+- **The cursor.** Rift empties it with the packet the client's version
+  applies while a menu is open: `container_set_slot` for container −1 up to
+  1.21.1, `set_cursor_item` from 1.21.2, which ignores the older form.
 - **The inventory rows.** Rift does not know what the player carries, so it
-  cannot re-send those slots. The next section is about them.
+  cannot re-send those slots. The next section is about them. From 1.17 the
+  click's list says whether it touched them at all. Before 1.17 Rift assumes
+  it for a shift-click, a number key, F, a double click, a drag and any click
+  on the inventory rows.
 - A click on a decoration button, or of a kind the button does not report,
   is undone the same way and reported to nobody.
+- **Creative mode.** From 1.21.2 a client in creative mode that presses Q
+  over a slot also asks the server to create the dropped item
+  (`set_creative_mode_slot`). Rift drops that packet while one of its menus
+  is open, so a button never becomes a real item.
 
 ### The inventory rows
 
@@ -600,53 +627,87 @@ number key or F over a menu slot, or a double click.
 
 After such a click Rift asks the backend to send the inventory again. The
 protocol has a path for this, because a client and a server can disagree
-about an inventory in normal play:
+about an inventory in normal play. These requests were run against 26 real
+servers ([what was checked](#what-was-checked)):
 
 | Backend | Rift sends the backend | The backend answers |
 | --- | --- | --- |
-| 1.17.1 and newer | A click on the player's own inventory (container 0) that does nothing, with a state ID the backend does not expect | The whole inventory and the cursor (`container_set_content`), as for any client that is out of sync |
-| 1.16.5 and older | The same click, claiming a result the backend will not compute | A rejection (`container_transaction`) and the whole inventory. The client acknowledges the rejection by itself |
-| 1.17 | To be worked out: this one version has neither state IDs nor transactions | |
+| 1.17.1 and newer | A left click between the slots of the player's own inventory (container 0, slot −1) with the state ID −1, which no server expects | One `container_set_content` with all 46 slots and the cursor |
+| 1.12 to 1.16.5 | The same click, claiming that it picked up a stack. The server computes an empty result and disagrees | A rejection (`container_transaction`), the whole inventory, and the cursor. The backend then ignores every click of this player until the rejection is acknowledged |
+| 1.17 | The same click, claiming a wrong stack for every slot and the cursor | One `container_set_slot` for each of the 46 slots, and the cursor |
 
 The answer travels to the client like any backend packet, through the
 translator when there is one. The client applies it to its inventory, and
 the inventory rows are right again.
 
-- The click that does nothing is a left click between the slots (slot −1),
-  which no server version acts on, whatever the player holds.
+- The click between the slots does nothing on any server, whatever the
+  player holds. A click outside the window (slot −999) would drop what the
+  player holds, so Rift never sends that.
 - Rift writes the request in the backend's protocol, past the translator. A
   translator would repair the state ID that is wrong on purpose.
-- Rift never has more than one request on its way. Further clicks meanwhile
-  cause one more request after the answer, so a player who clicks fast costs
-  the backend at most a few inventory packets a second.
+- **A rejection is Rift's to acknowledge.** Rift takes the rejection of its
+  own request out of the stream and sends the backend the acknowledgement
+  itself, so this works the same for every client and translator. Until then
+  the backend ignores clicks, the player's real ones included, so Rift
+  acknowledges at once.
+- Rift never has more than one request on its way, counted until the answer
+  and, for a rejection, its acknowledgement. Further clicks meanwhile cause
+  one more request afterwards, so a player who clicks fast costs the backend
+  at most a few inventory packets a second.
 - Rift keeps no copy of the player's inventory and parses no item for this.
   The picture is repaired from the only place that knows the truth.
 - The repair takes one round trip to the backend. For that moment the player
   sees their own item where they dragged it.
 
+**Single-slot updates while a menu is open.** While another container is
+open, clients up to 1.21.1 apply a `container_set_slot` for container 0 only
+to the hotbar. Two things follow:
+
+- A backend that changes the player's inventory while a Rift menu is open,
+  for example a plugin that gives an item, sends one slot at a time, and such
+  a client drops the update. Rift notes that it passed one on and asks for
+  the inventory once more when the menu closes.
+- A 1.17 backend answers the request slot by slot. Rift asks a 1.17 backend
+  when the menu closes, not while it is open. Until then the inventory rows
+  of that player can show what they dragged.
+
 What this costs: the backend sees a harmless click on the player's own
-inventory. On Paper that fires an `InventoryClickEvent` with the action
-`NOTHING`. A backend that does not answer leaves the inventory rows wrong
-until its next inventory update. No item is ever at risk, because the
-backend's inventory never changed. Step 2 of the [plan](#plan) tests every
-server in `tests/servers.json` (vanilla, Paper, Spigot, Pumpkin) for this,
-and [decision 1](#1-how-the-inventory-rows-are-repaired) says what follows
-from each result.
+inventory. On Paper and Spigot that is expected to fire an
+`InventoryClickEvent` with the action `NOTHING`; Pumpkin fires its own click
+event. Some Paper and Spigot versions also send one extra update for the
+empty crafting result slot. A backend that does not answer leaves the
+inventory rows wrong until its next inventory update. No item is ever at
+risk, because the backend's inventory never changed.
+[Decision 1](#1-how-the-inventory-rows-are-repaired) says what follows from
+the test results.
 
 ### The anvil
 
-- The client lets the player type only while the left slot holds an item,
-  and starts the text field with that item's name. Rift puts the left button
-  there with `text` as its name.
-- Each keystroke makes the client compute a result (the left item, renamed)
-  and a cost of 1 level by itself, and send the new text. Rift remembers the
-  text, sends the result slot and a cost of 0 again, and reports a `text`
-  event if the menu asked for it.
-- A click on the result slot is an ordinary click. If the client believed the
-  player could afford the rename, it also took a level off the experience bar
-  on its own. Rift re-sends the last `set_experience` it saw from the backend
-  after every result click. That packet has three fixed fields, so
-  remembering it costs nothing.
+- The client lets the player type only while the left slot holds an item. It
+  starts the text field with that item's name and fills it again whenever
+  that item changes. Rift puts the left button there with `text` as its name
+  and does not send that slot again while the player types.
+- The client sends the text when it changes and when the left slot is set:
+  the `rename_item` packet from 1.13, the `MC|ItemName` plugin message on
+  1.12, which sends it on every key. Rift ignores a text it already has.
+  Clients from 1.13 to 1.19.4 do not send an empty text, so there an emptied
+  field is reported with its last character.
+- Each change makes the client compute a result (the left item, renamed) and
+  a cost of at least 1 level by itself. Rift remembers the text, sends the
+  result slot and a cost of 0 again, and reports a `text` event if the menu
+  asked for it. A cost of 0 hides the "Enchantment cost" line and stops the
+  client from taking the result on its own.
+- The result slot is never empty. From 1.14 the client draws a red cross
+  over the arrow when it is.
+- A click on the result slot is always sent. Only a click that races a
+  keystroke finds a cost above 0. The client then takes the cost off the
+  shown levels and empties the input slots on its own, so after every result
+  click Rift re-sends the three slots, the cost and the last
+  `set_experience` it saw from the backend. That packet has three fixed
+  fields, so remembering it costs nothing.
+- On 1.12 the anvil is announced with 0 slots. With any other number the
+  client shows a chest. Clients on 1.12 and 1.13 always title the screen
+  "Repair & Name".
 
 ### What ends a menu
 
@@ -694,8 +755,8 @@ connection. It needs no second item encoder.
 - A malformed click or rename closes the session, as for dialogs and as
   vanilla does.
 - A menu costs a session nothing until one opens: the only state kept for
-  every player is the backend's open container ID, its last state ID and its
-  last `set_experience`.
+  every player is the backend's open container ID and its last
+  `set_experience`.
 
 ## Code changes
 
@@ -716,10 +777,8 @@ Each step is a commit series on the branch with its tests. The branch merges
 when all are done.
 
 1. **Design** (this page), and the owner's [decisions](#decisions).
-2. **Check the ground.** Verify every item under [to verify](#to-verify)
-   against the game's code for each protocol. Add the inventory request to
-   the test harness and run it against every server in `tests/servers.json`.
-   Update this page with what was found.
+2. **Check the ground.** Done: [what was checked](#what-was-checked). The
+   probe for the inventory request is `tests/menus_probe.py`.
 3. **Items.** The stack entry point in `rift-translation`, buttons to stacks,
    text defaults, heads, the cache. Tests compare the bytes for every protocol
    with stacks from real servers.
@@ -765,7 +824,7 @@ Step 2 of the [plan](#plan) settles what happens next:
 
 | Step 2 finds | Then |
 | --- | --- |
-| Vanilla, Paper, Spigot and Pumpkin all answer | Nothing else is built |
+| Vanilla, Paper, Spigot and Pumpkin all answer | Nothing else is built. **This is what step 2 found**, for [26 servers](#what-was-checked) |
 | Only Pumpkin or a 1.17 backend does not answer | Those are documented: the inventory rows may stay wrong until the backend's next inventory update |
 | Vanilla or Paper does not answer, or the round trip is plainly visible in play | Rift also keeps a copy and corrects it by asking |
 
@@ -778,7 +837,7 @@ Step 2 of the [plan](#plan) settles what happens next:
 - Every plugin moves to `api = "0.3"` and every WebAssembly component is
   rebuilt, without a change to its source.
 - Turned down: **a separate optional interface in 0.2.1**, which would have
-  kept 0.2.0 components loading at the price of hooks in two interfaces and
+  kept 0.2 components loading at the price of hooks in two interfaces and
   one export the host looks up by hand. **Holding the WebAssembly side
   back** until 0.3 was due for other reasons.
 
@@ -840,43 +899,70 @@ loads only `api = "0.3"` plugins.
   two sets of host bindings, and **accepting `api = "0.2"` for Lua
   plugins**, which would make `api` mean different things per engine.
 
-## To verify
+## What was checked
 
-This design relies on the following behavior. It is written from knowledge of
-the game's code, not from a check of every version. Step 2 confirms each
-against Mojang's mappings, for every protocol where it could differ, before
-anything is built on it.
+Step 2 of the [plan](#plan) checked the behavior this design relies on in two
+ways, on 2026-11-20. The sections above already say what was found.
 
-Client:
+### Servers, by experiment
 
-- A menu opened without contents shows the player's own inventory in the
-  lower rows.
-- Contents for container 0 are applied while another container is open.
-- `container_close` from the server closes whatever is open, whatever ID it
-  names.
-- `open_screen` with the ID of the open container changes the title in
-  place.
-- The anvil: typing needs an item in the left slot; the field starts with
-  that item's name; result and cost are recomputed locally per keystroke; a
-  click on the result is sent even when the player cannot afford it; a click
-  the client thinks is affordable lowers the shown level.
-- The anvil's text limit: 50 from 1.17, 35 before.
-- The middle click is sent only in creative mode on newer clients, and the F
-  key over a slot from 1.16.
+`tests/menus_probe.py` joins a real server as a scripted client, without
+Rift, and sends the [inventory request](#the-inventory-rows). It ran against
+26 servers:
 
-Server:
+| Software | Versions |
+| --- | --- |
+| Vanilla | 1.12.2, 1.13.2, 1.14.4, 1.15.2, 1.16.5, 1.17, 1.17.1, 1.18.2, 1.19.4, 1.20.4, 1.20.6, 1.21.1, 1.21.4, 1.21.5, 1.21.11, 26.3 |
+| Paper | 1.12.2, 1.16.5, 1.17.1, 1.21.11, 26.3 |
+| Spigot | 1.12.2, 1.16.5, 1.21.11, 26.3 |
+| Pumpkin | 0.2.0 for 26.3 |
 
-- Vanilla numbers containers 1 to 100.
-- A click on slot −1 does nothing in every version, whatever the cursor
-  holds.
-- 1.17.1 and newer: a click with an unexpected state ID makes the server
-  send the whole container.
-- 1.16.5 and older: a click whose claimed result differs is rejected and the
-  whole container sent.
-- What a 1.17 server does, and whether there is a request that works there.
-- Paper, Spigot and Pumpkin answer as vanilla does.
-- The translator's handling of a rejection from a 1.16.5 backend for a 1.17
-  or newer client.
+- Every server sent the whole inventory and the cursor back for every
+  request, with and without an item on the cursor.
+- No request changed the inventory or the cursor. This was compared in the
+  inventory the server reported, in a second request, and in the server's own
+  view (`clear` counts, and `data get` from 1.13) where the server has one.
+- 50 requests in 10 seconds were all answered, and no server warned or
+  kicked. Of 20 requests within one second all were answered, except where a
+  request overtook the acknowledgement of the one before on a 1.12.2 server.
+  That is the rule about acknowledgements, not a rate limit.
+- A state ID of −1 always works from 1.17.1, so Rift does not follow the
+  backend's state IDs.
+- A click outside the window (slot −999) dropped the stack on the cursor on
+  every server. A click between the slots (slot −1) kept it.
+
+### Client and server code, by reading
+
+Mojang's client and server were read for 1.12.2, 1.13.2, 1.14.4, 1.16,
+1.16.5, 1.17, 1.17.1, 1.18.2, 1.19.4, 1.20.4, 1.21.1, 1.21.2, 1.21.4, 1.21.5
+and 26.3, and Pumpkin at the commit `tests/servers.json` pins. 1.12.2 and
+1.13.2 have no official names for their code, so those answers rest on
+community names.
+
+| Question | Answer |
+| --- | --- |
+| A menu opens over another screen | The client replaces it and sends no close. The mouse stays where it is. What the player held on the cursor is dropped on the client's side only; up to 1.17 the client also swings its arm |
+| A menu that got no contents | Its own slots are empty. The inventory rows are the player's real inventory |
+| `open_screen` with the ID of the open menu | The client builds the menu anew: empty slots, empty cursor, a new anvil text field. No packet changes a title in place |
+| Contents for container 0 while a menu is open | `container_set_content` is always applied. `container_set_slot` is applied only for the hotbar up to 1.21.1, and for every slot from 1.21.2 |
+| Emptying the cursor | `container_set_slot` for container −1 up to 1.21.1; `set_cursor_item` from 1.21.2, where the older form is ignored |
+| `container_close` from the server | Closes whatever screen is open, whatever ID it names. The client sends nothing back |
+| Container IDs | Vanilla servers use 1 to 100. 101 to 127 fit every layout; 128 and above would be negative in the click and `container_set_slot` up to 1.21.1 |
+| Clicks | Always sent, after the client applied them to its own copy. The packet names an action number and the clicked stack up to 1.16.5, the changed slots and the cursor from 1.17, a state ID from 1.17.1, and hashes of stacks from 1.21.5 |
+| The state ID in a click | The one of the last slot or contents packet the client got for that container; 0 for a menu that got none |
+| Transactions up to 1.16.5 | The client never waits for one. It acknowledges a rejection for container 0 or the open container by itself |
+| Middle click | Sent in every game mode up to 1.17.1, only in creative mode from 1.18 |
+| F over a slot | Sent from 1.16 |
+| The anvil | As [described](#the-anvil). The client allows 35 characters up to 1.16.5 and 50 from 1.17 |
+
+### Not checked
+
+- The event Paper and Spigot fire for the request. It would need a plugin on
+  the backend.
+- Shift-clicks in a hopper and a dispenser, which are assumed to move items
+  as in a chest.
+- The request in game modes other than survival.
+- Real clients. Step 8 runs them.
 
 ## Later
 
