@@ -576,7 +576,7 @@ async fn a_single_slot_update_during_a_menu_is_asked_for_again_on_old_clients() 
 }
 
 #[tokio::test]
-async fn creative_slots_are_dropped_while_a_menu_is_open() {
+async fn creative_slots_are_dropped_while_a_menu_is_open_and_just_after_rift_closed_it() {
     timeout(Duration::from_secs(5), async {
         let protocol = 774;
         let (mut session, mut client, mut backend) = menu_session(protocol).await;
@@ -585,7 +585,24 @@ async fn creative_slots_are_dropped_while_a_menu_is_open() {
         send(&mut client, &creative).await;
         assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
         nothing(&mut backend).await;
+        // Rift closed the menu: one the client sent before it knew is
+        // still dropped.
         session.close_menu(&owner(), None).await.unwrap();
+        send(&mut client, &creative).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        nothing(&mut backend).await;
+        // A second later the player's own creative actions pass again.
+        session.menus.rift_ended = Some(std::time::Instant::now() - menus::CREATIVE_GRACE);
+        send(&mut client, &creative).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut backend).await, creative);
+        // The player closed it themselves: no grace is needed.
+        drain(&mut client).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        let close = packets::client_close(version(protocol), FIRST + 1).unwrap();
+        send(&mut client, &close).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert!(!session.menu_open());
         send(&mut client, &creative).await;
         session.forward().await.unwrap();
         assert_eq!(next(&mut backend).await, creative);

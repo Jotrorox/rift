@@ -30,7 +30,7 @@ fewer packets.
 | Click | The slots the click could have changed, again, and an empty cursor | `container_click` |
 | Anvil text | The result slot and a cost of 0 (`container_set_data`, property 0) after each rename | `rename_item`; the `MC\|ItemName` plugin message on 1.12 |
 | Close | `container_close` when Rift closes the menu | `container_close` when the player does |
-| Other | | `container_button_click` and `container_slot_state_changed` for Rift's container; `set_creative_mode_slot` while a menu is open, on every version |
+| Other | | `container_button_click` and `container_slot_state_changed` for Rift's container; `set_creative_mode_slot` while a menu is open and for a second after Rift closed it, on every version |
 
 Packet IDs come from the translation crate's per-protocol tables, and the
 bodies from its window and screen codecs (`codec/item/window.rs`,
@@ -122,7 +122,12 @@ the picture back, because nothing really moved.
 - **Creative mode.** A client in creative mode can ask the server to create
   the item it drops or picks (`set_creative_mode_slot`). Rift drops that
   packet while one of its menus is open, so a button never becomes a real
-  item.
+  item. When Rift ends the menu itself (a `close` button, `close_menu`,
+  another screen, a switch), the client learns of it one round trip later
+  and may have sent one for a button meanwhile, so Rift keeps dropping the
+  packet for one second. A creative player who really drops or takes an
+  item in that second loses that one action. After the player closed the
+  menu themselves the packet passes at once.
 
 ## The inventory request
 

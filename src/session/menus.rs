@@ -51,6 +51,12 @@ pub(super) const REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 /// The shortest time between two `text` events of an anvil.
 const TEXT_EVENT_INTERVAL: Duration =
     Duration::from_millis(1000 / menu::TEXT_EVENTS_PER_SECOND as u64);
+/// How long after Rift ended a menu on its own (not the player) a
+/// `set_creative_mode_slot` is still dropped. The client learns of the end
+/// one round trip later and may meanwhile have sent one for a button, which
+/// the backend would create as a real item. A creative player who really
+/// drops or takes an item in that second loses that one action.
+pub(super) const CREATIVE_GRACE: Duration = Duration::from_secs(1);
 /// Rift's container IDs, 101 to 127.
 const CONTAINERS: usize = (packets::LAST_CONTAINER - packets::FIRST_CONTAINER + 1) as usize;
 
@@ -244,6 +250,9 @@ pub(crate) struct Menus {
     late_anvil: bool,
     /// Ends of menus, waiting for the session's owner to deliver them.
     closed: VecDeque<Delivery>,
+    /// When Rift last ended a menu for another reason than the player
+    /// closing it, for [`CREATIVE_GRACE`].
+    pub(super) rift_ended: Option<Instant>,
     /// Events handed out and not yet delivered to their plugin.
     undelivered: Arc<AtomicUsize>,
 }
@@ -344,6 +353,9 @@ impl Menus {
         };
         if let Some(client) = client {
             client.inject(&packets::close(version, open.container)?)?;
+        }
+        if reason != CloseReason::Player {
+            self.rift_ended = Some(Instant::now());
         }
         let event = MenuEvent::close(&open.menu, reason);
         let delivery = self.delivery(open.owner, event);
@@ -840,8 +852,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         let Some(ids) = self.menus.ids(version) else {
             return Ok(None);
         };
-        // A client in creative mode would create the item it drops.
-        if self.menus.open.is_some() && packets::creative(&ids, packet) {
+        // A client in creative mode would create the item it drops, also
+        // just after Rift closed the menu, before the client knew.
+        let grace = self
+            .menus
+            .rift_ended
+            .is_some_and(|ended| ended.elapsed() < CREATIVE_GRACE);
+        if (self.menus.open.is_some() || grace) && packets::creative(&ids, packet) {
             return Ok(Some(SessionEvent::Packet));
         }
         // An anvil's text names no container: while Rift's anvil is open,
