@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Ask real servers to send a player's inventory again, without changing it.
 
-Inventory menus (docs/menus.md, "The inventory rows") rely on one request:
-after the player disturbed their own inventory rows on the client while a
-Rift menu was open, Rift sends the backend a click that does nothing, and the
+Inventory menus (docs/menus-internals.md, "The inventory request") rely on
+one request: after the player disturbed their own inventory rows on the
+client while a Rift menu was open, Rift sends the backend a click that does nothing, and the
 backend answers with the player's whole inventory. This probe starts pinned
 servers from tests/servers.json, joins each one directly as a scripted client
 in the server's own protocol (no Rift in between), and measures what the

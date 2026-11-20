@@ -84,7 +84,7 @@ CROSS = [("26.3", "1.12.2"), ("26.3", "1.20.4")]  # (backend, client)
 WORLD_SECONDS = 4  # in the world before the first menu
 STEP_SECONDS = 2.5  # between steps
 HOLD_SECONDS = 10  # the last menu stays open
-RIFT_FIRST = 101  # Rift's container IDs are 101-127 (docs/menus.md)
+RIFT_FIRST = 101  # Rift's container IDs are 101-127 (docs/menus-internals.md)
 
 # Anything in the client's log that a menu could have caused. Unknown warnings
 # (real_client.py reports them for triage only) are failures here when they

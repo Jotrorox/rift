@@ -1,4 +1,4 @@
-//! Inventory menus in a session (docs/menus.md, "How the proxy does it").
+//! Inventory menus in a session (docs/menus-internals.md).
 //!
 //! Rift writes a menu's packets to the client itself, in the client's
 //! protocol, and takes the client's packets for its container out of the

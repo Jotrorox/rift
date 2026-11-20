@@ -2,7 +2,7 @@
 //! show its own container screens, the client packets for them that Rift
 //! takes out of the stream, the backend packets that end them, and the
 //! request that makes a backend send the player's inventory again. See
-//! docs/menus.md, "How the proxy does it".
+//! docs/menus-internals.md.
 //!
 //! Packet IDs come from the translation crate's per-protocol tables, and
 //! the bodies from its window codecs where it has them. Menu packets are
@@ -509,8 +509,8 @@ pub(crate) fn backend_packet(ids: &Ids, packet: &Packet) -> Option<BackendPacket
     })
 }
 
-/// How a backend is asked for the player's inventory (docs/menus.md, "The
-/// inventory rows").
+/// How a backend is asked for the player's inventory
+/// (docs/menus-internals.md, "The inventory request").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Recipe {
     /// 1.17.1 and newer: a click with a state ID no server expects. One
