@@ -76,6 +76,7 @@ with exactly one of the fields the callback permits.
 | `after_transfer(ctx)` | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 | `dialog(ctx)` | `server`, `action`, `values`, `payload` ([dialogs](dialogs.md)) | `nil` |
+| `menu(ctx)` | `server`, `menu`, `kind`, `action`, `slot`, `click`, `key`, `payload`, `text`, `reason`, `state` ([inventory menus](menus.md#events)) | `nil` |
 | `chat(ctx)` | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason. With signed chat, the first deny costs that player their chat signing; see [chat](plugin-events.md#chat) |
 | `kick(ctx)` | `server` (the backend that kicked), `reason` (its kick text without formatting). The player is still connected to Rift, on a [network](operations.md#run-a-maintenance-window) session | `{ server = "name" }` moves the player there (a group picks an instance), `{ deny = "reason" }` disconnects them with that text; `nil` applies `network.on_kick` |
 

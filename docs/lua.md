@@ -131,7 +131,7 @@ end)
 | --- | --- |
 | `route`, `http`, `message` | `on_route`, `on_http`, `on_message` |
 | `status` | [`on_status`](server-list.md#server-list) |
-| `login`, `initial_server`, `join`, `disconnect`, `before_transfer`, `after_transfer`, `dialog`, `kick` | The [callbacks in `rift.lua`](extensions.md#callbacks-and-decisions) |
+| `login`, `initial_server`, `join`, `disconnect`, `before_transfer`, `after_transfer`, `dialog`, `menu`, `kick` | The [callbacks in `rift.lua`](extensions.md#callbacks-and-decisions) |
 
 - Handlers run in registration order, after a directly configured callback.
 - For every event except `message`, the first non-nil result ends the chain

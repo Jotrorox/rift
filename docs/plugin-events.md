@@ -30,6 +30,7 @@ is queued for the plugin and has no answer.
 | `timer` | A tick of a timer the plugin started | none | observer | – |
 | `event` | A `rift.events.*` publication | none | observer | – |
 | `dialog` | A click on a plugin action of a [dialog](dialogs.md) the plugin showed | none | observer | – |
+| `menu` | A click, anvil text or the end of an [inventory menu](menus.md) the plugin showed ([fields](menus.md#events)) | none | observer | – |
 | `job_done` | A [background job](#background-work) the plugin started finished | none | observer | – |
 | `init`, `reload`, `shutdown` | [Lifecycle](plugin-operations.md) | registration / ok / none | 30 s / 5 s / 10 s | init fails the plugin; reload keeps the old configuration |
 | `work_init`, `work` | Background workers only | ok / the job's result | 30 s / 30 s (`deadlines.work`) | the job fails; `job_done` reports why |
@@ -48,8 +49,8 @@ the rest, so unused events cost nothing.
 
 - **An empty `registration.hooks` list delivers every event except `chat` and
   `kick`**, which a plugin always lists itself.
-- `dialog` and `job_done` need no entry: they go to the plugin that showed the
-  dialog or started the job.
+- `dialog`, `menu` and `job_done` need no entry: they go to the plugin that
+  showed the dialog or menu or started the job.
 - The Lua engine computes the list from `rift.on`, `rift.command`, timers and
   subscriptions.
 
@@ -281,6 +282,7 @@ persistent plugins in `rift.plugin()` order, then the bus responder in
 | `event` | Every plugin that registered it | – |
 | `message`, `timer` | Only the plugin that made the subscription or timer | – |
 | `dialog` | Whoever showed the dialog: the script or one plugin | – |
+| `menu` | Whoever showed the menu: the script or one plugin | – |
 | `job_done` | The plugin that started the job | – |
 
 ## Commands

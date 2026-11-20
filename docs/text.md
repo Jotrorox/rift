@@ -7,7 +7,7 @@ to 26.3.
 
 Every surface takes plain text or a styled component: messages, action bars,
 titles, tab lists, boss bars, kicks, denials, command replies, suggestion
-tooltips, dialogs, the MOTD, the version name and the hover lines of the
+tooltips, dialogs, menu titles and buttons, the MOTD, the version name and the hover lines of the
 server list. Rift itself parses, validates and renders the text, so Lua, the
 WebAssembly SDKs, the message bus and the configuration cannot disagree.
 
@@ -435,7 +435,7 @@ reports: the one set with `players.set-language`, else the client's locale
 
 | Where the text goes | Language |
 | --- | --- |
-| `players.message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `kick`, `dialog` | The target's |
+| `players.message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `kick`, `dialog`, `menu`, `update-menu` | The target's |
 | `players.broadcast` | Each recipient's own. Rift renders once per language in use |
 | A decision (`deny`, `message`), a suggestion's tooltip | The player the event is about (`ctx.language`) |
 | A deferred answer (`background.resolve`) | The player the deferred event is about |

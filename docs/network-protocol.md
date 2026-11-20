@@ -1,7 +1,7 @@
 # Network protocol
 
 How Rift speaks the Minecraft Java protocol: supported releases, login,
-forwarding, server switching, commands, compression and dialogs. Read it when
+forwarding, server switching, commands, compression, dialogs and menus. Read it when
 you debug a protocol problem or work on `src/protocol/`.
 
 | Feature | Versions |
@@ -322,6 +322,25 @@ Routing:
   configuration, which closes every screen.
 - Dialogs reach the client only in play. Clicks drained during a server switch
   are dropped like commands.
+
+## Menus
+
+On 1.12+ (protocols 335 to 777) Rift shows [inventory menus](menus.md) for
+plugins: chest, hopper, dispenser and anvil screens it writes to the client
+in the client's protocol, whatever the backend runs. Rift's containers have
+the IDs 101 to 127, above the 1 to 100 vanilla servers use. The client's
+packets for them (`container_click`, `container_close`,
+`container_button_click`, `container_slot_state_changed`, the anvil's
+`rename_item` or, on 1.12, the `MC|ItemName` plugin message) and
+`set_creative_mode_slot` while a menu is open never reach a backend. When a
+click disturbs the player's inventory rows on the client, Rift asks the
+backend to send the inventory again with a click on container 0 that changes
+nothing, written in the backend's protocol past the translator; up to 1.16.5
+Rift acknowledges the backend's rejection of that click itself.
+
+The packets per protocol, container and state IDs, the inventory request per
+backend version and how menus were tested are in
+[how menus work](menus-internals.md).
 
 ## Tests
 

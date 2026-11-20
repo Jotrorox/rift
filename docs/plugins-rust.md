@@ -129,6 +129,7 @@ example and the host's conformance fixture.
 | `result<T, string>` | `Result<T, String>` with the host's message. |
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
 | `players.dialog`, `dialog` hook | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No hook entry needed. |
+| `players.menu`, `menu` hook | [Menus](menus.md#from-rust-go-and-c): `players::show_menu(target, &Menu)` (or `players::menu` with JSON text), `players::update_menu(target, id, &MenuPatch)` (or `update_menu_json`) and `players::close_menu(target, Some(id))`, where `None` closes whatever menu is open. The `menu` module builds menus, buttons and patches. Events reach `Plugin::menu(MenuEvent)`: `kind()` is a `MenuKind` (`Click { action, slot, click, key }`, `Text { text }`, `Close { reason }` or `Other`), and `payload::<T>()` and `state::<T>()` decode the JSON. No hook entry needed. |
 | anything else | `rift_plugin::bindings` holds the generated bindings. |
 
 ## Text

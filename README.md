@@ -32,6 +32,8 @@ Running Rift needs no Java and no separate Lua installation.
   `<gradient:gold:red>Welcome</gradient>` in every text a player sees, and
   Rift's and plugins' messages in each player's language.
 - **[Dialogs](docs/dialogs.md):** 1.21.6+ screens with inputs and buttons.
+- **[Inventory menus](docs/menus.md):** chest, hopper, dispenser and anvil
+  screens with item buttons, shown by plugins on every client from 1.12.
 - **[Clustering](docs/clustering.md):** several proxies that all accept
   players, with one player list, a shared bus and replicated state, and no
   external database.
@@ -166,10 +168,10 @@ archive also includes for offline use.
 | **Operate** | [Day-to-day operations](docs/operations.md) · [Admin CLI](docs/admin.md) · [Deployment](docs/deployment.md) · [SQLite, PostgreSQL or MariaDB](docs/database.md) · [Monitoring and logs](docs/monitoring.md) · [Hardening](docs/hardening.md) · [Upgrade and rollback](docs/upgrading.md) · [Clustering](docs/clustering.md) |
 | **Servers** | [Managed servers](docs/managed-servers.md) · [Service groups and scaling](docs/service-groups.md) · [Templates and software](docs/templates.md) · [Servers that outlive the proxy](docs/kept-servers.md) · [Isolation and memory limits](docs/server-limits.md) · [Bus logins for servers](docs/bus-logins.md) · [Multiple hosts](docs/nodes.md) |
 | **Web** | [Web dashboard](docs/http.md) · [Status page](docs/status-page.md) · [HTTP API](docs/http-api.md) · [Lua endpoints](docs/http-lua.md) |
-| **Plugins** | [Plugins](docs/plugins.md) · [Events and commands](docs/plugin-events.md) · [Running plugins](docs/plugin-operations.md) · [Hooks in rift.lua](docs/extensions.md) · [Remote decisions](docs/remote-decisions.md) · [Server queues](docs/queues.md) · [Host services](docs/host-services.md) · [Online players API](docs/players-api.md) · [Dialogs](docs/dialogs.md) · [Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md) and [Go](docs/plugins-go.md) plugins |
+| **Plugins** | [Plugins](docs/plugins.md) · [Events and commands](docs/plugin-events.md) · [Running plugins](docs/plugin-operations.md) · [Hooks in rift.lua](docs/extensions.md) · [Remote decisions](docs/remote-decisions.md) · [Server queues](docs/queues.md) · [Host services](docs/host-services.md) · [Online players API](docs/players-api.md) · [Dialogs](docs/dialogs.md) · [Inventory menus](docs/menus.md) · [Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md) and [Go](docs/plugins-go.md) plugins |
 | **Messaging** | [Messaging](docs/messaging.md) · [Built-in subjects](docs/messaging-subjects.md) · [Messaging from Lua](docs/messaging-lua.md) · [Network API for Java](docs/network-java.md) · [Messaging protocol](docs/messaging-protocol.md) |
 | **Permissions** | [Permissions](docs/permissions.md) · [Commands](docs/permissions-commands.md) · [Lua](docs/permissions-lua.md) · [HTTP API](docs/permissions-http.md) · [RiftPerms for Paper](docs/riftperms.md) · [Java API](docs/permissions-java.md) · [Pumpkin](docs/permissions-pumpkin.md) · [Rust and C clients](docs/permissions-clients.md) · [Protocol](docs/permissions-protocol.md) |
-| **Reference** | [Network protocol](docs/network-protocol.md) · [How translation works](docs/translation-internals.md) · [How clustering works](docs/clustering-internals.md) · [Stability and versioning](docs/stability.md) · [Performance](docs/performance.md) |
+| **Reference** | [Network protocol](docs/network-protocol.md) · [How translation works](docs/translation-internals.md) · [How clustering works](docs/clustering-internals.md) · [How menus work](docs/menus-internals.md) · [Stability and versioning](docs/stability.md) · [Performance](docs/performance.md) |
 
 ## Development
 
