@@ -23,6 +23,18 @@ scripted client in the client's own protocol, and checks with PASS/FAIL:
     backend     nothing reaches the backend: a late click for a closed menu is
                 dropped, a single-slot update while a menu is open is repaired
                 when it closes
+    redraw      showing the open menu's id again: two changed slots send
+                exactly two container_set_slot with one rising state ID; the
+                unchanged definition sends nothing; a new title open_screen
+                with the same container ID and every slot; new rows a new
+                container ID; never a close event; clicks carry the new state
+    update_menu slots (one emptied), keys, title and state; nothing sent for
+                a closed menu, an unknown id or another plugin's call
+    pages       the paged list of the design, page in state, payloads
+    stale_click from 1.17.1 a click naming the state before an action changed
+                is undone and not reported, a close button does not close;
+                a slot that only looks different still reports
+    redraw_burst 20 clicks in a second on a button that redraws its menu
     endings     player, plugin (close button and close_menu), replaced,
                 server (death), switch (rift.players.transfer to a second
                 backend) and disconnect (seen by a second player), exactly one
@@ -52,9 +64,10 @@ tests/matrix_fixtures.py) in ~/.cache/rift-via; at most RIFT_VIA_MAX_SERVERS
 (here 2 by default) servers run at once. Each pair's client packet log, Rift
 log, server log and result.json go under --out.
 
-Checks for what later steps of docs/menus.md add (redraws that send only the
-difference, update_menu, the stale-click rule, anvils) are steps in
-OPTIONAL; --with NAME,... turns them on once the binary has them.
+--only NAME,... runs only some steps. Steps for what the binary may not have
+yet (anvils) are in OPTIONAL; --with NAME,... turns them on. Both modes also
+load a second persistent plugin, `othertest`, that tries to patch and close
+the test's menus by id; --mode plugin needs the web interface for both.
 """
 
 import argparse
@@ -410,14 +423,57 @@ MENUS = {
     "dispenser": ("dispenser", None, "Rift test dispenser", {4: ("gold_ingot", 2, "Gold", [])}),
 }
 SLOT_COUNT = {"chest": None, "hopper": 5, "dispenser": 9}
+GLASS_SLOT = ("glass_pane", 1, None, [])
+# The "live" chest's '#' slots in 3 rows, and its buttons.
+LIVE_GLASS = list(range(0, 10)) + list(range(17, 27))
+LIVE_A, LIVE_B, LIVE_C, LIVE_D = 10, 12, 14, 16
+
+
+def live_spec(variant):
+    """What the Lua function live(variant) shows, as MENUS describes a menu."""
+    rows = 4 if variant == "live_rows" else 3
+    slots = {slot: GLASS_SLOT for slot in list(range(0, 10)) + list(range(17, rows * 9))}
+    slots.update({LIVE_A: ("emerald", 1, "Alpha", []), LIVE_B: ("stone", 1, "Bravo", []),
+                  LIVE_C: ("compass", 1, "Charlie", []), LIVE_D: ("barrier", 1, "Close", [])})
+    title = "Live menu"
+    if variant != "live":
+        slots[LIVE_A] = ("emerald", 1, "Alpha two", [])
+        slots[LIVE_B] = ("diamond", 1, "Bravo two", [])
+    if variant == "live_stale":
+        slots[LIVE_B] = ("stone", 1, "Bravo", [])
+        slots[LIVE_C] = ("barrier", 1, "Close now", [])
+    if variant in ("live_title", "live_rows"):
+        title = "Live menu renamed"
+    return ("chest", rows, title, slots)
+
+
+KITS = [["k1a", "k1b", "k1c"], ["k2a", "k2b"], ["k3a"]]
+KITS_BACK, KITS_NEXT = 45, 53
+
+
+def kits_spec(page):
+    slots = {index: ("chest", 1, f"Kit {kit}", []) for index, kit in enumerate(KITS[page - 1])}
+    slots[KITS_BACK] = ("arrow", 1, "Back", [])
+    slots[KITS_NEXT] = ("arrow", 1, "Next", [])
+    return ("chest", 6, f"Kits, page {page}", slots)
+
+
+COUNTER_SLOT = 13
+COUNTER = ("chest", 3, "Counter", {COUNTER_SLOT: ("clock", 1, "Count 0", [])})
 
 # The menus, the event report and the menu handlers: the same Lua in rift.lua
 # (script mode) and in a persistent Lua plugin (plugin mode).
 MENUS_LUA = r'''
 local function s(v) if v == nil then return "nil" end return tostring(v) end
 local function enc(v)
-    if type(v) == "table" then return s(v.tag) .. ":" .. s(v.n) end
-    return s(v)
+    if type(v) ~= "table" then return s(v) end
+    if v.tag ~= nil then return s(v.tag) .. ":" .. s(v.n) end
+    -- Other tables: key:value pairs sorted by key, without spaces.
+    local keys, parts = {}, {}
+    for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+    table.sort(keys)
+    for _, k in ipairs(keys) do parts[#parts + 1] = k .. ":" .. s(v[k]) end
+    return table.concat(parts, ",")
 end
 
 -- Every event, every field, to every player: the clients read it as chat.
@@ -469,6 +525,93 @@ rift.menus.on("chest", {
         switch = function(ctx) @TRANSFER@ end,
     },
 })
+
+-- "live": a chest that is redrawn and patched. Variants of one definition.
+local function live(variant)
+    local rows = { "#########", "#a b c d#", "#########" }
+    local keys = {
+        ["#"] = GLASS,
+        a = { item = "emerald", name = "Alpha", id = "a", payload = { tag = "a", n = 1 } },
+        b = { item = "stone", name = "Bravo", id = "b", payload = { tag = "b", n = 1 } },
+        c = { item = "compass", name = "Charlie", id = "c", payload = { tag = "c", n = 1 } },
+        d = { item = "barrier", name = "Close", close = true },
+    }
+    local menu = { id = "live", title = "Live menu", layout = rows, keys = keys, state = { tag = "st-live", n = 0 } }
+    if variant ~= "live" then
+        -- Slot 10 only looks different; slot 12 looks different and does something else.
+        keys.a = { item = "emerald", name = "Alpha two", id = "a", payload = { tag = "a", n = 1 } }
+        keys.b = { item = "diamond", name = "Bravo two", id = "b2", payload = { tag = "b2", n = 2 } }
+        menu.state = { tag = "st-live", n = 1 }
+    end
+    if variant == "live_stale" then
+        -- Slot 12 only does something else; slot 14 becomes a close button.
+        keys.b = { item = "stone", name = "Bravo", id = "b2", payload = { tag = "b2", n = 2 } }
+        keys.c = { item = "barrier", name = "Close now", close = true }
+    end
+    if variant == "live_title" or variant == "live_rows" then
+        menu.title = "Live menu renamed"
+        menu.state = { tag = "st-live", n = 2 }
+    end
+    if variant == "live_rows" then
+        menu.layout = { rows[1], rows[2], rows[3], "#########" }
+        menu.state = { tag = "st-live", n = 3 }
+    end
+    return menu
+end
+
+-- The paged list of docs/menus.md ("State and payloads").
+local KITS = { { "k1a", "k1b", "k1c" }, { "k2a", "k2b" }, { "k3a" } }
+local function kits(player, page)
+    local buttons = {}
+    for i, kit in ipairs(KITS[page] or {}) do
+        buttons[#buttons + 1] = { slot = i - 1, item = "chest", name = "Kit " .. kit, id = "kit", payload = { kit = kit } }
+    end
+    buttons[#buttons + 1] = { slot = 45, item = "arrow", name = "Back", id = "page", payload = { step = -1 } }
+    buttons[#buttons + 1] = { slot = 53, item = "arrow", name = "Next", id = "page", payload = { step = 1 } }
+    return rift.players.menu(player, {
+        id = "kits", rows = 6, title = "Kits, page " .. page, slots = buttons, state = { page = page },
+    })
+end
+rift.menus.on("kits", {
+    click = { page = function(ctx) kits(ctx.uuid, ctx.state.page + ctx.payload.step) end },
+})
+
+-- A counter that redraws itself from its click handler.
+local function counter(player, n)
+    return rift.players.menu(player, {
+        id = "counter", rows = 3, title = "Counter", state = { tag = "count", n = n },
+        slots = { { slot = 13, item = "clock", name = "Count " .. n, id = "inc" } },
+    })
+end
+rift.menus.on("counter", {
+    click = { inc = function(ctx) counter(ctx.uuid, ctx.state.n + 1) end },
+})
+
+-- What the test asks for by name: a command (script mode) or the http hook (plugin mode).
+local ACTIONS = {
+    live = function(p) return rift.players.menu(p, live("live")) end,
+    live_two = function(p) return rift.players.menu(p, live("live_two")) end,
+    live_title = function(p) return rift.players.menu(p, live("live_title")) end,
+    live_rows = function(p) return rift.players.menu(p, live("live_rows")) end,
+    live_stale = function(p) return rift.players.menu(p, live("live_stale")) end,
+    patch_slots = function(p)
+        return rift.players.update_menu(p, "live", { slots = {
+            { slot = 10, item = "gold_ingot", name = "Patched", id = "pa", payload = { tag = "pa", n = 9 } },
+            { slot = 14, empty = true },
+        } })
+    end,
+    patch_keys = function(p)
+        return rift.players.update_menu(p, "live", { keys = {
+            ["#"] = { item = "iron_bars", name = " " },
+            b = { item = "diamond", name = "Bravo keyed", id = "b", payload = { tag = "b", n = 1 } },
+        } })
+    end,
+    patch_title = function(p) return rift.players.update_menu(p, "live", { title = "Live patched" }) end,
+    patch_state = function(p) return rift.players.update_menu(p, "live", { state = { tag = "st-live", n = 7 } }) end,
+    patch_unknown = function(p) return rift.players.update_menu(p, "nosuch", { title = "Nobody" }) end,
+    kits = function(p) return kits(p, 1) end,
+    counter = function(p) return counter(p, 0) end,
+}
 '''
 
 # Script mode: rift.lua shows menus from a join handler and from commands.
@@ -482,6 +625,11 @@ rift.command("rclose", { permission = "", run = function(ctx)
     local id = ctx.args
     if id == "" then id = nil end
     rift.players.close_menu(ctx.uuid, id)
+end })
+rift.command("raction", { permission = "", run = function(ctx)
+    local action = ACTIONS[ctx.args]
+    if not action then return { message = "ACTRESULT " .. s(ctx.args) .. " unknown" } end
+    return { message = "ACTRESULT " .. ctx.args .. " " .. tostring(action(ctx.uuid)) }
 end })
 rift.on("join", function(ctx)
     if ctx.server == "main" then rift.players.menu(ctx.uuid, MENUS.welcome) end
@@ -510,6 +658,9 @@ rift.on("http", function(request)
         ok = rift.players.menu(w[2], MENUS[w[3]])
     elseif w[1] == "close" then
         ok = rift.players.close_menu(w[2], w[3])
+    elseif w[1] == "act" then
+        if not ACTIONS[w[3]] then return { status = 400, body = "unknown action" } end
+        ok = ACTIONS[w[3]](w[2])
     else
         return { status = 400, body = "unknown verb" }
     end
@@ -517,7 +668,30 @@ rift.on("http", function(request)
 end)
 '''
 
-PLUGIN_TOML = '''name = "menutest"
+# A second persistent plugin in both modes: it must not be able to change or
+# close the test's menus by naming their id, and never gets their events.
+OTHER_LUA = r'''
+rift.on("http", function(request)
+    if request.method ~= "POST" or request.path ~= "/ext/other" then return nil end
+    local w = {}
+    for word in string.gmatch(request.body or "", "%S+") do w[#w + 1] = word end
+    local ok
+    if w[1] == "patch" then
+        ok = rift.players.update_menu(w[2], w[3], { title = "Hijacked",
+            slots = { { slot = 10, item = "tnt", name = "Hijacked", id = "evil" } } })
+    elseif w[1] == "close" then
+        ok = rift.players.close_menu(w[2], w[3])
+    else
+        return { status = 400, body = "unknown verb" }
+    end
+    return { body = "queued=" .. tostring(ok) }
+end)
+rift.on("menu", function(ctx)
+    rift.players.broadcast("OTHEREV menu=" .. tostring(ctx.menu) .. " kind=" .. tostring(ctx.kind))
+end)
+'''
+
+PLUGIN_TOML = '''name = "@NAME@"
 version = "0.1.0"
 api = "0.2"
 engine = "lua"
@@ -554,18 +728,22 @@ class Rift:
         lines.append('config.routes.public = "main"')
         menus = MENUS_LUA.replace("@TRANSFER@", transfer)
         environment = dict(os.environ)
+        self.web = env.allocate_port()
+        lines.append(f'config.web = {{ enabled = true, listen = "127.0.0.1:{self.web}", ui = false, '
+                     f'token = "{self.token}" }}')
+        plugins = {"othertest": OTHER_LUA}
         if self.mode == "script":
             lines += ["config.authentication = { online_mode = true }", 'config.forwarding = { mode = "bungeecord" }',
                       menus, SCRIPT_LUA]
             environment["RIFT_TEST_SESSION_URL"] = self.session_url
         else:
-            self.web = env.allocate_port()
-            lines += [f'config.web = {{ enabled = true, listen = "127.0.0.1:{self.web}", ui = false, '
-                      f'token = "{self.token}" }}', 'rift.plugin("menutest")']
-            folder = self.directory / "plugins" / "menutest"
+            plugins = {"menutest": menus + PLUGIN_LUA, **plugins}
+        for name, source in plugins.items():
+            lines.append(f'rift.plugin("{name}")')
+            folder = self.directory / "plugins" / name
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / "plugin.toml").write_text(PLUGIN_TOML)
-            (folder / "init.lua").write_text(menus + PLUGIN_LUA)
+            (folder / "plugin.toml").write_text(PLUGIN_TOML.replace("@NAME@", name))
+            (folder / "init.lua").write_text(source)
         config = self.directory / "rift.lua"
         config.write_text("\n".join(lines) + "\n")
         self.proc = env.PROCESSES.spawn([str(self.binary), "--config", str(config)], self.directory,
@@ -583,9 +761,9 @@ class Rift:
                              "hooks need online mode, and the test clients cannot log in with Mojang)")
         return self
 
-    def post(self, body):
-        """Plugin mode: one request to the plugin's http hook; (status, body)."""
-        request = urllib.request.Request(f"http://127.0.0.1:{self.web}/ext/menu", data=body.encode(),
+    def post(self, body, path="/ext/menu"):
+        """One request to a plugin's http hook; (status, body)."""
+        request = urllib.request.Request(f"http://127.0.0.1:{self.web}{path}", data=body.encode(),
                                          method="POST", headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -680,6 +858,28 @@ class Pair:
         self.check(f"{menu_id}: rift.players.menu queued it", status == 200 and "queued=true" in body,
                    f"HTTP {status} {body[-300:]}")
 
+    def act(self, name):
+        """Run one of the Lua ACTIONS (show a live menu, redraw, patch); the
+        Lua call's result as text, None if it did not answer."""
+        if self.rift.mode == "script":
+            mark = self.client.mark()
+            self.command(f"raction {name}")
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                for record in self.client.packets(CHAT, mark):
+                    text = chat_text(record)
+                    if f"ACTRESULT {name} " in text:
+                        result = text.split(f"ACTRESULT {name} ", 1)[1].split()[0]
+                        self.check(f"{name}: the call in rift.lua ran", result in ("true", "false"), text)
+                        return result
+                self.client.check()
+                time.sleep(0.05)
+            self.check(f"{name}: the call in rift.lua ran", False, "no answer to the command")
+            return None
+        status, body = self.rift.post(f"act {self.client.name} {name}")
+        self.check(f"{name}: the plugin's call ran", status == 200 and "queued=" in body, f"HTTP {status} {body[-300:]}")
+        return body.split("queued=", 1)[1].strip() if "queued=" in body else None
+
     def close_any(self):
         """close_menu without an id."""
         if self.rift.mode == "script":
@@ -772,23 +972,33 @@ class Pair:
             return True, f"menu ID {value.get('inventoryType')} (no registry names to compare)"
         return got == names[kind], f"menu {got} (ID {value.get('inventoryType')})"
 
-    def expect_open(self, menu_id, mark, timeout=8):
-        kind, rows, title, slots = MENUS[menu_id]
+    def expect_open(self, menu_id, mark, timeout=8, spec=None, same=None, count=True, label=None):
+        """open_screen and one container_set_slot per filled slot. `spec`
+        replaces MENUS[menu_id]; `same` True wants the container ID of the
+        open menu again (a new title), False a new one (new rows); `count`
+        False for a redraw, which is not another menu."""
+        kind, rows, title, slots = spec or MENUS[menu_id]
+        label = label or menu_id
+        previous = self.container
         try:
             record = self.client.wait_packet("open_window", f"open_screen for {menu_id}", timeout, mark)
         except SessionError as error:
-            self.check(f"{menu_id}: open_screen arrives", False, error)
+            self.check(f"{label}: open_screen arrives", False, error)
             return False
         value = record.value
         container = value["windowId"]
         self.container, self.menu = container, menu_id
         self.base = rows * 9 if kind == "chest" else SLOT_COUNT[kind]
-        self.opened.append(menu_id)
-        self.check(f"{menu_id}: open_screen with a container ID in 101..127", 101 <= container <= 127,
+        if count:
+            self.opened.append(menu_id)
+        self.check(f"{label}: open_screen with a container ID in 101..127", 101 <= container <= 127,
                    f"container {container}")
+        if same is not None:
+            self.check(f"{label}: open_screen with {'the same' if same else 'a new'} container ID",
+                       (container == previous) == same, f"container {container}, before {previous}")
         ok, detail = self.window_type_ok(value, kind, rows)
-        self.check(f"{menu_id}: window type for the client's version", ok, detail)
-        self.check(f"{menu_id}: title", title in plain(value.get("windowTitle")),
+        self.check(f"{label}: window type for the client's version", ok, detail)
+        self.check(f"{label}: title", title in plain(value.get("windowTitle")),
                    f"title {plain(value.get('windowTitle'))!r}")
         time.sleep(0.8)
         sets = [r for r in self.client.packets("set_slot", record.index)
@@ -796,7 +1006,7 @@ class Pair:
         by_slot = {}
         for r in sets:
             by_slot.setdefault(r.value["slot"], []).append(r.value)
-        self.check(f"{menu_id}: one container_set_slot per filled slot",
+        self.check(f"{label}: one container_set_slot per filled slot",
                    sorted(by_slot) == sorted(slots) and all(len(v) == 1 for v in by_slot.values()),
                    f"slots sent {sorted((s, len(v)) for s, v in by_slot.items())}, filled {sorted(slots)}")
         problems = []
@@ -804,9 +1014,57 @@ class Pair:
             if slot not in by_slot:
                 continue
             problems += [f"slot {slot}: {p}" for p in self.judge_stack(menu_id, by_slot[slot][0]["item"], expected)]
-        self.check(f"{menu_id}: every stack has its item, count, name and lore", not problems, "; ".join(problems))
+        self.check(f"{label}: every stack has its item, count, name and lore", not problems, "; ".join(problems))
         self.stacks = {slot: values[0]["item"] for slot, values in by_slot.items()}
         return True
+
+    def expect_diff(self, label, mark, before, expected, changed, wait=1.0):
+        """A redraw or patch of the open menu: exactly the slots `changed`
+        as container_set_slot, with what `expected` (slot: spec or None for
+        empty) says, one rising state ID from 1.17.1, and no open_screen."""
+        time.sleep(wait)
+        self.client.check()
+        opens = [r.value for r in self.client.packets("open_window", mark)]
+        self.check(f"{label}: no open_screen", not opens, f"open_screen {opens}")
+        sets = [r.value for r in self.client.packets("set_slot", mark) if r.value.get("windowId") == self.container]
+        sent = sorted(v["slot"] for v in sets)
+        self.check(f"{label}: exactly the changed slots come as container_set_slot", sent == sorted(changed),
+                   f"sent {sent}, changed {sorted(changed)}")
+        problems = []
+        for v in sets:
+            slot, want = v["slot"], expected.get(v["slot"])
+            if want is None:
+                if key(v["item"]) is not None:
+                    problems.append(f"slot {slot}: {short(v['item'])}, not empty")
+            else:
+                problems += [f"slot {slot}: {p}" for p in self.judge_stack(label, v["item"], want)]
+            self.stacks[slot] = v["item"]
+        self.check(f"{label}: every changed slot has its new item, count and name", not problems, "; ".join(problems))
+        if self.protocol >= STATE_IDS and sets:
+            states = sorted({v.get("stateId") for v in sets})
+            self.check(f"{label}: one state ID, above the one before", len(states) == 1 and states[0] > before,
+                       f"state IDs {states}, before {before}")
+
+    def expect_nothing(self, label, mark, wait=1.2):
+        """Nothing for any of Rift's containers, and no event."""
+        time.sleep(wait)
+        self.client.check()
+        sent = [f"{r.name}({r.value.get('windowId')}, {r.value.get('slot', '')})"
+                for r in self.client.packets(("open_window", "set_slot", "close_window", "window_items"), mark)
+                if (r.value.get("windowId") or 0) >= 101]
+        self.check(f"{label}: nothing is sent to the client", not sent, ", ".join(sent[:10]))
+        self.check(f"{label}: no event", not self.events(mark), self.events(mark))
+
+    def expect_no_close(self, label, mark, wait=0.3):
+        time.sleep(wait)
+        closes = [e for e in self.events(mark) if e.get("kind") == "close"]
+        self.check(f"{label}: no close event", not closes, closes)
+
+    def close_by_player(self, label, state):
+        mark = self.client.mark()
+        self.client.send_packet("close_window", {"windowId": self.container})
+        self.expect_event(f"{label}: reason player", mark, menu=self.menu, kind="close", reason="player",
+                          state=state)
 
     # Clicks
 
@@ -817,7 +1075,7 @@ class Pair:
                 state = record.value["stateId"]
         return state
 
-    def send_click(self, slot, button, mode, changed=(), cursor=None, item=None, container=None):
+    def send_click(self, slot, button, mode, changed=(), cursor=None, item=None, container=None, state=None):
         p = self.protocol
         value = {"windowId": self.container if container is None else container,
                  "slot": slot, "mouseButton": button, "mode": mode}
@@ -825,7 +1083,7 @@ class Pair:
             value["changedSlots"] = [{"location": location, "item": entry} for location, entry in changed]
             value["cursorItem"] = empty(p) if cursor is None else cursor
             if p >= STATE_IDS:
-                value["stateId"] = self.state_id()
+                value["stateId"] = self.state_id() if state is None else state
         else:
             self.action += 1
             value["action"] = self.action
@@ -838,7 +1096,7 @@ class Pair:
     def hotbar(self, index):
         return self.base + 27 + index
 
-    def real_click(self, kind, slot, key=None):
+    def real_click(self, kind, slot, key=None, state=None):
         """A click as the real client sends it: what it predicted is in
         `changed` and `cursor` (1.17+), the clicked stack in `item` (older)."""
         p, here = self.protocol, self.stack_at(slot) if 0 <= slot < self.base else None
@@ -860,7 +1118,7 @@ class Pair:
         button, mode, changed, cursor = layouts[kind]
         if kind == "outside":
             slot = -999
-        self.send_click(slot, button, mode, changed=changed, cursor=cursor, item=held)
+        self.send_click(slot, button, mode, changed=changed, cursor=cursor, item=held, state=state)
 
     def baseline_slot(self, window_slot):
         """The baseline's entry for an inventory-row slot of the open window."""
@@ -883,7 +1141,8 @@ class Pair:
             elif v.get("windowId") in (-1, 255) and v.get("slot") == -1:  # 1.20.5-1.21.1 schemas read a u8.
                 cursor.append(("set_slot(-1)", key(v.get("item")) is None))
             elif v.get("windowId") == self.container:
-                resent[v["slot"]] = v["item"]
+                # The undo comes first; a handler may redraw the slot after it.
+                resent.setdefault(v["slot"], v["item"])
         problems = []
         for slot in slots:
             if slot not in resent:
@@ -931,11 +1190,12 @@ class Pair:
     def describe_inventory(snapshot):
         return {i: short(json.loads(v)) for i, v in enumerate(snapshot["slots"]) if v}
 
-    def click_case(self, label, kind, slot, report=None, key=None):
-        """One click: the event (or none), the undo, the inventory rows."""
+    def click_case(self, label, kind, slot, report=None, key=None, state=None):
+        """One click: the event (or none), the undo, the inventory rows.
+        `state` is the state ID the click names (1.17.1+; default the latest)."""
         self.client.check()
         mark = self.client.mark()
-        self.real_click(kind, slot, key)
+        self.real_click(kind, slot, key, state)
         menu_slots = [slot] if 0 <= slot < self.base else []
         if self.protocol >= CHANGED_SLOTS and kind == "inventory":
             menu_slots = []
@@ -1008,6 +1268,8 @@ class Pair:
         self.prepare()
         for step in STEPS:
             if step.__name__ in OPTIONAL and step.__name__ not in self.options.with_:
+                continue
+            if self.options.only and step.__name__ not in self.options.only | ALWAYS:
                 continue
             self.section = step.__name__.removeprefix("step_")
             try:
@@ -1429,18 +1691,12 @@ def step_creative(pair):
 
 
 def step_same_id(pair):
-    """Showing the open menu's id again is not an ending: no close event, and
-    the menu keeps working. (This build opens it anew; the design redraws only
-    what changed, which --with redraw is for.)"""
+    """Showing the open menu again, unchanged, is a redraw with nothing to
+    send: no packet, no close event, and the menu keeps working."""
     open_menu(pair, "chest")
     mark = pair.client.mark()
     pair.show("chest")
-    time.sleep(1.5)
-    reopened = [r for r in pair.client.packets("open_window", mark)]
-    pair.note(f"showing the same id again sent {len(reopened)} open_screen")
-    if reopened:
-        pair.container = reopened[-1].value["windowId"]
-    pair.check("the same id again: no close event", not pair.events(mark), pair.events(mark))
+    pair.expect_nothing("the same definition again", mark, wait=1.5)
     pair.click_case("the same id again: left on a button", "left", BUY,
                     report=dict(action="buy", slot=BUY, payload="buy:5", state="st-chest:1", key="nil", click="left"))
     mark = pair.client.mark()
@@ -1498,28 +1754,206 @@ def step_one_close(pair):
                f"opened {pair.opened}, closed {closes}")
 
 
-# Later steps of the design; turn on with --with when the binary has them.
+def open_live(pair, variant="live"):
+    mark = pair.client.mark()
+    pair.act(variant)
+    if not pair.expect_open("live", mark, spec=live_spec(variant), label=variant):
+        raise Skip(f"{variant} did not open")
+
+
+def click_report(action, slot, payload, state, click="left"):
+    return dict(action=action, slot=slot, payload=payload, state=state, click=click, key="nil")
+
 
 def step_redraw(pair):
-    """Showing the open menu's id again sends only the changed slots."""
-    raise Skip("needs a second definition of the same id; write when redraws land")
+    """Showing the open menu's id again: two changed slots send exactly those
+    two container_set_slot; a new title sends open_screen with the same
+    container ID and every filled slot; another number of rows opens anew
+    with a new container ID. None is a close; clicks afterwards report with
+    the new state."""
+    open_live(pair)
+    mark, before = pair.client.mark(), pair.state_id()
+    pair.act("live_two")
+    pair.expect_diff("a redraw that changes two slots", mark, before, live_spec("live_two")[3], [LIVE_A, LIVE_B])
+    pair.expect_no_close("a redraw that changes two slots", mark)
+    pair.click_case("after the redraw: left on the button that does something else", "left", LIVE_B,
+                    report=click_report("b2", LIVE_B, "b2:2", "st-live:1"))
+    mark = pair.client.mark()
+    pair.act("live_title")
+    pair.expect_open("live", mark, spec=live_spec("live_title"), same=True, count=False,
+                     label="a redraw with a new title")
+    pair.expect_no_close("a redraw with a new title", mark)
+    pair.click_case("after the new title: left on a button", "left", LIVE_A,
+                    report=click_report("a", LIVE_A, "a:1", "st-live:2"))
+    mark = pair.client.mark()
+    pair.act("live_rows")
+    pair.expect_open("live", mark, spec=live_spec("live_rows"), same=False, count=False,
+                     label="a redraw with four rows instead of three")
+    pair.expect_no_close("a redraw with four rows instead of three", mark)
+    pair.click_case("after the new rows: left on a button", "left", LIVE_A,
+                    report=click_report("a", LIVE_A, "a:1", "st-live:3"))
+    pair.close_by_player("the redrawn menu closed", "st-live:3")
 
 
 def step_update_menu(pair):
-    raise Skip("update_menu is not in this build")
+    """update_menu with slots (one emptied), keys, a title and a state; for a
+    menu the player closed, for an unknown id and from another plugin
+    (nothing is sent in those three cases)."""
+    open_live(pair)
+    slots = dict(live_spec("live")[3])
+    mark, before = pair.client.mark(), pair.state_id()
+    pair.act("patch_slots")
+    slots[LIVE_A], slots[LIVE_C] = ("gold_ingot", 1, "Patched", []), None
+    pair.expect_diff("update_menu with slots", mark, before, slots, [LIVE_A, LIVE_C])
+    pair.click_case("after the slots patch: left on the patched button", "left", LIVE_A,
+                    report=click_report("pa", LIVE_A, "pa:9", "st-live:0"))
+    pair.click_case("after the slots patch: left on the emptied slot", "left", LIVE_C)
+    mark, before = pair.client.mark(), pair.state_id()
+    pair.act("patch_keys")
+    for slot in LIVE_GLASS:
+        slots[slot] = ("iron_bars", 1, None, [])
+    slots[LIVE_B] = ("diamond", 1, "Bravo keyed", [])
+    pair.expect_diff("update_menu with keys", mark, before, slots, LIVE_GLASS + [LIVE_B])
+    mark = pair.client.mark()
+    pair.act("patch_title")
+    pair.expect_open("live", mark, spec=("chest", 3, "Live patched", {s: v for s, v in slots.items() if v}),
+                     same=True, count=False, label="update_menu with a title")
+    pair.expect_no_close("update_menu with a title", mark)
+    mark = pair.client.mark()
+    pair.act("patch_state")
+    pair.expect_nothing("update_menu with only a state", mark)
+    pair.click_case("after the state patch: left on a keyed button", "left", LIVE_B,
+                    report=click_report("b", LIVE_B, "b:1", "st-live:7"))
+    pair.close_by_player("the patched menu closed", "st-live:7")
+    mark = pair.client.mark()
+    result = pair.act("patch_slots")
+    pair.note(f"update_menu for a closed menu returned {result}")
+    pair.expect_nothing("update_menu for a menu the player closed", mark)
+    # Another plugin's and an unknown id.
+    open_live(pair)
+    mark = pair.client.mark()
+    status, body = pair.rift.post(f"patch {pair.client.name} live", path="/ext/other")
+    pair.note(f"another plugin's update_menu answered HTTP {status} {body[-100:]}")
+    pair.expect_nothing("another plugin's update_menu for this id", mark)
+    mark = pair.client.mark()
+    result = pair.act("patch_unknown")
+    pair.note(f"update_menu for an unknown id returned {result}")
+    pair.expect_nothing("update_menu for an unknown id", mark)
+    mark = pair.client.mark()
+    pair.rift.post(f"close {pair.client.name} live", path="/ext/other")
+    pair.expect_nothing("another plugin's close_menu for this id", mark)
+    pair.click_case("after the other plugin's calls: left on a button", "left", LIVE_B,
+                    report=click_report("b", LIVE_B, "b:1", "st-live:0"))
+    pair.close_by_player("the live menu closed", "st-live:0")
+    other = [chat_text(r) for r in pair.client.packets(CHAT) if "OTHEREV" in chat_text(r)]
+    pair.check("the other plugin never got an event of these menus", not other, other[:5])
+
+
+def step_pages(pair):
+    """The paged list of docs/menus.md: next page twice, the page in `state`,
+    the payloads of the clicks."""
+    mark = pair.client.mark()
+    pair.act("kits")
+    if not pair.expect_open("kits", mark, spec=kits_spec(1), label="kits, page 1"):
+        raise Skip("kits did not open")
+    for page in (1, 2):
+        mark = pair.client.mark()
+        pair.real_click("left", KITS_NEXT)
+        pair.expect_event(f"next on page {page}: reported with the page in state", mark, kind="click", menu="kits",
+                          action="page", slot=KITS_NEXT, payload="step:1", state=f"page:{page}")
+        pair.expect_open("kits", mark, spec=kits_spec(page + 1), same=True, count=False,
+                         label=f"kits, page {page + 1}")
+        pair.expect_no_close(f"kits, page {page + 1}", mark)
+    pair.click_case("a kit on page 3", "left", 0, report=click_report("kit", 0, "kit:k3a", "page:3"))
+    mark = pair.client.mark()
+    pair.real_click("left", KITS_BACK)
+    pair.expect_event("back on page 3: reported", mark, kind="click", menu="kits", action="page",
+                      slot=KITS_BACK, payload="step:-1", state="page:3")
+    pair.expect_open("kits", mark, spec=kits_spec(2), same=True, count=False, label="kits, back to page 2")
+    pair.click_case("a kit on page 2", "left", 1, report=click_report("kit", 1, "kit:k2b", "page:2"))
+    pair.close_by_player("the kits closed", "page:2")
 
 
 def step_stale_click(pair):
-    raise Skip("the stale-click rule is not in this build")
+    """A redraw changes what two slots do (one into a close button) and only
+    the look of a third. From 1.17.1 a click that names the state ID before
+    the redraw is undone and not reported on the first two, and does not
+    close; it still reports on the third; with the current state ID it
+    reports. Before 1.17.1 every click reports."""
+    open_live(pair)
+    mark, old = pair.client.mark(), pair.state_id()
+    pair.act("live_stale")
+    pair.expect_diff("a redraw that changes two actions and one look", mark, old, live_spec("live_stale")[3],
+                     [LIVE_A, LIVE_B, LIVE_C])
+    if pair.protocol >= STATE_IDS:
+        pair.click_case("the old state ID on a slot whose action changed", "left", LIVE_B, state=old)
+        mark = pair.client.mark()
+        pair.click_case("the old state ID on a slot that became a close button", "left", LIVE_C, state=old)
+        closes = [r.value for r in pair.client.packets("close_window", mark)]
+        pair.check("the old state ID on a close button: the menu stays open", not closes, f"container_close {closes}")
+        pair.click_case("the old state ID on a slot that only looks different", "left", LIVE_A, state=old,
+                        report=click_report("a", LIVE_A, "a:1", "st-live:1"))
+    else:
+        pair.note("the client names no state ID: every click reports")
+        pair.click_case("a slot whose action changed (no state ID)", "left", LIVE_B,
+                        report=click_report("b2", LIVE_B, "b2:2", "st-live:1"))
+    pair.click_case("the current state ID on a slot whose action changed", "left", LIVE_B,
+                    report=click_report("b2", LIVE_B, "b2:2", "st-live:1"))
+    pair.click_case("the current state ID on a slot that only looks different", "left", LIVE_A,
+                    report=click_report("a", LIVE_A, "a:1", "st-live:1"))
+    mark = pair.client.mark()
+    pair.real_click("left", LIVE_C)
+    close_expected(pair, "the current state ID on the new close button", mark, "live", "plugin", "st-live:1", True)
+
+
+def step_redraw_burst(pair):
+    """20 clicks in a second on a button whose handler redraws the menu: the
+    client stays connected, every click is reported (the action never
+    changes), and the picture agrees with the menu's state afterwards."""
+    mark = pair.client.mark()
+    pair.act("counter")
+    if not pair.expect_open("counter", mark, spec=COUNTER):
+        raise Skip("the counter did not open")
+    mark = pair.client.mark()
+    for _ in range(20):
+        pair.real_click("left", COUNTER_SLOT)
+        time.sleep(0.05)
+    time.sleep(3.0)
+    pair.check("a burst of 20 clicks on a redrawing button: the client stays connected", not pair.client.failure,
+               pair.client.failure or "")
+    pair.client.check()
+    events = [e for e in pair.events(mark) if e.get("action") == "inc"]
+    counts = [int(e["state"].split(":")[1]) for e in events if re.fullmatch(r"count:\d+", e.get("state", ""))]
+    pair.check("a burst of 20 clicks: 20 events", len(events) == 20, f"{len(events)} events, states {counts}")
+    pair.check("a burst of 20 clicks: the states the events carry never go back", counts == sorted(counts),
+               f"states {counts}")
+    opens = pair.client.packets("open_window", mark)
+    pair.check("a burst of 20 clicks: the redraws send no open_screen", not opens, f"{len(opens)} open_screen")
+    sets = [r.value for r in pair.client.packets("set_slot", mark)
+            if r.value.get("windowId") == pair.container and r.value.get("slot") == COUNTER_SLOT]
+    shown = re.search(r"Count (\d+)", plain(sets[-1]["item"])) if sets else None
+    shown = int(shown.group(1)) if shown else None
+    pair.note(f"a burst of 20 clicks: states {counts}, the slot shows {shown}")
+    if counts:
+        pair.check("a burst of 20 clicks: the slot shows the count after the last event", shown == counts[-1] + 1,
+                   f"shown {shown}, last event's state {counts[-1]}")
+    if sets:
+        pair.stacks[COUNTER_SLOT] = sets[-1]["item"]
+    pair.click_case("after the burst: a click carries the state the slot shows", "left", COUNTER_SLOT,
+                    report=click_report("inc", COUNTER_SLOT, "nil", f"count:{shown}"))
+    time.sleep(0.5)
+    pair.close_by_player("the counter closed", f"count:{(shown or 0) + 1}")
 
 
 def step_anvil(pair):
     raise Skip("anvil menus are not in this build")
 
 
-STEPS = [step_clicks, step_backend, step_endings, step_real_click, step_same_id, step_backend_screen, step_creative, step_redraw, step_update_menu,
-         step_stale_click, step_anvil, step_switch, step_disconnect, step_one_close]
-OPTIONAL = {"step_redraw", "step_update_menu", "step_stale_click", "step_anvil"}
+STEPS = [step_clicks, step_backend, step_endings, step_real_click, step_same_id, step_redraw, step_update_menu,
+         step_pages, step_stale_click, step_redraw_burst, step_backend_screen, step_creative, step_anvil, step_switch,
+         step_disconnect, step_one_close]
+OPTIONAL = {"step_anvil"}
+ALWAYS = {"step_one_close"}  # Runs with --only too.
 
 
 # --- Servers and pairs ------------------------------------------------------------------
@@ -1629,6 +2063,8 @@ def main():
     parser.add_argument("--no-switch", action="store_true", help="no second backend, no switch check")
     parser.add_argument("--with", dest="with_", default="", help="optional steps to run: "
                         + ",".join(sorted(name.removeprefix("step_") for name in OPTIONAL)))
+    parser.add_argument("--only", default="", help="run only these steps (and one_close): "
+                        + ",".join(step.__name__.removeprefix("step_") for step in STEPS))
     parser.add_argument("--out", type=Path, default=OUT, help=f"results directory (default {OUT})")
     parser.add_argument("--work", type=Path, default=None, help="where server directories go")
     parser.add_argument("--keep", action="store_true", help="keep server directories")
@@ -1640,6 +2076,7 @@ def main():
             print(f"--set {name}: {' '.join(pairs)}")
         return
     args.with_ = {f"step_{name.strip()}" for name in args.with_.split(",") if name.strip()}
+    args.only = {f"step_{name.strip()}" for name in args.only.split(",") if name.strip()}
     pairs = [entry for value in args.pair for entry in value.split(",") if entry]
     for name in args.set:
         pairs += {"same": SAME, "more": MORE, "translated": TRANSLATED, "all": SAME + MORE + TRANSLATED}[name]
