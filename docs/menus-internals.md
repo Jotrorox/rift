@@ -272,8 +272,11 @@ different language gives a different stack and never another player's bytes.
 
 A menu for a player on another peer is parsed on the calling peer, with its
 texts in the player's language, and sent to the player's peer as a player
-action, as for dialogs. The receiving peer trusts its peers' menus but looks
-up each item name in its own build. The owner is recorded as the calling
+action, as for dialogs. The receiving peer checks the menu again as it
+reads it: each item name in its own build, the number of slots for the type,
+the anvil's text and every limit of a definition. A peer of another build
+cannot make it index past a menu's slots; it refuses such a menu or patch,
+logs why, and the calling peer logs the refusal too. The owner is recorded as the calling
 peer and plugin, so the session's events go back over the `player` stream to
 the plugin that showed the menu. An event counts toward the player's 32
 undelivered events until it was handed to that peer.

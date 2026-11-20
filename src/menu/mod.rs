@@ -389,8 +389,10 @@ pub struct Button {
 /// from 1.12 on.
 ///
 /// Serializable, so that a peer of a cluster can show it to a player of
-/// another peer; the receiving peer trusts its peers' menus.
+/// another peer. The receiving peer checks the menu it reads by the rules
+/// of a definition and refuses one that breaks them.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "checked::UncheckedMenu")]
 pub struct Menu {
     id: String,
     kind: Kind,
@@ -432,8 +434,10 @@ impl Diff {
 }
 
 /// A change to part of an open menu (`update_menu`). Slot numbers are
-/// checked against the menu when it is applied.
+/// checked against the menu when it is applied; one from another peer is
+/// checked as it is read, like a [`Menu`].
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "checked::UncheckedPatch")]
 pub struct Patch {
     /// Slot numbers as written and what they get: `None` empties them.
     slots: Vec<(Vec<i64>, Option<Button>)>,
@@ -799,6 +803,233 @@ impl Patch {
             .iter()
             .filter_map(|(_, button)| button.as_ref())
             .chain(self.keys.iter().map(|(_, button)| button))
+    }
+}
+
+/// The checks [`Menu::parse`] and [`Patch::parse`] make, run again on a
+/// menu or a patch another peer of a cluster sent: a peer of another build
+/// could send one this build would never make, such as more slots than its
+/// type has, and a session must not index past them.
+mod checked {
+    use super::*;
+
+    /// [`Menu`] as it arrives, before [`Menu::check`].
+    #[derive(serde::Deserialize)]
+    pub(super) struct UncheckedMenu {
+        id: String,
+        kind: Kind,
+        #[serde(with = "exact_text::option")]
+        title: Option<Text>,
+        state: Option<Value>,
+        text: String,
+        field: String,
+        typing: bool,
+        slots: Vec<Option<Button>>,
+        keyed: Vec<Option<char>>,
+        default_result: bool,
+    }
+
+    impl TryFrom<UncheckedMenu> for Menu {
+        type Error = String;
+
+        fn try_from(menu: UncheckedMenu) -> Result<Self, String> {
+            let menu = Self {
+                id: menu.id,
+                kind: menu.kind,
+                title: menu.title,
+                state: menu.state,
+                text: menu.text,
+                field: menu.field,
+                typing: menu.typing,
+                slots: menu.slots,
+                keyed: menu.keyed,
+                default_result: menu.default_result,
+            };
+            menu.check()?;
+            Ok(menu)
+        }
+    }
+
+    /// [`Patch`] as it arrives, before [`Patch::check`].
+    #[derive(serde::Deserialize)]
+    pub(super) struct UncheckedPatch {
+        slots: Vec<(Vec<i64>, Option<Button>)>,
+        keys: Vec<(char, Button)>,
+        #[serde(with = "exact_text::patch")]
+        title: Option<Option<Text>>,
+        state: Option<Value>,
+        text: Option<String>,
+    }
+
+    impl TryFrom<UncheckedPatch> for Patch {
+        type Error = String;
+
+        fn try_from(patch: UncheckedPatch) -> Result<Self, String> {
+            let patch = Self {
+                slots: patch.slots,
+                keys: patch.keys,
+                title: patch.title,
+                state: patch.state,
+                text: patch.text,
+            };
+            patch.check()?;
+            Ok(patch)
+        }
+    }
+
+    impl Menu {
+        /// What every parsed menu holds: a valid `id`, a type Rift shows,
+        /// exactly as many slots as the type has, an anvil's texts within
+        /// its rules and nothing of an anvil in other menus, and buttons
+        /// within their limits.
+        pub(super) fn check(&self) -> Result<(), String> {
+            check_id(&self.id, "menu.id")?;
+            if let Kind::Chest { rows } = self.kind
+                && !(1..=MAX_ROWS).contains(&rows)
+            {
+                return Err(format!(
+                    "menu: a chest has 1 to {MAX_ROWS} rows, not {rows}"
+                ));
+            }
+            let slots = self.kind.slots();
+            if self.slots.len() != slots || self.keyed.len() != slots {
+                return Err(format!(
+                    "menu: {} has {slots} slots, not {}",
+                    self.kind.describe(),
+                    self.slots.len()
+                ));
+            }
+            check_state(self.state.as_ref(), "menu.state")?;
+            if self.kind == Kind::Anvil {
+                anvil_text(&self.text, "menu.text")?;
+                anvil_text(&self.field, "menu.text")?;
+            } else if !self.text.is_empty()
+                || !self.field.is_empty()
+                || self.typing
+                || self.default_result
+            {
+                return Err("menu: text and typing are for anvils only".into());
+            }
+            for (slot, button) in self.slots.iter().enumerate() {
+                if let Some(button) = button {
+                    button.check(&format!("menu.slots[{slot}]"))?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Patch {
+        /// What every parsed patch holds: buttons within their limits, keys
+        /// that are not a space, a `state` and a `text` within theirs. Slot
+        /// numbers are checked when the patch is applied, as always.
+        pub(super) fn check(&self) -> Result<(), String> {
+            for (index, (_, button)) in self.slots.iter().enumerate() {
+                if let Some(button) = button {
+                    button.check(&format!("patch.slots[{}]", index + 1))?;
+                }
+            }
+            for (key, button) in &self.keys {
+                if *key == ' ' {
+                    return Err("patch.keys: a space is always an empty slot".into());
+                }
+                button.check(&format!("patch.keys.{key}"))?;
+            }
+            check_state(self.state.as_ref(), "patch.state")?;
+            if let Some(text) = &self.text {
+                anvil_text(text, "patch.text")?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Button {
+        /// The limits [`parse_button`] checks.
+        fn check(&self, path: &str) -> Result<(), String> {
+            let look = &self.look;
+            if look.item == "air" {
+                return Err(format!("{path}.item: unknown item \"air\""));
+            }
+            if !(1..=MAX_COUNT).contains(&look.count) {
+                return Err(format!(
+                    "{path}.count must be an integer from 1 to {MAX_COUNT}"
+                ));
+            }
+            if look.lore.len() > MAX_LORE_LINES {
+                return Err(format!("{path}.lore: at most {MAX_LORE_LINES} lines"));
+            }
+            if let Some(model) = &look.model {
+                let lists = [
+                    model.floats.len(),
+                    model.flags.len(),
+                    model.strings.len(),
+                    model.colors.len(),
+                ];
+                if lists.iter().any(|len| *len > MAX_MODEL_VALUES)
+                    || model.floats.iter().any(|float| !float.is_finite())
+                    || model.strings.iter().any(|text| text.len() > MAX_STRING)
+                    || model
+                        .colors
+                        .iter()
+                        .any(|rgb| !(0..=0xff_ffff).contains(rgb))
+                {
+                    return Err(format!("{path}.model is out of its limits"));
+                }
+            }
+            if let Some(model) = &look.item_model
+                && (model.len() > MAX_STRING || !crate::dialog::identifier(model))
+            {
+                return Err(format!(
+                    "{path}.item_model: {model:?} is not a valid identifier"
+                ));
+            }
+            match &look.head {
+                Some(_) if look.item != "player_head" => {
+                    return Err(format!("{path}.head is for player_head only"));
+                }
+                Some(Head::Texture(textures))
+                    if textures.value.is_empty()
+                        || textures.value.len() > MAX_TEXTURE
+                        || textures
+                            .signature
+                            .as_ref()
+                            .is_some_and(|signature| signature.len() > MAX_STRING) =>
+                {
+                    return Err(format!("{path}.head is out of its limits"));
+                }
+                Some(Head::Player(player))
+                    if !(1..=36).contains(&player.len())
+                        || !player
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
+                {
+                    return Err(format!("{path}.head.player must be a player name or UUID"));
+                }
+                _ => {}
+            }
+            if look.color.is_some_and(|rgb| rgb > 0xff_ffff) {
+                return Err(format!("{path}.color must be a colour like \"#RRGGBB\""));
+            }
+            let action = &self.action;
+            if let Some(id) = &action.id {
+                check_id(id, &format!("{path}.id"))?;
+            } else if action.payload.is_some() {
+                return Err(format!(
+                    "{path}.payload: a button without an id reports no clicks"
+                ));
+            }
+            if let Some(payload) = &action.payload {
+                size(payload, MAX_PAYLOAD_BYTES, &format!("{path}.payload"))?;
+            }
+            if action.clicks.0 & !Clicks::ALL.0 != 0 {
+                return Err(format!("{path}.clicks names an unknown click kind"));
+            }
+            Ok(())
+        }
+    }
+
+    fn check_state(state: Option<&Value>, path: &str) -> Result<(), String> {
+        state.map_or(Ok(()), |state| size(state, MAX_STATE_BYTES, path))
     }
 }
 

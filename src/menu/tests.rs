@@ -1164,3 +1164,76 @@ fn sdk_shaped_definitions_parse() {
     assert!(Patch::parse(&json!({"text": "Alex"})).is_ok());
     assert!(Patch::parse(&json!({})).is_ok());
 }
+
+#[test]
+fn a_menu_from_another_peer_is_checked_as_it_is_read() {
+    let menu = parse(json!({
+        "id": "shop", "type": "hopper",
+        "slots": [{"slot": 0, "item": "diamond", "id": "buy", "payload": {"price": 3}}],
+    }));
+    let wire = serde_json::to_value(&menu).unwrap();
+    // A peer of the same build: read back exactly.
+    assert_eq!(serde_json::from_value::<Menu>(wire.clone()).unwrap(), menu);
+    let refused = |change: &dyn Fn(&mut Value)| {
+        let mut wire = wire.clone();
+        change(&mut wire);
+        serde_json::from_value::<Menu>(wire)
+            .expect_err("the menu should be refused")
+            .to_string()
+    };
+    // More slots than a hopper has would be indexed past by a session.
+    let error = refused(&|wire| {
+        wire["slots"] = json!(vec![Value::Null; 27]);
+        wire["keyed"] = json!(vec![Value::Null; 27]);
+    });
+    assert!(error.contains("a hopper has 5 slots, not 27"), "{error}");
+    let error = refused(&|wire| wire["keyed"] = json!([]));
+    assert!(error.contains("a hopper has 5 slots"), "{error}");
+    let error = refused(&|wire| wire["kind"] = json!({"Chest": {"rows": 9}}));
+    assert!(error.contains("a chest has 1 to 6 rows"), "{error}");
+    let error = refused(&|wire| wire["id"] = json!("Shop!"));
+    assert!(error.contains("menu.id"), "{error}");
+    let error = refused(&|wire| wire["typing"] = json!(true));
+    assert!(error.contains("anvils only"), "{error}");
+    let error = refused(&|wire| wire["slots"][0]["look"]["count"] = json!(0));
+    assert!(error.contains("menu.slots[0].count"), "{error}");
+    let error = refused(&|wire| wire["slots"][0]["action"]["id"] = Value::Null);
+    assert!(error.contains("without an id"), "{error}");
+    let error = refused(&|wire| wire["slots"][0]["action"]["clicks"] = json!(0xffff));
+    assert!(error.contains("unknown click kind"), "{error}");
+
+    let anvil = parse(json!({"id": "nick", "type": "anvil", "text": "abc"}));
+    let mut wire = serde_json::to_value(&anvil).unwrap();
+    assert_eq!(serde_json::from_value::<Menu>(wire.clone()).unwrap(), anvil);
+    wire["text"] = json!("a§b");
+    let error = serde_json::from_value::<Menu>(wire)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("menu.text"), "{error}");
+}
+
+#[test]
+fn a_patch_from_another_peer_is_checked_as_it_is_read() {
+    let patch = patch(json!({
+        "slots": [{"slot": 1, "item": "stone", "count": 5}],
+        "keys": {"a": {"item": "dirt"}},
+        "text": "hi",
+    }));
+    let wire = serde_json::to_value(&patch).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Patch>(wire.clone()).unwrap(),
+        patch
+    );
+    let mut big = wire.clone();
+    big["slots"][0][1]["look"]["count"] = json!(100);
+    let error = serde_json::from_value::<Patch>(big)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("patch.slots[1].count"), "{error}");
+    let mut space = wire;
+    space["keys"][0][0] = json!(" ");
+    let error = serde_json::from_value::<Patch>(space)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("a space"), "{error}");
+}
