@@ -12,7 +12,20 @@ so that the client handles each:
     1 a 6-row chest with every button field of the "Buttons" table
     2 the same id again with changes (re-open), 3 another id (replace)
     4 a hopper, 5 a dispenser, 6 rift.players.close_menu
-    7 a chest opened again and left open while the client stays; it leaves
+    7 a chest opened again and left open while the client stays
+    8-11 anvils: defaults with text "Steve", text "", custom buttons in slots
+      0, 1, 2 with a colored title, and typing = true; 12-14 update_menu of
+      the open anvil (title, text, result button)
+    15-17 a redraw of an open chest: two slots, a new title, another number
+      of rows; 18-20 update_menu of a chest: slots (one emptied), keys, title
+    21 an anvil left open while the client leaves
+
+The real client answers an anvil by itself: when slot 0 is set it fills its
+text field and sends the rename (`rename_item` from 1.13, the `MC|ItemName`
+plugin message on 1.12). The relay sees those serverbound packets; the script
+records, per anvil step, whether one arrived and its text (an expectation is a
+problem; clients 1.13-1.19.4 send nothing for an empty text). The plugin also
+logs every `menu` event (kind, text, reason) into Rift's log.
 
 Why a plugin and HTTP: Rift's script hooks (jobs, join events, and rift.players
 in rift.lua) need authentication.online_mode, which an offline headless client
@@ -37,8 +50,7 @@ oracle independent of Rift), so a layout the schema rejects is reported too.
 
 --client takes client versions (each on a backend of its own version unless
 --server names one); --cross adds 1.12.2 and 1.20.4 on a 26.3 backend, so the
-translator is in the path. To add steps (anvil menus, update_menu), append to
-STEPS and OPENS/CLOSES. Logs: the client's under ~/.cache/rift-via/clients/runs,
+translator is in the path. To add steps, append to STEPS (label, call, opens, rename). Logs: the client's under ~/.cache/rift-via/clients/runs,
 Rift's, the server's, the plugin and result.json under --out (default
 target/minecraft/runs/<timestamp>-menus/<server>-<client>/).
 """
@@ -193,18 +205,87 @@ STAY = r"""{
     },
 }"""
 
+ANVIL_DEFAULT = r"""{ id = "nick", type = "anvil", title = "Choose a nickname", text = "Steve" }"""
+ANVIL_EMPTY = r"""{ id = "empty", type = "anvil", title = { mini = "<green>Empty text" }, text = "" }"""
+ANVIL_CUSTOM = r"""{
+    id = "cust", type = "anvil", title = { mini = "<gradient:gold:red>Custom anvil</gradient>" },
+    text = "Custom", layout = { "PNX" },
+    keys = {
+        P = { item = "name_tag", name = { text = "Left item", color = "aqua" }, id = "left" },
+        N = { item = "gold_nugget", name = "Right input", id = "right" },
+        X = { item = "barrier", name = { mini = "<red>Cancel" }, id = "cancel", close = true },
+    },
+}"""
+ANVIL_TYPING = r"""{ id = "typ", type = "anvil", title = "Typing", text = "Alex", typing = true }"""
+ANVIL_STAY = r"""{ id = "anvstay", type = "anvil", title = { mini = "<rainbow>Anvil left open" }, text = "Left" }"""
+
+REDRAW = r"""{
+    id = "r", type = "chest", rows = 3, title = "Redraw",
+    slots = {
+        { slot = 0, item = "stone" }, { slot = 1, item = "dirt" }, { slot = 2, item = "sand", id = "s" },
+        { slot = 13, item = "compass", name = "Compass" },
+    },
+}"""
+REDRAW_SLOTS = r"""{
+    id = "r", type = "chest", rows = 3, title = "Redraw",
+    slots = {
+        { slot = 0, item = "diamond", count = 3 }, { slot = 1, item = "dirt" }, { slot = 2, item = "sand", id = "s" },
+        { slot = 13, item = "clock", name = { mini = "<gold>Clock" } },
+    },
+}"""
+REDRAW_TITLE = r"""{
+    id = "r", type = "chest", rows = 3, title = { mini = "<red>Redraw <green>title" },
+    slots = {
+        { slot = 0, item = "diamond", count = 3 }, { slot = 1, item = "dirt" }, { slot = 2, item = "sand", id = "s" },
+        { slot = 13, item = "clock", name = { mini = "<gold>Clock" } },
+    },
+}"""
+REDRAW_ROWS = r"""{
+    id = "r", type = "chest", rows = 4, title = { mini = "<red>Redraw <green>title" },
+    slots = { { slot = 0, item = "diamond", count = 3 }, { slot = 31, item = "clock" } },
+}"""
+PATCHED = r"""{
+    id = "pm", type = "chest", title = "Patch me",
+    layout = { "A#######A", "###B#B###", "A#######A" },
+    keys = { ["#"] = { item = "gray_stained_glass_pane", name = " " }, A = { item = "iron_ingot" },
+             B = { item = "chest", id = "b" } },
+}"""
+
+# (label, call, opens, rename): `opens` is how many open_window packets for a
+# Rift container the step must cause; `rename` is the text the client has to
+# send back for an anvil that appears (None: the step is not an anvil open;
+# "" : nothing is required, whatever arrives is recorded).
 STEPS = [
-    ("chest A: every button field", "rift.players.menu(p.uuid, %s)" % CHEST_A),
-    ("chest A again (re-open, changes)", "rift.players.menu(p.uuid, %s)" % CHEST_A2),
-    ("chest B (replace, layout)", "rift.players.menu(p.uuid, %s)" % CHEST_B),
-    ("hopper", "rift.players.menu(p.uuid, %s)" % HOPPER),
-    ("dispenser", "rift.players.menu(p.uuid, %s)" % DISPENSER),
-    ("close_menu", 'rift.players.close_menu(p.uuid, "disp")'),
-    ("menu left open", "rift.players.menu(p.uuid, %s)" % STAY),
+    ("chest A: every button field", "rift.players.menu(p.uuid, %s)" % CHEST_A, 1, None),
+    ("chest A again (re-open, changes)", "rift.players.menu(p.uuid, %s)" % CHEST_A2, 1, None),
+    ("chest B (replace, layout)", "rift.players.menu(p.uuid, %s)" % CHEST_B, 1, None),
+    ("hopper", "rift.players.menu(p.uuid, %s)" % HOPPER, 1, None),
+    ("dispenser", "rift.players.menu(p.uuid, %s)" % DISPENSER, 1, None),
+    ("close_menu", 'rift.players.close_menu(p.uuid, "disp")', 0, None),
+    ("menu left open", "rift.players.menu(p.uuid, %s)" % STAY, 1, None),
+    ("anvil, defaults, text Steve", "rift.players.menu(p.uuid, %s)" % ANVIL_DEFAULT, 1, "Steve"),
+    ("anvil, text empty", "rift.players.menu(p.uuid, %s)" % ANVIL_EMPTY, 1, ""),
+    ("anvil, custom buttons in 3 slots", "rift.players.menu(p.uuid, %s)" % ANVIL_CUSTOM, 1, "Custom"),
+    ("anvil, typing = true", "rift.players.menu(p.uuid, %s)" % ANVIL_TYPING, 1, "Alex"),
+    ("update_menu anvil: title", 'rift.players.update_menu(p.uuid, "typ", { title = { mini = "<aqua>New anvil title" } })', 1, ""),
+    ("update_menu anvil: text Bob", 'rift.players.update_menu(p.uuid, "typ", { text = "Bob" })', 0, "Bob"),
+    ("update_menu anvil: result button",
+     'rift.players.update_menu(p.uuid, "typ", { slots = { { slot = 2, item = "emerald", id = "submit", '
+     'name = { mini = "<green>Accept" } } } })', 0, None),
+    ("chest redraw r", "rift.players.menu(p.uuid, %s)" % REDRAW, 1, None),
+    ("redraw r: two slots changed", "rift.players.menu(p.uuid, %s)" % REDRAW_SLOTS, 0, None),
+    ("redraw r: new title", "rift.players.menu(p.uuid, %s)" % REDRAW_TITLE, 1, None),
+    ("redraw r: 4 rows", "rift.players.menu(p.uuid, %s)" % REDRAW_ROWS, 1, None),
+    ("chest pm (layout and keys)", "rift.players.menu(p.uuid, %s)" % PATCHED, 1, None),
+    ("update_menu chest: slots, one emptied",
+     'rift.players.update_menu(p.uuid, "pm", { slots = { { slot = 13, item = "emerald", name = "Patched" }, '
+     '{ slot = 0, empty = true } } })', 0, None),
+    ("update_menu chest: keys",
+     'rift.players.update_menu(p.uuid, "pm", { keys = { A = { item = "gold_ingot", name = "Gold" } } })', 0, None),
+    ("update_menu chest: title", 'rift.players.update_menu(p.uuid, "pm", { title = { mini = "<blue>Patched title" } })', 1, None),
+    ("anvil left open (client leaves)", "rift.players.menu(p.uuid, %s)" % ANVIL_STAY, 1, "Left"),
 ]
-# Steps that open a screen for the client (the rest only changes or closes one).
-OPENS = {0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 6: 1}
-CLOSES = {5}
+CLOSES = {5}  # steps (0-based) that close a screen for the client
 
 
 PLUGIN_TOML = """name = "menutest"
@@ -227,7 +308,7 @@ def plugin_lua(name):
     not a player hook.
     """
     steps = []
-    for index, (label, call) in enumerate(STEPS, 1):
+    for index, (label, call, _opens, _rename) in enumerate(STEPS, 1):
         body = (call % {"texture": TEXTURE, "name": name}) if "%(" in call else call
         steps.append(f"    [{index}] = {{ {json.dumps(label)}, function(p) return {body} end }},")
     return (
@@ -244,6 +325,11 @@ def plugin_lua(name):
         '    rift.log("info", "MENUTEST step " .. n .. " " .. step[1] .. " queued=" .. tostring(ok))\n'
         '    rift.players.message(p.uuid, "MENUTEST step " .. n .. " " .. step[1] .. " queued=" .. tostring(ok))\n'
         '    return { body = "step " .. n .. " queued=" .. tostring(ok) }\n'
+        "end)\n"
+        'rift.on("menu", function(ctx)\n'
+        '    rift.log("info", "MENUEVENT menu=" .. tostring(ctx.menu) .. " kind=" .. tostring(ctx.kind) ..'
+        ' " action=" .. tostring(ctx.action) .. " reason=" .. tostring(ctx.reason) ..'
+        ' " text=[" .. tostring(ctx.text) .. "]")\n'
         "end)\n")
 
 
@@ -302,7 +388,10 @@ class Packets:
         self.notes = []
         self.started = time.monotonic()
         self.decoders = {}
+        self.serverbound = {}
         self.total = 0
+        self.step = 0  # the step in progress (1-based; 0 before the first)
+        self.renames = []  # (step, seconds, "name_item" | "MC|ItemName", text) the client sent by itself
 
     def see(self, protocol, packet_id, body):
         self.total += 1
@@ -329,7 +418,33 @@ class Packets:
         window = value.get("windowId", value.get("containerId")) if isinstance(value, dict) else None
         extra = {"open_window": value.get("inventoryType", value.get("windowType", value.get("windowTitle"))),
                  "window_items": len(value.get("items", ())), "set_slot": value.get("slot")}.get(name)
-        self.events.append((round(time.monotonic() - self.started, 1), name, window, extra))
+        self.events.append((round(time.monotonic() - self.started, 1), name, window, extra, self.step))
+
+    def sent(self, protocol, packet_id, body):
+        """A packet from the client: the anvil's rename, by its own doing."""
+        if protocol not in self.serverbound:
+            try:
+                names = protodef.Decoder(protodef.schema_for(protocol), "play", "serverbound").names
+            except Exception as exc:
+                self.problems.append(f"no serverbound schema for protocol {protocol}: {exc}")
+                names = {}
+            self.serverbound[protocol] = names
+        name = self.serverbound[protocol].get(packet_id)
+        try:
+            if name == "name_item":  # a string
+                size, offset = real_client.read_varint_from(body, 0)
+                self.renames.append((self.step, round(time.monotonic() - self.started, 1), name,
+                                     body[offset:offset + size].decode("utf-8", "replace")))
+            elif name == "custom_payload":  # 1.12: channel string, then the data
+                size, offset = real_client.read_varint_from(body, 0)
+                channel = body[offset:offset + size].decode("utf-8", "replace")
+                if channel == "MC|ItemName":
+                    data = body[offset + size:]
+                    size, offset = real_client.read_varint_from(data, 0)
+                    self.renames.append((self.step, round(time.monotonic() - self.started, 1), channel,
+                                         data[offset:offset + size].decode("utf-8", "replace")))
+        except Exception as exc:
+            self.problems.append(f"{name} from the client does not parse: {exc}")
 
     def rift(self, name):
         return [event for event in self.events if event[1] == name and event[2] is not None
@@ -345,10 +460,10 @@ def observe_relay():
 
     def frame(self, data, raw, clientbound, session):
         try:
-            if clientbound and session["state"] == "play":
+            if session["state"] == "play":
                 payload = self.decode(data, session)
                 packet_id, offset = real_client.read_varint_from(payload, 0)
-                PACKETS.see(self.protocol, packet_id, payload[offset:])
+                (PACKETS.see if clientbound else PACKETS.sent)(self.protocol, packet_id, payload[offset:])
         except Exception as exc:  # observation must never break the stream
             PACKETS.problems.append(f"relay observer: {type(exc).__name__}: {exc}")
         return original(self, data, raw, clientbound, session)
@@ -369,6 +484,7 @@ def run(binary, server, client, stay, directory):
         def go():
             time.sleep(WORLD_SECONDS)
             for number in range(1, len(STEPS) + 1):
+                PACKETS.step = number
                 answers.append((number, *post_step(web, token, number)))
                 time.sleep(STEP_SECONDS)
         threading.Thread(target=go, daemon=True).start()
@@ -406,9 +522,24 @@ def run(binary, server, client, stay, directory):
     problems += PACKETS.problems[:5]
     opens, closes = PACKETS.rift("open_window"), PACKETS.rift("close_window")
     contents = PACKETS.rift("window_items") + PACKETS.rift("set_slot")
-    if len(opens) < sum(OPENS.values()):
+    expected_opens = sum(opens_wanted for _, _, opens_wanted, _ in STEPS)
+    if len(opens) < expected_opens:
         problems.append(f"the client was sent {len(opens)} open_window packets for Rift containers, "
-                        f"expected {sum(OPENS.values())}")
+                        f"expected {expected_opens}")
+    for number, (label, _call, opens_wanted, _rename) in enumerate(STEPS, 1):
+        got = sum(1 for event in opens if event[4] == number)
+        if got != opens_wanted:
+            problems.append(f"step {number} ({label}): {got} open_window packets, expected {opens_wanted}")
+    renames = {}
+    for number, (label, _call, _opens, wanted) in enumerate(STEPS, 1):
+        if wanted is None:
+            continue
+        sent = [text for step, _, _, text in PACKETS.renames if step == number]
+        renames[number] = sent
+        if wanted and wanted not in sent:
+            problems.append(f"step {number} ({label}): the client's rename should carry {wanted!r}, "
+                            f"it sent {sent or 'nothing'}")
+    menu_events = [line.split("MENUEVENT ", 1)[1] for line in rift_text.splitlines() if "MENUEVENT " in line]
     if not contents:
         problems.append("no window contents were sent for a Rift container")
     if len(closes) < len(CLOSES):
@@ -416,13 +547,16 @@ def run(binary, server, client, stay, directory):
     ok = result.ok and not problems
     report = dict(server=server.name, client=client, ok=ok, reason=result.reason, joined=result.joined,
                   stayed=result.stayed, failures=result.failures, unknown=result.unknown, problems=problems,
-                  chat=chat, rift_open_window=len(opens), rift_close_window=len(closes),
+                  chat=chat, renames=PACKETS.renames, menu_events=menu_events, rift_open_window=len(opens), rift_close_window=len(closes),
                   rift_contents=len(contents), play_packets_seen=PACKETS.total, notes=PACKETS.notes, events=PACKETS.events, client_logs=result.log_dir)
     (directory / "result.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     text = result.report().replace("PASS" if result.ok else "FAIL", "PASS" if ok else "FAIL", 1)
     text += (f"\n  menus: {len(queued)}/{len(STEPS)} steps queued, relay saw {len(opens)} open_window, "
              f"{len(contents)} content packets, {len(closes)} close_window for Rift containers"
              f"\n  server {server.name}; logs {directory}")
+    text += "".join(f"\n  rename step {number} ({STEPS[number - 1][0]}): "
+                    f"{', '.join(repr(t) for t in sent) or 'none'}" for number, sent in renames.items())
+    text += f"\n  menu events: {len(menu_events)}; " + "; ".join(menu_events[:12])
     text += "".join(f"\n  NOTE: {note}" for note in PACKETS.notes[:2])
     text += "".join(f"\n  PROBLEM: {problem}" for problem in problems[:10])
     return ok, report, text
