@@ -157,7 +157,11 @@ are right again.
   the translator, takes it out of the stream and sends the backend the
   acknowledgement at once. Until then the backend ignores clicks, the
   player's real ones included. This works the same for every client and
-  translator.
+  translator. Rift counts the requests whose rejection may still come and
+  takes out one rejection for each, so a request sent after an earlier one
+  counted as lost has its rejection caught too, and a rejection that is not
+  Rift's passes. It stops looking 30 seconds after its last request, so a
+  backend that never rejects costs nothing per packet.
 - **One at a time.** A request is on its way until a `container_set_content`
   for the player's inventory arrives, or for 5 seconds, after which it counts
   as lost. Two requests are at least 250 ms apart. A click that needs a

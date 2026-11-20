@@ -856,6 +856,53 @@ async fn a_server_switch_closes_the_menu_before_it_starts() {
 }
 
 #[tokio::test]
+async fn each_outstanding_request_takes_one_rejection_out_and_no_more() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 340;
+        let (server, mut peer) = tokio::io::duplex(65536);
+        let mut connection = Connection::new(server, State::Play);
+        let rejection = Packet::new(id(protocol, CB, "container_ack"), vec![0, 0xff, 0xff, 0]);
+        let acknowledgement = packets::acknowledgement(protocol).unwrap();
+        // Two requests, the second after the first counted as lost: both
+        // rejections are Rift's.
+        connection.expect_rejection(protocol);
+        connection.expect_rejection(protocol);
+        for _ in 0..2 {
+            send(&mut peer, &rejection).await;
+            assert!(
+                timeout(Duration::from_millis(50), connection.read_fresh())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(next(&mut peer).await, acknowledgement);
+        }
+        // None is outstanding: Rift no longer looks, and a rejection that is
+        // not Rift's passes.
+        assert_eq!(connection.awaiting_rejection, None);
+        send(&mut peer, &rejection).await;
+        assert_eq!(
+            connection.read_fresh().await.unwrap(),
+            Some(rejection.clone())
+        );
+        // A backend that never rejects: Rift stops looking long after the
+        // request counted as lost.
+        connection.expect_rejection(protocol);
+        if let Some(rejections) = connection.awaiting_rejection.as_mut() {
+            rejections.last = std::time::Instant::now() - REJECTION_WAIT;
+        }
+        let other = Packet::new(id(protocol, CB, "set_time"), vec![0; 16]);
+        send(&mut peer, &other).await;
+        assert_eq!(connection.read_fresh().await.unwrap(), Some(other));
+        assert_eq!(connection.awaiting_rejection, None);
+        send(&mut peer, &rejection).await;
+        assert_eq!(connection.read_fresh().await.unwrap(), Some(rejection));
+        nothing(&mut peer).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn a_translated_backend_s_rejection_is_caught_before_the_translator() {
     timeout(Duration::from_secs(5), async {
         let backend_protocol = 340;
@@ -875,7 +922,7 @@ async fn a_translated_backend_s_rejection_is_caught_before_the_translator() {
         assert_eq!(next(&mut peer).await, request);
         // The rejection never reaches the translator; the acknowledgement
         // goes back at once.
-        connection.awaiting_rejection = Some(backend_protocol);
+        connection.expect_rejection(backend_protocol);
         let rejection = Packet::new(
             id(backend_protocol, CB, "container_ack"),
             vec![0, 0xff, 0xff, 0],

@@ -43,10 +43,28 @@ pub struct Connection<S> {
     /// answers to the backend, and packets Rift sends on its own.
     replies: Vec<u8>,
     replies_offset: usize,
-    /// The protocol of a backend up to 1.16.5 that Rift asked for the
-    /// player's inventory: its rejection of the request is taken out of the
-    /// stream, before any translator, and acknowledged here.
-    awaiting_rejection: Option<i32>,
+    /// Inventory requests to a backend up to 1.16.5 whose rejection may
+    /// still come: each rejection is taken out of the stream, before any
+    /// translator, and acknowledged here. A switch starts a new connection
+    /// without any.
+    awaiting_rejection: Option<Rejections>,
+}
+
+/// How long Rift looks for the rejection of its last inventory request: long
+/// after the request counts as lost, a backend that never rejects costs no
+/// more lookups. A rejection later than this reaches the client, which
+/// acknowledges one for its own inventory by itself.
+const REJECTION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The inventory requests whose rejection may still come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rejections {
+    /// The backend's protocol.
+    protocol: i32,
+    /// Requests sent and not yet rejected.
+    outstanding: u32,
+    /// When the last request went out, for [`REJECTION_WAIT`].
+    last: std::time::Instant,
 }
 
 struct Translation {
@@ -98,6 +116,40 @@ impl<S> Connection<S> {
             replies_offset: 0,
             awaiting_rejection: None,
         }
+    }
+
+    /// An inventory request in `protocol` went out: its rejection is
+    /// expected, after those of earlier requests.
+    fn expect_rejection(&mut self, protocol: i32) {
+        let outstanding = self
+            .awaiting_rejection
+            .filter(|rejections| rejections.protocol == protocol)
+            .map_or(0, |rejections| rejections.outstanding);
+        self.awaiting_rejection = Some(Rejections {
+            protocol,
+            outstanding: outstanding.saturating_add(1),
+            last: std::time::Instant::now(),
+        });
+    }
+
+    /// Whether `packet` is the rejection of an outstanding inventory
+    /// request, which it then consumes. Stops looking once none is
+    /// outstanding or the last one was sent [`REJECTION_WAIT`] ago.
+    fn take_rejection(&mut self, packet: &Packet) -> Option<i32> {
+        let rejections = self.awaiting_rejection.as_mut()?;
+        if rejections.last.elapsed() >= REJECTION_WAIT {
+            self.awaiting_rejection = None;
+            return None;
+        }
+        if !protocol::menu::is_rejection(rejections.protocol, packet) {
+            return None;
+        }
+        let protocol = rejections.protocol;
+        rejections.outstanding -= 1;
+        if rejections.outstanding == 0 {
+            self.awaiting_rejection = None;
+        }
+        Some(protocol)
     }
 
     /// The protocol the peer speaks: the backend's own when translated.
@@ -318,10 +370,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 Poll::Ready(Ok(Some(frame))) => frame,
             };
             let packet = self.codec.decode(&frame)?;
-            if let Some(protocol) = self.awaiting_rejection
-                && protocol::menu::is_rejection(protocol, &packet)
-            {
-                self.awaiting_rejection = None;
+            if let Some(protocol) = self.take_rejection(&packet) {
                 let acknowledgement = protocol::menu::acknowledgement(protocol)?;
                 self.inject_raw(&acknowledgement)?;
                 // Until it is acknowledged the backend ignores every click.

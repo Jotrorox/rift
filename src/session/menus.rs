@@ -409,7 +409,7 @@ impl Menus {
         self.request.last = Some(now);
         self.request.again = false;
         if recipe == Recipe::Transaction {
-            backend.awaiting_rejection = Some(protocol);
+            backend.expect_rejection(protocol);
         }
         backend.inject_raw(&packets::inventory_request(protocol)?)
     }
