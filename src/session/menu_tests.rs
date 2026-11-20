@@ -1945,3 +1945,35 @@ async fn renames_are_rift_s_only_while_its_anvil_was_the_last_screen() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn a_client_that_does_not_read_cannot_pile_up_undone_clicks() {
+    timeout(Duration::from_secs(10), async {
+        let protocol = 774;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        // Drags over every menu slot, each undone with 27 slots, from a
+        // client that never reads what Rift sends it.
+        let all: Vec<i16> = (0..27).collect();
+        let drag = click(protocol, -999, 1, 5, &all);
+        let mut blocked = false;
+        for _ in 0..5000 {
+            send(&mut client, &drag).await;
+            match timeout(Duration::from_millis(100), session.forward()).await {
+                Ok(event) => assert_eq!(event.unwrap(), SessionEvent::Packet),
+                Err(_) => {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        assert!(blocked, "Rift kept reading a client that does not read");
+        assert!(
+            session.client.replies.len() <= 2 * MAX_QUEUED_REPLIES,
+            "{} bytes queued",
+            session.client.replies.len()
+        );
+    })
+    .await
+    .unwrap();
+}

@@ -455,6 +455,11 @@ const MAX_LOCALE: usize = 16;
 /// keystroke; extra requests get an empty answer without running Lua.
 const SUGGESTIONS_PER_SECOND: u32 = 10;
 
+/// Bytes of Rift's own packets (menus) that may wait for a client before
+/// Rift stops reading it: each undone click queues slots for the client,
+/// and one that does not read must not make them pile up.
+const MAX_QUEUED_REPLIES: usize = 256 * 1024;
+
 #[derive(Default)]
 struct SuggestionBudget {
     window: Option<std::time::Instant>,
@@ -1858,6 +1863,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         // An owner that did not answer a held chat packet has not allowed it.
         self.pass_chat().await?;
         loop {
+            if self.client.replies.len() > MAX_QUEUED_REPLIES {
+                // Cancel-safe: what is not written stays queued.
+                self.flush_injected().await?;
+            }
             let backend = self
                 .backend
                 .as_mut()
