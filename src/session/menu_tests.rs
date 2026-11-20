@@ -52,6 +52,7 @@ async fn menu_session(
     let (server, backend) = tokio::io::duplex(1 << 20);
     session.backend = Some(Connection::new(server, State::Play));
     session.joined = true;
+    session.in_world = true;
     (session, client, backend)
 }
 
@@ -393,6 +394,7 @@ async fn clicks_from_1_17_are_undone_from_their_list_of_changed_slots() {
             send(&mut client, &click(protocol, DIG, 40, 2, &[DIG])).await;
             let event = delivery(session.forward().await.unwrap()).event;
             assert_eq!(event.click, Some(Click::Offhand));
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
             flush(&mut session).await;
             assert_undone(protocol, &mut client, FIRST, &[DIG]).await;
             assert_eq!(
@@ -487,7 +489,9 @@ async fn backends_up_to_1_16_5_are_asked_with_a_rejected_click_rift_acknowledges
                 next(&mut backend).await,
                 packets::acknowledgement(protocol).unwrap()
             );
-            // The answer came: the click that waited asks once more.
+            // The answer came: the click that waited asks once more, at the
+            // end of the interval between requests.
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
             flush(&mut session).await;
             assert_eq!(
                 next(&mut backend).await,
@@ -686,7 +690,6 @@ async fn every_ending_has_its_reason() {
                 [("shop".into(), CloseReason::Server)],
                 "{name}"
             );
-            session.joined = true;
             show(&mut session, &mut client, shop(), owner()).await;
             container += 1;
         }
@@ -1284,6 +1287,7 @@ async fn an_unanswered_inventory_request_counts_as_lost_after_a_while() {
                 .checked_sub(crate::session::menus::REQUEST_TIMEOUT)
                 .unwrap();
             session.menus.request.sent = Some(lost);
+            session.menus.request.last = Some(lost);
             send(&mut client, &shift).await;
             session.forward().await.unwrap();
             flush(&mut session).await;
@@ -1291,6 +1295,7 @@ async fn an_unanswered_inventory_request_counts_as_lost_after_a_while() {
             // A request waiting for the menu to close is not held back by a
             // lost one either.
             session.menus.request.sent = Some(lost);
+            session.menus.request.last = Some(lost);
             if protocol < 768 {
                 send(&mut backend, &hotbar_slot(protocol)).await;
                 session.forward().await.unwrap();
@@ -1301,6 +1306,127 @@ async fn an_unanswered_inventory_request_counts_as_lost_after_a_while() {
             drain(&mut client).await;
             nothing(&mut backend).await;
         }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_player_in_a_world_rift_cannot_switch_from_gets_menus_and_dialogs() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        session.joined = false;
+        session.in_world = false;
+        // Between servers the menu is not shown, and its plugin hears so.
+        session.show_menu(shown(shop(), owner())).await.unwrap();
+        nothing(&mut client).await;
+        assert!(!session.menu_open());
+        assert_eq!(closes(&mut session), [("shop".into(), CloseReason::Switch)]);
+        // A Join Game Rift could not switch away from, such as a world that
+        // enforces secure chat for an offline session (here one Rift cannot
+        // read at all), still puts the player in a world.
+        let login = Packet::new(id(protocol, CB, "login"), vec![0]);
+        send(&mut backend, &login).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut client).await, login);
+        assert!(!session.joined && !session.can_switch());
+        show(&mut session, &mut client, shop(), owner()).await;
+        assert!(session.menu_open());
+        let dialog = Arc::new(
+            crate::dialog::Dialog::parse(&json!({"type": "notice", "title": "Rules"})).unwrap(),
+        );
+        session.show_dialog(dialog, owner()).await.unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(packets.last().unwrap().id, 0x8a);
+        assert_eq!(
+            closes(&mut session),
+            [("shop".into(), CloseReason::Replaced)]
+        );
+        // A reconfiguration takes the player out of the world again.
+        send(&mut backend, &Packet::empty(0x74)).await;
+        session.forward().await.unwrap();
+        session.show_menu(shown(shop(), owner())).await.unwrap();
+        assert_eq!(closes(&mut session), [("shop".into(), CloseReason::Switch)]);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn inventory_requests_keep_an_interval_and_the_last_one_always_goes_out() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 774] {
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, shop(), owner()).await;
+            let request = packets::inventory_request(protocol).unwrap();
+            let shift = click(protocol, BUY, 0, 1, &[BUY, 40]);
+            let started = std::time::Instant::now();
+            send(&mut client, &shift).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            assert_eq!(next(&mut backend).await, request);
+            // Answered at once, and three more shift-clicks right away: no
+            // request until the interval is over, then one.
+            if protocol < 756 {
+                let rejection =
+                    Packet::new(id(protocol, CB, "container_ack"), vec![0, 0xff, 0xff, 0]);
+                send(&mut backend, &rejection).await;
+            }
+            send(&mut backend, &inventory(protocol)).await;
+            session.forward().await.unwrap();
+            for _ in 0..3 {
+                send(&mut client, &shift).await;
+                session.forward().await.unwrap();
+            }
+            flush(&mut session).await;
+            if protocol < 756 {
+                assert_eq!(
+                    next(&mut backend).await,
+                    packets::acknowledgement(protocol).unwrap()
+                );
+            }
+            nothing(&mut backend).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            assert_eq!(next(&mut backend).await, request, "{protocol}");
+            assert!(started.elapsed() >= crate::session::menus::REQUEST_INTERVAL);
+            nothing(&mut backend).await;
+            drain(&mut client).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_request_that_waited_for_a_lost_one_goes_out_when_it_counts_as_lost() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        let request = packets::inventory_request(protocol).unwrap();
+        let shift = click(protocol, BUY, 0, 1, &[BUY, 40]);
+        send(&mut client, &shift).await;
+        session.forward().await.unwrap();
+        flush(&mut session).await;
+        assert_eq!(next(&mut backend).await, request);
+        send(&mut client, &shift).await;
+        session.forward().await.unwrap();
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+        // The backend never answers. Without another click, the waiting
+        // request goes out once the first counts as lost.
+        let almost = std::time::Instant::now()
+            .checked_sub(crate::session::menus::REQUEST_TIMEOUT - Duration::from_millis(100))
+            .unwrap();
+        session.menus.request.sent = Some(almost);
+        session.menus.request.last = Some(almost);
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        assert_eq!(next(&mut backend).await, request);
+        nothing(&mut backend).await;
+        drain(&mut client).await;
     })
     .await
     .unwrap();

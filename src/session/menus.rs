@@ -39,8 +39,15 @@ const WHOLE_INVENTORY_SLOTS: i32 = 768;
 /// slot yet.
 const MAX_STATE_ID: i32 = 0x7fff;
 /// An inventory request without an answer after this long counts as lost:
-/// the next click that needs one sends a new request.
+/// one that waited for it goes out then.
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Rift asks a backend for the inventory at most this often. A need in
+/// between is met at the end of the interval, so the last disturbance is
+/// always repaired.
+pub(super) const REQUEST_INTERVAL: Duration = Duration::from_millis(250);
+/// The shortest time between two `text` events of an anvil.
+const TEXT_EVENT_INTERVAL: Duration =
+    Duration::from_millis(1000 / menu::TEXT_EVENTS_PER_SECOND as u64);
 /// Rift's container IDs, 101 to 127.
 const CONTAINERS: usize = (packets::LAST_CONTAINER - packets::FIRST_CONTAINER + 1) as usize;
 
@@ -82,6 +89,10 @@ pub(crate) struct OpenMenu {
     pub(crate) stacks: Vec<Arc<[u8]>>,
     /// The skins of the players its heads name, for slots built again.
     pub(crate) shown: Shown,
+    /// Anvil with `typing`: when the last `text` event was reported, and
+    /// whether a newer text waits for the next one.
+    last_text: Option<Instant>,
+    text_pending: bool,
 }
 
 impl OpenMenu {
@@ -104,6 +115,33 @@ impl OpenMenu {
             })
             .collect::<io::Result<_>>()?;
         Ok(())
+    }
+
+    /// The player typed a new text: whether to report it now, within
+    /// [`TEXT_EVENT_INTERVAL`] of the last report. One that has to wait is
+    /// reported when the interval ends (see [`Self::text_due`]), so the
+    /// final text always is.
+    fn typed_now(&mut self, now: Instant) -> bool {
+        if self
+            .last_text
+            .is_some_and(|last| now.duration_since(last) < TEXT_EVENT_INTERVAL)
+        {
+            self.text_pending = true;
+            return false;
+        }
+        self.typed_reported(now);
+        true
+    }
+
+    fn typed_reported(&mut self, now: Instant) {
+        self.last_text = Some(now);
+        self.text_pending = false;
+    }
+
+    /// When the text that waits is reported.
+    fn text_due(&self) -> Option<Instant> {
+        let last = self.last_text.filter(|_| self.text_pending)?;
+        Some(last + TEXT_EVENT_INTERVAL)
     }
 
     /// The state ID of the next update.
@@ -129,8 +167,12 @@ pub(super) struct Request {
     /// answer, after the rejection's acknowledgement where there is one, or
     /// until [`REQUEST_TIMEOUT`] passed.
     pub(super) sent: Option<Instant>,
-    /// Another click disturbed the inventory rows meanwhile.
-    again: bool,
+    /// When the last request went out, for [`REQUEST_INTERVAL`].
+    pub(super) last: Option<Instant>,
+    /// Another click disturbed the inventory rows meanwhile: a request goes
+    /// out when the one on its way is answered or lost, and the interval
+    /// is over.
+    pub(super) again: bool,
     /// Ask when the menu closes: a 1.17 backend, or a single-slot update the
     /// client dropped while the menu was open.
     on_close: bool,
@@ -140,6 +182,20 @@ impl Request {
     fn in_flight(&self) -> bool {
         self.sent
             .is_some_and(|sent| sent.elapsed() < REQUEST_TIMEOUT)
+    }
+
+    /// When the request that waits goes out without another reason: when
+    /// the one on its way counts as lost, or at the end of the interval.
+    fn due(&self) -> Option<Instant> {
+        if !self.again {
+            return None;
+        }
+        Some(match self.sent {
+            Some(sent) if self.in_flight() => sent + REQUEST_TIMEOUT,
+            _ => self
+                .last
+                .map_or_else(Instant::now, |last| last + REQUEST_INTERVAL),
+        })
     }
 }
 
@@ -165,6 +221,22 @@ pub(crate) struct Menus {
     closed: VecDeque<Delivery>,
     /// Events handed out and not yet delivered to their plugin.
     undelivered: Arc<AtomicUsize>,
+}
+
+/// Who showed a menu, for logs.
+fn describe(owner: &Owner) -> String {
+    match owner {
+        Owner::Script => "rift.lua".into(),
+        Owner::Plugin(name) => format!("plugin {name}"),
+        Owner::Remote {
+            peer, plugin: None, ..
+        } => format!("rift.lua of peer {peer}"),
+        Owner::Remote {
+            peer,
+            plugin: Some(name),
+            ..
+        } => format!("plugin {name} of peer {peer}"),
+    }
 }
 
 /// The index of Rift's container `id` in [`Menus::used`].
@@ -214,6 +286,14 @@ impl Menus {
         Delivery { owner, event }
     }
 
+    /// A menu that was never shown still ends with its one `close` event,
+    /// so its plugin learns that it did not reach the player.
+    fn refuse(&mut self, shown: &Shown, reason: CloseReason) {
+        let event = MenuEvent::close(&shown.menu, reason);
+        let delivery = self.delivery(shown.owner.clone(), event);
+        self.closed.push_back(delivery);
+    }
+
     /// End the open menu. `client` tells the client to close it, for an
     /// ending it does not know of; `backend` is asked for the inventory if a
     /// request waits for the menu to close.
@@ -251,6 +331,8 @@ impl Menus {
         backend: &mut Connection<B>,
     ) -> io::Result<()> {
         if !backend.state.settled(State::Play) {
+            // The backend is changing; what it had is gone with it.
+            self.request.again = false;
             return Ok(());
         }
         let protocol = backend.protocol(version);
@@ -264,11 +346,17 @@ impl Menus {
             }
             Recipe::ClaimAll => {}
             Recipe::StateId | Recipe::Transaction => {
-                if self.request.in_flight() {
+                let now = Instant::now();
+                let soon = self
+                    .request
+                    .last
+                    .is_some_and(|last| now.duration_since(last) < REQUEST_INTERVAL);
+                if self.request.in_flight() || soon {
                     self.request.again = true;
                     return Ok(());
                 }
-                self.request.sent = Some(Instant::now());
+                self.request.sent = Some(now);
+                self.request.last = Some(now);
                 self.request.again = false;
             }
         }
@@ -331,6 +419,16 @@ impl Menus {
         Ok(())
     }
 
+    /// When the session has to act on its own next: a waiting inventory
+    /// request, or the last text the player typed in an anvil.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        let text = self.open.as_ref().and_then(OpenMenu::text_due);
+        match (self.request.due(), text) {
+            (Some(request), Some(text)) => Some(request.min(text)),
+            (request, text) => request.or(text),
+        }
+    }
+
     /// The backend is about to change: a switch or a reconfiguration. The
     /// open menu ends, and what Rift knew of the backend's screens and
     /// requests goes with it.
@@ -349,15 +447,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// redraws it: only what changed is sent, and it does not end. Its
     /// events go to `shown.owner` as [`SessionEvent::Menu`] and
     /// [`Self::take_menu_events`]. A player who is not in a world (between
-    /// servers) does not get it.
+    /// servers) does not get it, and its owner gets the `switch` ending.
     pub async fn show_menu(&mut self, shown: Shown) -> io::Result<()> {
         self.client.flush_pending().await?;
-        if !self.joined || !self.client.state.settled(State::Play) {
+        if !self.in_world() {
+            self.menu_undeliverable(&shown);
             return Ok(());
         }
         let version = self.version()?;
         let protocol = version.number();
         if !packets::supported(protocol) || shown.menu.kind() == menu::Kind::Anvil {
+            log_warn!(
+                "menu {} of {}: not shown: the client cannot show it",
+                shown.menu.id(),
+                describe(&shown.owner)
+            );
+            self.menus.refuse(&shown, CloseReason::Server);
             return Ok(());
         }
         let mut menu = Arc::unwrap_or_clone(shown.menu.clone());
@@ -379,9 +484,16 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             updates: 0,
             stacks: Vec::new(),
             shown,
+            last_text: None,
+            text_pending: false,
         };
         if let Err(error) = open.build_stacks(protocol) {
-            log_error!("menu {}: {error}", open.menu.id());
+            log_warn!(
+                "menu {} of {}: not shown: {error}",
+                open.menu.id(),
+                describe(&open.owner)
+            );
+            self.menus.refuse(&open.shown, CloseReason::Server);
             return Ok(());
         }
         let container = self.menus.take_container(open.slots());
@@ -441,7 +553,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         };
         let mut menu = open.menu.clone();
         if let Err(error) = menu.apply(&update.patch) {
-            log_error!("menu {}: {error}", update.id);
+            // The plugin's call returned long ago: it could not know the
+            // menu its patch would meet.
+            log_warn!(
+                "menu {} of {}: patch not applied: {error}",
+                update.id,
+                describe(&update.owner)
+            );
             return Ok(());
         }
         let mut heads = (*open.shown.heads).clone();
@@ -477,7 +595,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             std::mem::take(&mut open.stacks),
         );
         if let Err(error) = open.build_stacks(version.number()) {
-            log_error!("menu {}: {error}", open.menu.id());
+            log_warn!(
+                "menu {} of {}: not redrawn: {error}",
+                open.menu.id(),
+                describe(&open.owner)
+            );
             (open.menu, open.shown, open.stacks) = old;
             return Ok(());
         }
@@ -544,6 +666,17 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.menus.closed.drain(..).collect()
     }
 
+    /// A menu that cannot reach the player now, because they are between
+    /// servers: its owner gets the `switch` ending at once.
+    pub fn menu_undeliverable(&mut self, shown: &Shown) {
+        log_debug!(
+            "menu {} of {}: not shown: the player is not in a world",
+            shown.menu.id(),
+            describe(&shown.owner)
+        );
+        self.menus.refuse(shown, CloseReason::Switch);
+    }
+
     /// The player left: the open menu ends with `disconnect`.
     pub fn end_menus(&mut self) {
         if let Ok(version) = self.version() {
@@ -586,6 +719,30 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub(super) fn end_menu_for_configuration(&mut self) -> io::Result<()> {
         let version = self.version()?;
         self.menus.leave_backend::<C, B>(version)
+    }
+
+    /// The [`Menus::deadline`] passed: send the inventory request that
+    /// waited, or report the text the player typed last.
+    pub(super) fn menu_timer(&mut self, version: ProtocolVersion) -> io::Result<SessionEvent> {
+        let now = Instant::now();
+        if self.menus.request.due().is_some_and(|due| due <= now) {
+            match self.backend.as_mut() {
+                Some(backend) => self.menus.request_inventory(version, backend)?,
+                None => self.menus.request.again = false,
+            }
+        }
+        let undelivered = self.menus.undelivered.load(Ordering::Relaxed);
+        if let Some(open) = self.menus.open.as_mut()
+            && open.text_due().is_some_and(|due| due <= now)
+        {
+            open.typed_reported(now);
+            if undelivered < menu::MAX_PENDING_EVENTS {
+                let event = MenuEvent::text(&open.menu);
+                let owner = open.owner.clone();
+                return Ok(SessionEvent::Menu(self.menus.delivery(owner, event)));
+            }
+        }
+        Ok(SessionEvent::Packet)
     }
 
     /// Write what Rift queued for the client now. Cancel-safe: what is not

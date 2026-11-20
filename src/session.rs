@@ -503,7 +503,13 @@ pub struct Session<C, B> {
     forwarding: Option<Forwarding>,
     network: bool,
     bungeecord: bool,
+    /// The player is in a world Rift can switch away from: its Join Game
+    /// passed `validate_join`.
     joined: bool,
+    /// The client got a Join Game and no reconfiguration since, whether or
+    /// not Rift could switch away from that world: the player is playing,
+    /// and screens such as menus and dialogs can be shown.
+    in_world: bool,
     pending_join_valid: bool,
     switch_in_progress: bool,
     backend_error: Option<io::Error>,
@@ -565,6 +571,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             network: false,
             bungeecord: false,
             joined: false,
+            in_world: false,
             pending_join_valid: false,
             switch_in_progress: false,
             backend_error: None,
@@ -1211,6 +1218,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 self.chat_chain_broken = false;
                 self.backend_error = None;
                 self.joined = true;
+                self.in_world = true;
                 self.switch_in_progress = false;
                 return Ok(());
             }
@@ -1245,6 +1253,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // Supported clients: ClientPacketListener.handleConfigurationStart /
             // handleLogin; ClientConfigurationPacketListenerImpl.finish.
             self.joined = false;
+            self.in_world = false;
             self.tab_list.reset();
             self.boss_bars.reset();
             // Configuration closes every screen, dialogs included.
@@ -1697,7 +1706,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         owner: crate::dialog::Owner,
     ) -> io::Result<()> {
         self.client.flush_pending().await?;
-        if !self.joined || !self.client.state.settled(State::Play) {
+        if !self.in_world() {
             return Ok(());
         }
         let packet = protocol::dialog::show(self.version()?, dialog.wire())?;
@@ -1719,7 +1728,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             return Ok(());
         }
         self.client.flush_pending().await?;
-        if !self.joined || !self.client.state.settled(State::Play) {
+        if !self.in_world() {
             return Ok(());
         }
         let packet = protocol::dialog::clear(self.version()?)?;
@@ -1739,6 +1748,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             self.dialog = None;
         }
         SessionEvent::Dialog(DialogClick { owner, response })
+    }
+
+    /// Whether the player is playing in a world and not between servers, so
+    /// a screen Rift shows reaches them.
+    fn in_world(&self) -> bool {
+        self.in_world && !self.switch_in_progress && self.client.state.settled(State::Play)
     }
 
     /// Whether `send_bungeecord` can currently reach a playing backend.
@@ -1862,6 +1877,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             enum Incoming {
                 Client(io::Result<ConnectionEvent>),
                 Backend(io::Result<ConnectionEvent>),
+                /// Menus have something to do on their own.
+                Timer,
             }
             let read_client = !self.client_eof && backend.pending.is_none();
             // Login plugin requests can queue proxy-owned backend writes. Do
@@ -1869,11 +1886,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             let read_backend = self.client.pending.is_none()
                 && (backend.state.phase(Direction::Clientbound) != State::Login
                     || backend.pending.is_none());
+            let deadline = self.menus.deadline();
             let incoming = tokio::select! {
                 event = self.client.next(read_client) => Incoming::Client(event),
                 event = backend.next(read_backend) => Incoming::Backend(event),
+                () = sleep_until(deadline) => Incoming::Timer,
             };
             match incoming {
+                Incoming::Timer => return self.menu_timer(version),
                 Incoming::Client(Err(error)) => return Err(error),
                 Incoming::Backend(Err(error)) => {
                     self.backend_error = Some(error);
@@ -1886,6 +1906,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 }
                 Incoming::Client(Ok(ConnectionEvent::Written(PacketKind::JoinGame))) => {
                     self.joined = self.pending_join_valid;
+                    self.in_world = true;
                     self.switch_in_progress = false;
                     return Ok(SessionEvent::Packet);
                 }
@@ -2199,6 +2220,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                         PacketKind::StartConfiguration => {
                             self.joined = false;
+                            self.in_world = false;
                             self.tab_list.reset();
                             self.boss_bars.reset();
                             self.dialog = None;
@@ -2398,6 +2420,14 @@ fn sync_world(
         world.dimension.as_deref(),
         world.gamemode.map(protocol::GameMode::name),
     );
+}
+
+/// Wait until `deadline`, or forever without one.
+async fn sleep_until(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn velocity_needs_1_13() -> io::Error {

@@ -1159,6 +1159,8 @@ pub async fn handle(
                             phase_deadline = Deadline::now() + Duration::from_secs(30);
                             // Tab lists and boss bars are state and apply after the next join.
                             // Dialogs are dropped: configuration closes every screen.
+                            // A menu's plugin learns that it was not shown.
+                            if let PlayerAction::Menu(shown) = &action { session.menu_undeliverable(shown); }
                             if !matches!(action, PlayerAction::Kick(_) | PlayerAction::Handoff { .. } | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                         }
                         match action {
