@@ -536,7 +536,6 @@ pub(crate) fn menu(value: Value) -> mlua::Result<crate::menu::Menu> {
             .and_then(|spec| crate::menu::Menu::parse(&spec)),
         _ => Err("menu expects a table or JSON text".into()),
     }
-    .and_then(menu_available)
     .map_err(mlua::Error::runtime)
 }
 
@@ -550,14 +549,6 @@ pub(crate) fn menu_patch(value: Value) -> mlua::Result<crate::menu::Patch> {
         _ => Err("patch expects a table or JSON text".into()),
     }
     .map_err(mlua::Error::runtime)
-}
-
-/// A parsed menu Rift can show today.
-pub(crate) fn menu_available(menu: crate::menu::Menu) -> Result<crate::menu::Menu, String> {
-    if menu.kind() == crate::menu::Kind::Anvil {
-        return Err("anvil menus are not available yet".into());
-    }
-    Ok(menu)
 }
 
 const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";

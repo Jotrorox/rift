@@ -14,7 +14,10 @@
 use super::{Connection, Session, SessionEvent};
 use crate::{
     dialog::Owner,
-    menu::{self, CloseReason, Delivery, Menu, MenuEvent, Shown, StackCache, Ticket, Update},
+    menu::{
+        self, ANVIL_LEFT, ANVIL_RESULT, ANVIL_RIGHT, CloseReason, Delivery, Menu, MenuEvent, Shown,
+        StackCache, Ticket, Update,
+    },
     protocol::{
         self, Packet, ProtocolVersion, State,
         menu::{self as packets, BackendPacket, ClientPacket, Ids, Recipe},
@@ -144,6 +147,25 @@ impl OpenMenu {
         Some(last + TEXT_EVENT_INTERVAL)
     }
 
+    /// Build slot `slot`'s stack again after the menu changed.
+    fn rebuild(&mut self, slot: usize, protocol: i32) -> io::Result<()> {
+        let shown = &self.shown;
+        let stack = self.menu.slot_stack(
+            slot,
+            protocol,
+            &|player| shown.head(player),
+            StackCache::shared(),
+        )?;
+        if let Some(old) = self.stacks.get_mut(slot) {
+            *old = stack;
+        }
+        Ok(())
+    }
+
+    fn anvil(&self) -> bool {
+        self.menu.kind() == menu::Kind::Anvil
+    }
+
     /// The state ID of the next update.
     fn next_state(&mut self) -> i32 {
         self.updates += 1;
@@ -217,6 +239,9 @@ pub(crate) struct Menus {
     /// The backend's last `set_experience`, in the client's protocol, which
     /// a click on an anvil's result is followed by again.
     experience: Option<Packet>,
+    /// The last menu Rift opened was an anvil, and the backend opened no
+    /// container since: a late rename is still Rift's.
+    late_anvil: bool,
     /// Ends of menus, waiting for the session's owner to deliver them.
     closed: VecDeque<Delivery>,
     /// Events handed out and not yet delivered to their plugin.
@@ -385,6 +410,7 @@ impl Menus {
                 // The backend's screen replaces Rift's on the client.
                 self.end::<C, B>(version, CloseReason::Server, None, Some(backend))?;
                 self.backend_container = Some(container);
+                self.late_anvil = false;
                 // Packets for that ID are the backend's from now on.
                 if let Some(index) = used_index(container) {
                     self.used[index] = 0;
@@ -456,7 +482,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         let version = self.version()?;
         let protocol = version.number();
-        if !packets::supported(protocol) || shown.menu.kind() == menu::Kind::Anvil {
+        if !packets::supported(protocol) {
             log_warn!(
                 "menu {} of {}: not shown: the client cannot show it",
                 shown.menu.id(),
@@ -466,6 +492,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             return Ok(());
         }
         let mut menu = Arc::unwrap_or_clone(shown.menu.clone());
+        menu.fit_text(protocol);
         if let Some(open) = &self.menus.open
             && open.menu.id() == menu.id()
             && open.owner == shown.owner
@@ -516,6 +543,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 )?);
             }
         }
+        let anvil = open.anvil();
+        if anvil {
+            // After the client's own result and cost for the left item.
+            sent.push(packets::anvil_cost(version, container)?);
+        }
+        self.menus.late_anvil = anvil;
         if let Some(old) = self.menus.open.take() {
             // The same menu with another type or number of rows opens anew,
             // which is no ending either.
@@ -584,17 +617,31 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// sending the client only what changed: the slots that look different
     /// or do something else, or for a new title the screen again with the
     /// same container and every slot, because the client builds it anew.
-    fn redraw(&mut self, version: ProtocolVersion, menu: Menu, shown: Shown) -> io::Result<()> {
+    ///
+    /// An anvil keeps what the player typed. Its client fills the text field
+    /// again whenever the left item changes, so that item is named after the
+    /// current text before it is sent; a patch with `text` puts the new text
+    /// there through it. Whatever input is sent, the result and a cost of 0
+    /// follow, because the client computes its own for the inputs.
+    fn redraw(&mut self, version: ProtocolVersion, mut menu: Menu, shown: Shown) -> io::Result<()> {
         let Some(open) = self.menus.open.as_mut() else {
             return Ok(());
         };
+        let protocol = version.number();
+        let anvil = open.anvil();
+        menu.fit_text(protocol);
         let diff = open.menu.diff(&menu);
+        // The client's field holds the open menu's text.
+        let refill = anvil && open.menu.text() != menu.text();
+        if anvil && (diff.title || refill || diff.slots.contains(&ANVIL_LEFT)) {
+            menu.field_from_text();
+        }
         let old = (
             std::mem::replace(&mut open.menu, menu),
             std::mem::replace(&mut open.shown, shown),
             std::mem::take(&mut open.stacks),
         );
-        if let Err(error) = open.build_stacks(version.number()) {
+        if let Err(error) = open.build_stacks(protocol) {
             log_warn!(
                 "menu {} of {}: not redrawn: {error}",
                 open.menu.id(),
@@ -619,12 +666,34 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // sent too: the client then names the state that showed it.
             let mut slots = diff.slots.clone();
             slots.extend(&diff.actions);
+            if refill {
+                slots.push(ANVIL_LEFT);
+            }
+            if anvil
+                && slots
+                    .iter()
+                    .any(|slot| [ANVIL_LEFT, ANVIL_RIGHT].contains(slot))
+            {
+                slots.push(ANVIL_RESULT);
+            }
             slots.sort_unstable();
             slots.dedup();
             slots
         };
-        if !slots.is_empty() {
+        if !slots.is_empty() || diff.title {
             let state = open.next_state();
+            // A left item that looks as before would not refill the field:
+            // the client sees it change through an empty slot.
+            if refill && !diff.title && open.stacks.get(ANVIL_LEFT) == old.2.get(ANVIL_LEFT) {
+                let empty = menu::stack::encode(protocol, None)?;
+                sent.push(packets::set_slot(
+                    version,
+                    open.container,
+                    state,
+                    ANVIL_LEFT as i16,
+                    &empty,
+                )?);
+            }
             for slot in slots {
                 sent.push(packets::set_slot(
                     version,
@@ -633,6 +702,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     slot as i16,
                     &open.stacks[slot],
                 )?);
+            }
+            if anvil {
+                sent.push(packets::anvil_cost(version, open.container)?);
             }
         }
         for slot in diff.actions {
@@ -765,6 +837,21 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if self.menus.open.is_some() && packets::creative(&ids, packet) {
             return Ok(Some(SessionEvent::Packet));
         }
+        // An anvil's text names no container: while Rift's anvil is open,
+        // or was the last screen, it is Rift's.
+        let anvil = self.menus.open.as_ref().is_some_and(OpenMenu::anvil);
+        let late = self.menus.open.is_none()
+            && self.menus.late_anvil
+            && self.menus.backend_container.is_none();
+        if (anvil || late)
+            && let Some(name) = packets::rename(&ids, packet)?
+        {
+            return Ok(Some(if anvil {
+                self.menu_rename(version, &name)?
+            } else {
+                SessionEvent::Packet
+            }));
+        }
         // A packet Rift cannot read is not Rift's: the backend judges it.
         let Some((kind, container)) = packets::client_container(&ids, packet).ok().flatten() else {
             return Ok(None);
@@ -801,6 +888,50 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         Ok(None)
     }
 
+    /// The player changed the text of Rift's anvil, or the client sent it
+    /// again (when the left slot is set, and on 1.12 on every key). The
+    /// client computed a result and a cost of its own for it, whatever it
+    /// is, so those are sent again each time; a new text is remembered, and
+    /// reported to a menu with `typing`.
+    fn menu_rename(&mut self, version: ProtocolVersion, name: &str) -> io::Result<SessionEvent> {
+        let protocol = version.number();
+        // Longer than the client allows: the game ignores it too, and a
+        // vanilla client never sends one.
+        let Some(text) = menu::anvil_rename(protocol, name) else {
+            return Ok(SessionEvent::Packet);
+        };
+        let undelivered = self.menus.undelivered.load(Ordering::Relaxed);
+        let Some(open) = self.menus.open.as_mut() else {
+            return Ok(SessionEvent::Packet);
+        };
+        let changed = open.menu.text() != text;
+        if changed {
+            open.menu.typed(text);
+            open.rebuild(ANVIL_RESULT, protocol)?;
+        }
+        let state = open.next_state();
+        let result = packets::set_slot(
+            version,
+            open.container,
+            state,
+            ANVIL_RESULT as i16,
+            &open.stacks[ANVIL_RESULT],
+        )?;
+        self.client.inject(&result)?;
+        self.client
+            .inject(&packets::anvil_cost(version, open.container)?)?;
+        if changed
+            && open.menu.typing()
+            && open.typed_now(Instant::now())
+            && undelivered < menu::MAX_PENDING_EVENTS
+        {
+            let event = MenuEvent::text(&open.menu);
+            let owner = open.owner.clone();
+            return Ok(SessionEvent::Menu(self.menus.delivery(owner, event)));
+        }
+        Ok(SessionEvent::Packet)
+    }
+
     /// A click on the open menu: undo what the client predicted, ask for the
     /// inventory if its rows were touched, and report the click if the
     /// button reports this kind and the player saw the action they clicked.
@@ -834,8 +965,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 close = button.action.closes(kind);
             }
         }
+        let anvil = open.anvil();
+        let mut sent = click.menu_slots(slots);
+        if anvil {
+            // Every input may have changed on the client, and with them its
+            // own result and cost; a click on the result that raced a
+            // keystroke may have taken the cost off the levels it shows and
+            // emptied the inputs. The left item is named after the current
+            // text, so the field it fills again keeps what the player typed.
+            if open.menu.field() != open.menu.text() {
+                open.menu.field_from_text();
+                open.rebuild(ANVIL_LEFT, version.number())?;
+            }
+            sent = vec![ANVIL_LEFT, ANVIL_RIGHT, ANVIL_RESULT];
+        }
         let state = open.next_state();
-        for slot in click.menu_slots(slots) {
+        for slot in sent {
             let stack = packets::set_slot(
                 version,
                 open.container,
@@ -844,6 +989,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 &open.stacks[slot],
             )?;
             self.client.inject(&stack)?;
+        }
+        if anvil {
+            self.client
+                .inject(&packets::anvil_cost(version, open.container)?)?;
+            if usize::try_from(click.slot) == Ok(ANVIL_RESULT)
+                && let Some(experience) = &self.menus.experience
+            {
+                self.client.inject(experience)?;
+            }
         }
         self.client
             .inject(&packets::empty_cursor(version, state)?)?;

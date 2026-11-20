@@ -484,10 +484,7 @@ impl PlayersApi<'_> {
     /// the open one with the same `id`. Its events come back to this
     /// plugin.
     pub fn menu(&self, target: &str, menu_json: &str) -> Result<bool, String> {
-        let menu = self.for_target(target, || {
-            crate::menu::Menu::parse_json(menu_json)
-                .and_then(crate::extensions::players::menu_available)
-        })?;
+        let menu = self.for_target(target, || crate::menu::Menu::parse_json(menu_json))?;
         self.show_menu(target, menu)
     }
 

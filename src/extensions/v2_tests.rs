@@ -1773,8 +1773,8 @@ async fn invalid_menu_patches_fail_the_callback() {
 async fn invalid_menus_fail_the_callback() {
     for (menu, message) in [
         (
-            "{ id = 'nick', type = 'anvil' }",
-            "anvil menus are not available yet",
+            "{ id = 'nick', type = 'anvil', text = 'x', rows = 1 }",
+            "menu.rows is for chests only",
         ),
         (
             "{ id = 'x', slots = { { slot = 27, item = 'stone' } } }",
@@ -1795,4 +1795,121 @@ async fn invalid_menus_fail_the_callback() {
         assert!(error.to_string().contains(message), "{error}");
         assert!(drain(&mut alice).is_empty());
     }
+}
+
+#[tokio::test]
+async fn the_nick_prompt_reads_the_anvil_text_in_rift_lua() {
+    let config = Config::from_lua(
+        r#"rift.setup({ listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' } })
+        local function valid_nick(text)
+            return #text >= 3 and #text <= 16
+        end
+        rift.on('login', function(ctx)
+            assert(rift.players.menu(ctx.uuid, {
+                id = 'nick',
+                type = 'anvil',
+                title = 'Choose a nickname',
+                text = 'Steve',
+                typing = true,
+            }))
+        end)
+        rift.menus.on('nick', {
+            click = {
+                submit = function(ctx)
+                    if not valid_nick(ctx.text) then
+                        rift.players.update_menu(ctx.uuid, 'nick', {
+                            title = 'Letters only, 3 to 16',
+                        })
+                        return
+                    end
+                    rift.players.message(ctx.uuid, 'nick ' .. ctx.text)
+                    rift.players.close_menu(ctx.uuid, 'nick')
+                end,
+            },
+            text = function(ctx) rift.players.message(ctx.uuid, 'typing ' .. ctx.text) end,
+            close = function(ctx) rift.players.message(ctx.uuid, ctx.reason .. ' ' .. ctx.text) end,
+        })"#,
+        "nick.lua",
+    )
+    .unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let session = runtime.session(context(9)).unwrap();
+    assert_eq!(session.decision("login").await.unwrap(), Action::Continue);
+    let actions = drain(&mut alice);
+    let [PlayerAction::Menu(shown)] = &actions[..] else {
+        panic!("expected the prompt, got {actions:?}");
+    };
+    assert_eq!(shown.owner, crate::dialog::Owner::Script);
+    assert_eq!(shown.menu.kind(), crate::menu::Kind::Anvil);
+    assert_eq!((shown.menu.text(), shown.menu.typing()), ("Steve", true));
+
+    use crate::menu::{ANVIL_RESULT, Click, CloseReason, Delivery, MenuEvent};
+    let deliver = |event| Delivery {
+        owner: crate::dialog::Owner::Script,
+        event,
+    };
+    let typed = |text: &str| {
+        let mut menu = (*shown.menu).clone();
+        menu.typed(text.into());
+        menu
+    };
+    session
+        .menu(deliver(MenuEvent::text(&typed("Al"))))
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [PlayerAction::Message("typing Al".into())]
+    );
+    // Too short: the title says why.
+    session
+        .menu(deliver(MenuEvent::click(
+            &typed("Al"),
+            ANVIL_RESULT,
+            Click::Left,
+            None,
+        )))
+        .await
+        .unwrap();
+    let actions = drain(&mut alice);
+    let [PlayerAction::UpdateMenu(update)] = &actions[..] else {
+        panic!("expected a new title, got {actions:?}");
+    };
+    assert_eq!(update.id, "nick");
+    let mut retitled = typed("Al");
+    retitled.apply(&update.patch).unwrap();
+    assert!(format!("{:?}", retitled.title()).contains("Letters only"));
+    assert_eq!(retitled.text(), "Al");
+    // Valid: kept, and the prompt closes.
+    session
+        .menu(deliver(MenuEvent::click(
+            &typed("Alex"),
+            ANVIL_RESULT,
+            Click::Left,
+            None,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [
+            PlayerAction::Message("nick Alex".into()),
+            PlayerAction::CloseMenu {
+                owner: crate::dialog::Owner::Script,
+                id: Some("nick".into())
+            },
+        ]
+    );
+    session
+        .menu(deliver(MenuEvent::close(
+            &typed("Alex"),
+            CloseReason::Plugin,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [PlayerAction::Message("plugin Alex".into())]
+    );
 }

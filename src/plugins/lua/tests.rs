@@ -548,8 +548,8 @@ rift.on("login", function(ctx)
     assert(rift.players.menu(ctx.uuid, '{"id":"json","type":"dispenser"}'))
     local ok, err = pcall(rift.players.menu, ctx.uuid, { id = "servers", keys = 1 })
     assert(not ok and err:find("keys must be an object"), err)
-    ok, err = pcall(rift.players.menu, ctx.uuid, { id = "nick", type = "anvil" })
-    assert(not ok and err:find("anvil menus are not available yet"), err)
+    ok, err = pcall(rift.players.menu, ctx.uuid, { id = "nick", type = "anvil", typing = 1 })
+    assert(not ok and err:find("typing must be a boolean"), err)
     assert(rift.players.close_menu(ctx.uuid, "servers"))
     assert(rift.players.close_menu(ctx.uuid))
 end)
@@ -644,6 +644,106 @@ assert(not ok and err:find("maps button ids to functions"), err)
         .unwrap();
     runtime.plugins().shutdown().await;
     assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn plugins_read_the_text_of_an_anvil_prompt() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+local function valid_nick(text)
+    return #text >= 3 and #text <= 16 and text:match("^%a+$") ~= nil
+end
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, {
+        id = "nick",
+        type = "anvil",
+        title = "Choose a nickname",
+        text = "Steve",
+        typing = true,
+    }))
+end)
+rift.menus.on("nick", {
+    click = {
+        submit = function(ctx)
+            if not valid_nick(ctx.text) then
+                rift.players.update_menu(ctx.uuid, "nick", {
+                    title = "Letters only, 3 to 16",
+                })
+                return
+            end
+            rift.players.message(ctx.uuid, "nick " .. ctx.text)
+            rift.players.close_menu(ctx.uuid, "nick")
+        end,
+    },
+    text = function(ctx) rift.players.message(ctx.uuid, "typing " .. ctx.text) end,
+})
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 777, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected the prompt");
+    };
+    assert_eq!(shown.owner, owner);
+    assert_eq!(shown.menu.kind(), crate::menu::Kind::Anvil);
+    assert_eq!(shown.menu.text(), "Steve");
+
+    use crate::menu::{ANVIL_RESULT, Click, Delivery, MenuEvent};
+    let typed = |text: &str| {
+        let mut menu = (*shown.menu).clone();
+        menu.typed(text.into());
+        menu
+    };
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    for event in [
+        MenuEvent::text(&typed("Al")),
+        MenuEvent::click(&typed("Al"), ANVIL_RESULT, Click::Left, None),
+        MenuEvent::click(&typed("Alex"), ANVIL_RESULT, Click::Left, None),
+    ] {
+        player
+            .menu(Delivery {
+                owner: owner.clone(),
+                event,
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::Message("typing Al".into())
+    );
+    let crate::extensions::PlayerAction::UpdateMenu(update) = next().await else {
+        panic!("expected a new title");
+    };
+    assert_eq!((&update.owner, update.id.as_str()), (&owner, "nick"));
+    let mut retitled = typed("Al");
+    retitled.apply(&update.patch).unwrap();
+    assert!(format!("{:?}", retitled.title()).contains("Letters only"));
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::Message("nick Alex".into())
+    );
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::CloseMenu {
+            owner: owner.clone(),
+            id: Some("nick".into())
+        }
+    );
+    runtime.plugins().shutdown().await;
 }
 
 #[tokio::test]

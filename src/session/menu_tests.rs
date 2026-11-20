@@ -1431,3 +1431,517 @@ async fn a_request_that_waited_for_a_lost_one_goes_out_when_it_counts_as_lost() 
     .await
     .unwrap();
 }
+
+fn nick() -> serde_json::Value {
+    json!({"id": "nick", "type": "anvil", "title": "Choose a nickname", "text": "Steve"})
+}
+
+const LEFT: i16 = crate::menu::ANVIL_LEFT as i16;
+const RIGHT: i16 = crate::menu::ANVIL_RIGHT as i16;
+const RESULT: i16 = crate::menu::ANVIL_RESULT as i16;
+
+/// What a client on `protocol` sends while the player types `text`:
+/// `rename_item` from 1.13, the `MC|ItemName` plugin message before.
+fn rename(protocol: i32, text: &str) -> Packet {
+    let mut w = Writer::new();
+    if protocol >= 393 {
+        w.string(text);
+        Packet::new(id(protocol, SB, "rename_item"), w.into_inner())
+    } else {
+        w.string("MC|ItemName").string(text);
+        Packet::new(id(protocol, SB, "custom_payload"), w.into_inner())
+    }
+}
+
+/// (slot, stack bytes) of a `container_set_slot`.
+fn slot_stack(protocol: i32, packet: &Packet) -> (i16, Vec<u8>) {
+    assert_eq!(
+        packet.id,
+        id(protocol, CB, "container_set_slot"),
+        "{packet:?}"
+    );
+    let mut r = WireReader::new(&packet.data);
+    if protocol >= 768 {
+        r.varint().unwrap();
+    } else {
+        r.i8().unwrap();
+    }
+    if protocol >= 756 {
+        r.varint().unwrap();
+    }
+    let slot = r.i16().unwrap();
+    (slot, r.rest().to_vec())
+}
+
+/// Slot `slot` of `menu` as the client should get it.
+fn expected(menu: &Menu, slot: i16, protocol: i32) -> (i16, Vec<u8>) {
+    let stack = menu
+        .slot_stack(
+            slot as usize,
+            protocol,
+            &|_| None,
+            crate::menu::StackCache::shared(),
+        )
+        .unwrap();
+    (slot, stack.to_vec())
+}
+
+/// The nick prompt after the player typed `text`; `field` when Rift put
+/// the text in the field since.
+fn typed(text: &str, field: bool) -> Menu {
+    let mut menu = Menu::parse(&nick()).unwrap();
+    menu.typed(text.into());
+    if field {
+        menu.field_from_text();
+    }
+    menu
+}
+
+fn experience(protocol: i32) -> Packet {
+    Packet::new(id(protocol, CB, "set_experience"), vec![0, 0, 0, 0, 5, 7])
+}
+
+#[tokio::test]
+async fn an_anvil_opens_with_its_slots_and_a_cost_of_0() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 754, 777] {
+            let v = version(protocol);
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            let packets = show(&mut session, &mut client, nick(), owner()).await;
+            let menu = Menu::parse(&nick()).unwrap();
+            assert_eq!(
+                packets[0],
+                packets::open_screen(v, FIRST, menu.kind(), menu.title()).unwrap()
+            );
+            // The right input stays empty; the result is the default.
+            assert_eq!(packets.len(), 4, "{protocol}");
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[2]),
+                expected(&menu, RESULT, protocol)
+            );
+            assert_eq!(packets[3], packets::anvil_cost(v, FIRST).unwrap());
+            assert!(session.menu_open());
+
+            // Custom buttons: a name tag on the left, a cancel button as
+            // the result.
+            let custom = json!({
+                "id": "pick", "type": "anvil", "text": "x", "layout": ["P X"],
+                "keys": {
+                    "P": {"item": "name_tag"},
+                    "X": {"item": "barrier", "id": "cancel", "close": true},
+                },
+            });
+            let packets = show(&mut session, &mut client, custom.clone(), owner()).await;
+            let menu = Menu::parse(&custom).unwrap();
+            assert_eq!(packets.len(), 4);
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[2]),
+                expected(&menu, RESULT, protocol)
+            );
+            assert_eq!(packets[3], packets::anvil_cost(v, FIRST + 1).unwrap());
+            assert_eq!(
+                closes(&mut session),
+                [("nick".into(), CloseReason::Replaced)]
+            );
+            nothing(&mut backend).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn typing_renames_the_result_and_reaches_nobody_but_rift() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 754, 777] {
+            let v = version(protocol);
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, nick(), owner()).await;
+            send(&mut client, &rename(protocol, "Alex")).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            // The result again, named after the text, and the cost; never
+            // the left item, which would reset the field.
+            let packets = drain(&mut client).await;
+            assert_eq!(packets.len(), 2, "{protocol} {packets:?}");
+            assert_eq!(
+                slot_stack(protocol, &packets[0]),
+                expected(&typed("Alex", false), RESULT, protocol)
+            );
+            assert_eq!(packets[1], packets::anvil_cost(v, FIRST).unwrap());
+            // The same text again changes nothing, but the client computed
+            // its own result for it: that is put back.
+            send(&mut client, &rename(protocol, "Alex")).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            let again = drain(&mut client).await;
+            assert_eq!(again.len(), 2);
+            assert_eq!(
+                slot_stack(protocol, &again[0]),
+                slot_stack(protocol, &packets[0])
+            );
+            // Longer than the client allows is ignored, as the game does.
+            let limit = crate::menu::anvil_text_limit(protocol);
+            send(&mut client, &rename(protocol, &"x".repeat(limit + 1))).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            nothing(&mut client).await;
+            nothing(&mut backend).await;
+
+            // The backend's experience bar passes on and is remembered.
+            send(&mut backend, &experience(protocol)).await;
+            session.forward().await.unwrap();
+            assert_eq!(next(&mut client).await, experience(protocol));
+
+            // "OK": reported with the text, then the three slots (the left
+            // named after the text now), the cost, the experience bar and
+            // the cursor.
+            send(&mut client, &click(protocol, RESULT, 0, 0, &[RESULT])).await;
+            let event = delivery(session.forward().await.unwrap()).event;
+            assert_eq!(
+                (event.kind, event.action.as_deref(), event.text.as_deref()),
+                (EventKind::Click, Some("submit"), Some("Alex"))
+            );
+            flush(&mut session).await;
+            let packets = drain(&mut client).await;
+            assert_eq!(packets.len(), 6, "{protocol} {packets:?}");
+            let menu = typed("Alex", true);
+            assert_eq!(
+                slot_stack(protocol, &packets[0]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                (RIGHT, crate::menu::stack::encode(protocol, None).unwrap())
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[2]),
+                expected(&menu, RESULT, protocol)
+            );
+            assert_eq!(packets[3], packets::anvil_cost(v, FIRST).unwrap());
+            assert_eq!(packets[4], experience(protocol));
+            assert_empty_cursor(protocol, &packets[5]);
+            nothing(&mut backend).await;
+
+            // A malformed rename closes the session.
+            let mut broken = rename(protocol, "x");
+            broken.data.push(0);
+            send(&mut client, &broken).await;
+            assert!(session.forward().await.is_err());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn typing_events_come_at_most_5_a_second_and_always_for_the_final_text() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 777;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        let mut spec = nick();
+        spec["typing"] = json!(true);
+        spec["state"] = json!({"step": 1});
+        show(&mut session, &mut client, spec, owner()).await;
+        let started = std::time::Instant::now();
+        send(&mut client, &rename(protocol, "a")).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(
+            (event.kind, event.text.as_deref(), event.state),
+            (EventKind::Text, Some("a"), Some(json!({"step": 1})))
+        );
+        for text in ["ab", "abc"] {
+            send(&mut client, &rename(protocol, text)).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        }
+        // An unchanged text is no event.
+        send(&mut client, &rename(protocol, "abc")).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        // The last text comes once the interval is over.
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(
+            (event.kind, event.text.as_deref()),
+            (EventKind::Text, Some("abc"))
+        );
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(
+            timeout(Duration::from_millis(300), session.forward())
+                .await
+                .is_err(),
+            "no event after the last text"
+        );
+        // Later typing is reported at once again.
+        send(&mut client, &rename(protocol, "abcd")).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.text.as_deref(), Some("abcd"));
+        // A text that waits when the menu closes is in its close event.
+        send(&mut client, &rename(protocol, "abcde")).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        session.close_menu(&owner(), None).await.unwrap();
+        let ends = session.take_menu_events();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].event.text.as_deref(), Some("abcde"));
+        assert!(
+            timeout(Duration::from_millis(300), session.forward())
+                .await
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_redraw_keeps_the_text_and_a_patch_replaces_it() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 754, 777] {
+            let v = version(protocol);
+            let (mut session, mut client, _backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, nick(), owner()).await;
+            send(&mut client, &rename(protocol, "Alex")).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            drain(&mut client).await;
+
+            // The same definition again sends nothing.
+            session.show_menu(shown(nick(), owner())).await.unwrap();
+            nothing(&mut client).await;
+
+            // A new title: the screen again with the same container, every
+            // slot with the left item named after what the player typed,
+            // and the cost.
+            let mut titled = nick();
+            titled["title"] = json!("Letters only, 3 to 16");
+            session.show_menu(shown(titled, owner())).await.unwrap();
+            let packets = drain(&mut client).await;
+            assert_eq!(packets[0].id, id(protocol, CB, "open_screen"));
+            assert_eq!(packets.len(), 4, "{protocol}");
+            let menu = typed("Alex", true);
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[2]),
+                expected(&menu, RESULT, protocol)
+            );
+            assert_eq!(packets[3], packets::anvil_cost(v, FIRST).unwrap());
+
+            // A patch with text puts it in the field and the result.
+            session
+                .update_menu(update("nick", json!({"text": "Bob"}), owner()))
+                .await
+                .unwrap();
+            let packets = drain(&mut client).await;
+            let mut menu = Menu::parse(&nick()).unwrap();
+            menu.apply(&crate::menu::Patch::parse(&json!({"text": "Bob"})).unwrap())
+                .unwrap();
+            assert_eq!(packets.len(), 3, "{protocol} {packets:?}");
+            assert_eq!(
+                slot_stack(protocol, &packets[0]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                expected(&menu, RESULT, protocol)
+            );
+            assert_eq!(packets[2], packets::anvil_cost(v, FIRST).unwrap());
+
+            // The player types again, and the plugin puts back the text the
+            // left item already carries: it goes through an empty slot, or
+            // the client would keep what the player typed.
+            send(&mut client, &rename(protocol, "Bobby")).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            drain(&mut client).await;
+            session
+                .update_menu(update("nick", json!({"text": "Bob"}), owner()))
+                .await
+                .unwrap();
+            let packets = drain(&mut client).await;
+            assert_eq!(packets.len(), 4, "{protocol} {packets:?}");
+            assert_eq!(
+                slot_stack(protocol, &packets[0]),
+                (LEFT, crate::menu::stack::encode(protocol, None).unwrap())
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[1]),
+                expected(&menu, LEFT, protocol)
+            );
+            assert_eq!(
+                slot_stack(protocol, &packets[2]),
+                expected(&menu, RESULT, protocol)
+            );
+
+            // Events carry it.
+            send(&mut client, &click(protocol, RESULT, 0, 0, &[RESULT])).await;
+            let event = delivery(session.forward().await.unwrap()).event;
+            assert_eq!(event.text.as_deref(), Some("Bob"));
+            assert!(closes(&mut session).is_empty());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn clicks_on_an_anvil_put_every_input_back_and_shift_clicks_too() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 754, 777] {
+            let v = version(protocol);
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, nick(), owner()).await;
+            // A shift-click on an inventory item moves it into the inputs on
+            // the client.
+            let changed: &[i16] = if protocol >= 755 { &[RIGHT, 10] } else { &[] };
+            send(&mut client, &click(protocol, 10, 0, 1, changed)).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            let packets = drain(&mut client).await;
+            assert_eq!(packets.len(), 5, "{protocol} {packets:?}");
+            let slots: Vec<i16> = packets[..3]
+                .iter()
+                .map(|packet| slot_stack(protocol, packet).0)
+                .collect();
+            assert_eq!(slots, [LEFT, RIGHT, RESULT]);
+            assert_eq!(packets[3], packets::anvil_cost(v, FIRST).unwrap());
+            assert_empty_cursor(protocol, &packets[4]);
+            assert_eq!(
+                next(&mut backend).await,
+                packets::inventory_request(protocol).unwrap()
+            );
+            // Taking the paper out of the left slot.
+            send(&mut client, &click(protocol, LEFT, 0, 0, &[LEFT])).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            flush(&mut session).await;
+            assert_eq!(drain(&mut client).await.len(), 5);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Show the nick prompt and type `text` into it.
+async fn open_typed(
+    session: &mut Session<DuplexStream, DuplexStream>,
+    client: &mut DuplexStream,
+    text: &str,
+) {
+    let protocol = session.handshake.protocol;
+    show(session, client, nick(), owner()).await;
+    send(client, &rename(protocol, text)).await;
+    session.forward().await.unwrap();
+    flush(session).await;
+    drain(client).await;
+}
+
+#[tokio::test]
+async fn an_anvil_ends_once_with_its_text_in_every_way() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let v = version(protocol);
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        let mut container = FIRST;
+        let ends = |session: &mut Session<DuplexStream, DuplexStream>| {
+            session
+                .take_menu_events()
+                .into_iter()
+                .map(|delivery| {
+                    (
+                        delivery.event.reason.unwrap(),
+                        delivery.event.text.unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        open_typed(&mut session, &mut client, "esc").await;
+        send(&mut client, &packets::client_close(v, container).unwrap()).await;
+        session.forward().await.unwrap();
+        assert_eq!(ends(&mut session), [(CloseReason::Player, "esc".into())]);
+
+        open_typed(&mut session, &mut client, "plugin").await;
+        container += 1;
+        session.close_menu(&owner(), Some("nick")).await.unwrap();
+        assert_eq!(
+            next(&mut client).await,
+            packets::close(v, container).unwrap()
+        );
+        assert_eq!(ends(&mut session), [(CloseReason::Plugin, "plugin".into())]);
+
+        open_typed(&mut session, &mut client, "replaced").await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        assert_eq!(
+            ends(&mut session),
+            [(CloseReason::Replaced, "replaced".into())]
+        );
+
+        open_typed(&mut session, &mut client, "server").await;
+        // The chest it replaced carries no text.
+        assert_eq!(ends(&mut session), [(CloseReason::Replaced, String::new())]);
+        let close = Packet::new(id(protocol, CB, "container_close"), vec![0]);
+        send(&mut backend, &close).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut client).await, close);
+        assert_eq!(ends(&mut session), [(CloseReason::Server, "server".into())]);
+
+        open_typed(&mut session, &mut client, "gone").await;
+        session.end_menus();
+        assert_eq!(
+            ends(&mut session),
+            [(CloseReason::Disconnect, "gone".into())]
+        );
+        session.end_menus();
+        assert!(ends(&mut session).is_empty());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn renames_are_rift_s_only_while_its_anvil_was_the_last_screen() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let v = version(protocol);
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        // No Rift anvil: the backend's.
+        send(&mut client, &rename(protocol, "x")).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut backend).await, rename(protocol, "x"));
+        // A late one after Rift's anvil closed is dropped.
+        show(&mut session, &mut client, nick(), owner()).await;
+        send(&mut client, &packets::client_close(v, FIRST).unwrap()).await;
+        session.forward().await.unwrap();
+        send(&mut client, &rename(protocol, "late")).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+        nothing(&mut client).await;
+        // Once the backend opens a screen of its own, they are its again.
+        let mut open = Writer::new();
+        open.varint(5).varint(7).bytes(&[8, 0, 0]);
+        let open = Packet::new(id(protocol, CB, "open_screen"), open.into_inner());
+        send(&mut backend, &open).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut client).await, open);
+        send(&mut client, &rename(protocol, "theirs")).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut backend).await, rename(protocol, "theirs"));
+        // A chest of Rift's is no anvil either.
+        show(&mut session, &mut client, shop(), owner()).await;
+        flush(&mut session).await;
+        drain(&mut backend).await;
+        send(&mut client, &rename(protocol, "chest")).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut backend).await, rename(protocol, "chest"));
+    })
+    .await
+    .unwrap();
+}
