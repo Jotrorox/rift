@@ -264,6 +264,16 @@ fn describe(owner: &Owner) -> String {
     }
 }
 
+/// The warning for a patch that does not fit the open menu: which menu of
+/// which plugin, and why.
+fn patch_not_applied(update: &Update, error: &str) -> String {
+    format!(
+        "menu {} of {}: patch not applied: {error}",
+        update.id,
+        describe(&update.owner)
+    )
+}
+
 /// The index of Rift's container `id` in [`Menus::used`].
 fn used_index(id: i32) -> Option<usize> {
     usize::try_from(id - packets::FIRST_CONTAINER)
@@ -588,11 +598,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if let Err(error) = menu.apply(&update.patch) {
             // The plugin's call returned long ago: it could not know the
             // menu its patch would meet.
-            log_warn!(
-                "menu {} of {}: patch not applied: {error}",
-                update.id,
-                describe(&update.owner)
-            );
+            log_warn!("{}", patch_not_applied(&update, &error));
             return Ok(());
         }
         let mut heads = (*open.shown.heads).clone();
@@ -1020,6 +1026,38 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_patch_that_does_not_fit_names_the_plugin_the_menu_and_why() {
+        let update = |owner| Update {
+            owner,
+            id: "shop".into(),
+            patch: Arc::new(menu::Patch::parse(&serde_json::json!({"text": "x"})).unwrap()),
+            heads: Arc::default(),
+        };
+        let mut chest = Menu::parse(&serde_json::json!({"id": "shop"})).unwrap();
+        let error = chest.apply(&update(Owner::Script).patch).unwrap_err();
+        assert_eq!(
+            patch_not_applied(&update(Owner::Plugin("shops".into())), &error),
+            "menu shop of plugin shops: patch not applied: patch.text is for anvils only"
+        );
+        assert_eq!(
+            patch_not_applied(
+                &update(Owner::Script),
+                "slot 27: a chest with 3 rows has slots 0 to 26"
+            ),
+            "menu shop of rift.lua: patch not applied: slot 27: a chest with 3 rows has slots 0 to 26"
+        );
+        let remote = Owner::Remote {
+            peer: 2,
+            incarnation: 1,
+            plugin: Some("shops".into()),
+        };
+        assert!(
+            patch_not_applied(&update(remote), "x")
+                .starts_with("menu shop of plugin shops of peer 2:")
+        );
+    }
 
     #[test]
     fn state_ids_wrap_and_name_the_latest_update_with_them() {
