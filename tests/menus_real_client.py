@@ -290,7 +290,7 @@ CLOSES = {5}  # steps (0-based) that close a screen for the client
 
 PLUGIN_TOML = """name = "menutest"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "lua"
 
 [capabilities]
