@@ -97,6 +97,39 @@ fn modern_menu(window: &str, slots: i32) -> String {
     .into()
 }
 
+/// How an `open_screen` names a menu in one protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuType {
+    /// From 1.14: the menu's ID in the `menu` registry.
+    Registry(i32),
+    /// Before 1.14: the window type (`minecraft:chest`) and the slot count
+    /// the packet carries after the title.
+    Window { kind: &'static str, slots: u8 },
+}
+
+/// How `protocol` names the menu `menu` of the newest protocol's `menu`
+/// registry (`generic_9x3`, `hopper`, `generic_3x3`, `anvil`...), without
+/// namespace. Before 1.14 a menu the protocol lacks becomes the window
+/// with the same slots, as for backend screens; `None` when the menu is
+/// unknown, or (from 1.14) the protocol lacks it.
+pub fn menu_type(protocol: i32, menu: &str) -> Option<MenuType> {
+    let menu = menu.strip_prefix("minecraft:").unwrap_or(menu);
+    data::version(crate::version::NEWEST)
+        .registry("menu")?
+        .id(menu)?;
+    if protocol >= MENUS {
+        return data::version(protocol)
+            .registry("menu")?
+            .id(menu)
+            .map(MenuType::Registry);
+    }
+    let (kind, slots) = legacy_window(menu);
+    Some(MenuType::Window {
+        kind,
+        slots: u8::try_from(slots).ok()?,
+    })
+}
+
 const HORSE: &str = "EntityHorse";
 
 /// A title component converter: the text codec in production.
@@ -345,6 +378,62 @@ mod tests {
             rw.str()?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn menus_are_named_for_every_protocol() {
+        for &(protocol, _) in crate::version::PROTOCOLS {
+            for menu in [
+                "generic_9x1",
+                "generic_9x3",
+                "generic_9x6",
+                "hopper",
+                "generic_3x3",
+                "anvil",
+            ] {
+                let named = menu_type(protocol, menu);
+                match named {
+                    Some(MenuType::Registry(id)) => {
+                        assert!(protocol >= MENUS);
+                        let menus = data::version(protocol).expect_registry("menu");
+                        assert_eq!(menus.name(id), Some(menu), "{protocol}");
+                    }
+                    Some(MenuType::Window { .. }) => assert!(protocol < MENUS),
+                    None => panic!("{protocol} lacks {menu}"),
+                }
+            }
+        }
+        let window = |menu| menu_type(340, menu);
+        assert_eq!(
+            window("generic_9x2"),
+            Some(MenuType::Window {
+                kind: "minecraft:chest",
+                slots: 18
+            })
+        );
+        assert_eq!(
+            window("minecraft:hopper"),
+            Some(MenuType::Window {
+                kind: "minecraft:hopper",
+                slots: 5
+            })
+        );
+        assert_eq!(
+            window("generic_3x3"),
+            Some(MenuType::Window {
+                kind: "minecraft:dispenser",
+                slots: 9
+            })
+        );
+        assert_eq!(
+            window("anvil"),
+            Some(MenuType::Window {
+                kind: "minecraft:anvil",
+                slots: 0
+            })
+        );
+        assert_eq!(menu_type(777, "no_such_menu"), None);
+        assert_eq!(menu_type(340, "no_such_menu"), None);
     }
 
     fn legacy(window: u8, kind: &str, slots: u8, entity: Option<i32>) -> Vec<u8> {
