@@ -1140,6 +1140,9 @@ def burst(pair):
     pair.check("a burst of ten shift-clicks: ten events", len(events) == 10, f"{len(events)} events")
     answers = [r for r in pair.client.packets("window_items", mark) if r.value.get("windowId") == 0]
     if pair.backend != 755:
+        # One request at a time limits concurrency, not rate: on a fast link
+        # every click of the burst gets its own answer.
+        pair.note(f"a burst of ten shift-clicks in 0.5 s got {len(answers)} inventory answers")
         pair.check("a burst of ten shift-clicks: the inventory comes back, at most a few times",
                    1 <= len(answers) <= 10, f"{len(answers)} container_set_content(0)")
     pair.click_case("a shift-click after the burst", "shift_left", BUY,
