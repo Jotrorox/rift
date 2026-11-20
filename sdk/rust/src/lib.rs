@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.2.1`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.3.0`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -10,7 +10,7 @@
 //! crate-type = ["cdylib"]
 //!
 //! [dependencies]
-//! rift-plugin = "0.2"
+//! rift-plugin = "0.3"
 //! ```
 //!
 //! ```no_run
@@ -60,8 +60,8 @@
 //! `default`, `none` or an empty list). List the hooks you implement in
 //! [`Registration::hooks`] so the host skips the rest. An empty list delivers
 //! every hook except [`Hook::Chat`] and [`Hook::Kick`], which are only ever
-//! delivered when listed. [`Plugin::dialog`] and [`Plugin::job_done`] need no
-//! entry.
+//! delivered when listed. [`Plugin::dialog`], [`Plugin::menu`] and
+//! [`Plugin::job_done`] need no entry.
 //!
 //! The decision hooks answer with an [`Action`]; each accepts a subset:
 //!
@@ -75,7 +75,7 @@
 //!
 //! [`players`], [`store`], [`permissions`], [`bus`], [`servers`], [`timers`],
 //! [`background`], [`log`], [`meta`] and [`text`] mirror the WIT interfaces of
-//! the same names. Errors are the host's message as a `String`. [`log`] also installs
+//! the same names; [`menu`] builds inventory menus. Errors are the host's message as a `String`. [`log`] also installs
 //! a [`::log`] logger before `init`, so `log::info!` and friends reach Rift's
 //! log. Plugin configuration arrives as JSON; decode it with [`config()`].
 //!
@@ -270,6 +270,40 @@
 //! }
 //! # rift_plugin::export!(Rules);
 //! ```
+//!
+//! # Menus
+//!
+//! [`players::show_menu`] shows an inventory menu (Minecraft 1.12+): a chest,
+//! hopper, dispenser or anvil whose slots hold buttons. The [`menu`] module
+//! builds it, and every click, anvil text and close comes back to
+//! [`Plugin::menu`]:
+//!
+//! ```no_run
+//! use rift_plugin::menu::{Button, Menu, MenuEvent, MenuKind, MenuPatch};
+//! use rift_plugin::{Context, Plugin, players};
+//!
+//! #[derive(Default)]
+//! struct Nick;
+//!
+//! impl Plugin for Nick {
+//!     fn join(&mut self, ctx: Context) {
+//!         let _ = players::show_menu(&ctx.uuid, &Menu::anvil("nick").title("Choose a nickname"));
+//!     }
+//!
+//!     fn menu(&mut self, event: MenuEvent) {
+//!         if let MenuKind::Click { action: "submit", .. } = event.kind() {
+//!             let nick = event.text.as_deref().unwrap_or_default();
+//!             if nick.len() < 3 {
+//!                 let patch = MenuPatch::new().title("At least 3 letters");
+//!                 let _ = players::update_menu(&event.ctx.uuid, "nick", &patch);
+//!             } else {
+//!                 let _ = players::close_menu(&event.ctx.uuid, Some("nick"));
+//!             }
+//!         }
+//!     }
+//! }
+//! # rift_plugin::export!(Nick);
+//! ```
 
 #![warn(missing_docs)]
 
@@ -304,6 +338,8 @@ pub use bindings::rift::plugin::types::{
 /// - `command`: `Continue`, [`message`](Action::message),
 ///   [`server`](Action::server), [`queue`](Action::queue), `LeaveQueue`
 pub type Action = bindings::rift::plugin::types::Decision;
+
+pub mod menu;
 
 use serde::de::DeserializeOwned;
 
@@ -423,8 +459,10 @@ pub trait Plugin: Default + 'static {
     fn dialog(&mut self, response: DialogResponse) {}
 
     /// A player clicked, typed in or left a menu this plugin showed with
-    /// `players::menu`. Delivered without being listed in
-    /// [`Registration::hooks`].
+    /// [`players::show_menu`]; [`MenuEvent::kind`](menu::MenuEvent::kind)
+    /// says which. Every menu that was shown ends with exactly one
+    /// [`MenuKind::Close`](menu::MenuKind::Close). Delivered without being
+    /// listed in [`Registration::hooks`].
     fn menu(&mut self, event: menu::MenuEvent) {}
 
     /// A job started with [`background::run`] finished: `handle` is the one
@@ -751,11 +789,6 @@ impl TitleSpec {
     }
 }
 
-/// Inventory menus.
-pub mod menu {
-    pub use crate::bindings::rift::plugin::types::MenuEvent;
-}
-
 /// The joined players, and what Rift remembers about those who left.
 /// `target` is a name, a UUID or a connection id.
 ///
@@ -779,7 +812,7 @@ pub mod players {
     use crate::bindings::rift::plugin::players as host;
     pub use host::{
         boss_bar, clear_dialog, close_menu, dialog, get, list, lookup, menu, names, search,
-        set_language, title, transfer, update_menu,
+        set_language, title, transfer,
     };
 
     /// Send a chat message to a player.
@@ -825,6 +858,33 @@ pub mod players {
     pub fn show_dialog(target: &str, dialog: &serde_json::Value) -> Result<bool, String> {
         self::dialog(target, &dialog.to_string())
     }
+
+    /// Show an inventory menu (Minecraft 1.12+), or redraw the open menu
+    /// with the same id in place. Its events come back to
+    /// [`Plugin::menu`](crate::Plugin::menu). Returns false when the player
+    /// is offline, older than 1.12 or has too many undelivered actions; an
+    /// invalid menu is an error. [`menu`] takes the menu as JSON text.
+    pub fn show_menu(target: &str, menu: &crate::menu::Menu) -> Result<bool, String> {
+        self::menu(target, &menu.to_json()?)
+    }
+
+    /// Change part of this plugin's menu `id`, if the player still has it
+    /// open. Returns as [`show_menu`] does; an invalid patch is an error.
+    pub fn update_menu(
+        target: &str,
+        id: &str,
+        patch: &crate::menu::MenuPatch,
+    ) -> Result<bool, String> {
+        host::update_menu(target, id, &patch.to_json()?)
+    }
+
+    /// [`update_menu`] with the patch as JSON text.
+    pub fn update_menu_json(target: &str, id: &str, patch_json: &str) -> Result<bool, String> {
+        host::update_menu(target, id, patch_json)
+    }
+
+    // `close_menu(target, Some(id))` closes this plugin's menu `id`;
+    // `close_menu(target, None)` closes whatever Rift menu is open.
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -936,7 +996,7 @@ pub mod background {
 }
 
 /// Plugin metadata and clocks. `api` is the `rift:plugin` version the host
-/// implements, such as `0.2.1`.
+/// implements, such as `0.3.0`.
 pub mod meta {
     pub use crate::bindings::rift::plugin::meta::{
         api, clock, config_dir, data_dir, name, time, version,
@@ -1014,8 +1074,7 @@ pub mod log {
 /// [`text::render`], [`text::plain`], [`text::to_legacy`] and
 /// [`text::to_mini`] ask Rift to convert text, for text that leaves through
 /// something other than a player (a bus payload, an HTTP response, a log
-/// line) and to check a template from the configuration in `init`. They need
-/// `min_api = "0.2.1"` in `plugin.toml`.
+/// line) and to check a template from the configuration in `init`.
 pub mod text {
     use crate::bindings::rift::plugin::text as host;
     use serde_json::{Map, Value};

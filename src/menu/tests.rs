@@ -1044,3 +1044,123 @@ fn diffs_separate_looks_from_actions() {
             .reopen
     );
 }
+
+/// What the Rust SDK's builders write (`sdk/rust/src/menu.rs`, whose tests
+/// assert these same values): every builder method parses.
+#[test]
+fn sdk_shaped_definitions_parse() {
+    let servers = parse(json!({
+        "id": "servers", "type": "chest",
+        "title": {"mini": "<dark_gray>Choose a server"},
+        "layout": ["#########", "# S C M #", "####X####"],
+        "keys": {
+            "#": {"item": "gray_stained_glass_pane", "name": " "},
+            "S": {"item": "grass_block", "name": {"mini": "<green>Survival"},
+                  "lore": ["Click to join"], "id": "join", "payload": "survival"},
+            "C": {"item": "bricks", "id": "join", "payload": "creative"},
+            "M": {"item": "bow", "id": "join", "payload": "minigames"},
+            "X": {"item": "barrier", "name": {"mini": "<red>Close"}, "close": true},
+        },
+    }));
+    assert_eq!(servers.kind(), Kind::Chest { rows: 3 });
+    assert_eq!(button(&servers, 11).action.payload, Some(json!("survival")));
+    assert!(button(&servers, 22).action.close);
+
+    let every = parse(chest(
+        1,
+        json!({
+            "slot": 0,
+            "item": "player_head", "count": 3,
+            "name": {"text": "Alex", "color": "gold"},
+            "lore": ["one", {"legacy": "&7two", "marker": "&"}],
+            "glint": true,
+            "model": {"floats": [1.5], "flags": [true], "strings": ["a"], "colors": [16746496]},
+            "item_model": "rift:menu/head",
+            "head": {"texture": "dGV4dHVyZQ==", "signature": "c2ln"},
+            "color": "#112233", "details": true, "tooltip": false,
+            "id": "pick", "payload": {"n": 1}, "clicks": ["left", "number_key"],
+            "close": true,
+        }),
+    ));
+    let look = &button(&every, 0).look;
+    assert_eq!(
+        (look.item, look.count, look.lore.len()),
+        ("player_head", 3, 2)
+    );
+    assert_eq!(look.glint, Some(true));
+    assert_eq!(
+        look.model,
+        Some(Model {
+            floats: vec![1.5],
+            flags: vec![true],
+            strings: vec!["a".into()],
+            colors: vec![0xff8800],
+        })
+    );
+    assert_eq!(look.item_model.as_deref(), Some("rift:menu/head"));
+    assert_eq!(
+        look.head,
+        Some(Head::Texture(Textures {
+            value: "dGV4dHVyZQ==".into(),
+            signature: Some("c2ln".into()),
+        }))
+    );
+    assert_eq!(look.color, Some(0x112233));
+    assert!(look.details && !look.tooltip);
+    let action = &button(&every, 0).action;
+    assert!(action.reports(Click::NumberKey) && !action.reports(Click::Right));
+    assert!(action.close);
+
+    let simple = parse(chest(
+        1,
+        json!({"slot": 1, "item": "player_head", "model": 7.0, "head": {"player": "Alex"}, "clicks": "all", "id": "x"}),
+    ));
+    assert_eq!(
+        button(&simple, 1).look.model.as_ref().unwrap().floats,
+        [7.0]
+    );
+    assert!(button(&simple, 1).action.reports(Click::Offhand));
+
+    let kits = parse(json!({
+        "id": "kits", "type": "chest", "rows": 6, "title": "Kits, page 2",
+        "slots": [
+            {"slot": 0, "item": "iron_sword", "id": "kit", "payload": {"kit": "pvp"}},
+            {"slots": [45, 53], "item": "arrow", "name": "Page", "id": "page"},
+            {"slot": 4, "empty": true},
+        ],
+        "state": {"page": 2},
+    }));
+    assert_eq!(kits.kind(), Kind::Chest { rows: 6 });
+    assert_eq!(item(&kits, 53), Some("arrow"));
+    assert_eq!(kits.state(), Some(&json!({"page": 2})));
+    let hopper = parse(json!({"id": "h", "type": "hopper", "layout": ["ab ba"],
+                              "keys": {"a": {"item": "stone"}, "b": {"item": "dirt"}}}));
+    assert_eq!(item(&hopper, 4), Some("stone"));
+    assert_eq!(
+        parse(json!({"id": "d", "type": "dispenser"})).kind(),
+        Kind::Dispenser
+    );
+    let anvil = parse(
+        json!({"id": "nick", "type": "anvil", "title": "Choose a nickname",
+                             "text": "Steve", "typing": true}),
+    );
+    assert!(anvil.typing() && anvil.text() == "Steve");
+
+    let mut clock = parse(json!({"id": "clock", "rows": 1, "layout": ["....T...."],
+                                 "keys": {".": {"item": "glass_pane"}, "T": {"item": "clock"}}}));
+    let change = patch(json!({
+        "slots": [
+            {"slot": 4, "item": "clock", "name": "9"},
+            {"slots": [0, 8], "item": "glass_pane"},
+            {"slot": 5, "empty": true},
+        ],
+        "keys": {".": {"item": "black_stained_glass_pane"}},
+        "title": {"mini": "<red>Hurry"},
+        "state": {"left": 9},
+    }));
+    clock.apply(&change).unwrap();
+    assert_eq!(item(&clock, 1), Some("black_stained_glass_pane"));
+    assert_eq!(item(&clock, 5), None);
+    assert!(Patch::parse(&json!({"text": "Alex"})).is_ok());
+    assert!(Patch::parse(&json!({})).is_ok());
+}
