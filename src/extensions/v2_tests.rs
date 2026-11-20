@@ -1646,6 +1646,130 @@ async fn players_api_shows_menus_and_rift_menus_on_sorts_their_events() {
 }
 
 #[tokio::test]
+async fn players_api_updates_menus_and_a_paged_menu_keeps_its_page_in_state() {
+    let config = Config::from_lua(
+        r#"rift.setup({ listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' } })
+        local function kits_on(page)
+            return { { id = 'k' .. page, icon = 'iron_sword', name = 'Kit ' .. page } }
+        end
+        local function show(player, page)
+            local buttons = {}
+            for i, kit in ipairs(kits_on(page)) do
+                buttons[#buttons + 1] = {
+                    slot = i - 1, item = kit.icon, name = kit.name,
+                    id = 'kit', payload = { kit = kit.id },
+                }
+            end
+            buttons[#buttons + 1] = { slot = 45, item = 'arrow', name = 'Back',
+                                      id = 'page', payload = { step = -1 } }
+            buttons[#buttons + 1] = { slot = 53, item = 'arrow', name = 'Next',
+                                      id = 'page', payload = { step = 1 } }
+            rift.players.menu(player, {
+                id = 'kits', rows = 6, title = 'Kits, page ' .. page,
+                slots = buttons, state = { page = page },
+            })
+        end
+        rift.on('login', function(ctx)
+            local players = require('rift.players')
+            show(ctx.uuid, 1)
+            assert(players.update_menu('Alice', 'kits', { title = { text = 'Kits!', color = 'gold' } }))
+            assert(players.update_menu('Alice', 'kits', { slots = { { slot = 1, item = 'stone' }, { slot = 2, empty = true } } }))
+            assert(players.update_menu('Alice', 'kits', { keys = { a = { item = 'apple' } } }))
+            assert(players.update_menu('Alice', 'kits', { state = { page = 7 } }))
+            assert(players.update_menu('Alice', 'kits', '{"text":"x"}'))
+            assert(not players.update_menu('Old', 'kits', { title = 'x' }))
+            assert(not players.update_menu('Nobody', 'kits', { title = 'x' }))
+        end)
+        rift.menus.on('kits', {
+            click = {
+                page = function(ctx) show(ctx.uuid, ctx.state.page + ctx.payload.step) end,
+                kit = function(ctx) rift.players.message(ctx.uuid, 'kit ' .. ctx.payload.kit) end,
+            },
+        })"#,
+        "paged.lua",
+    )
+    .unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (_old, mut old) = runtime
+        .players()
+        .register(10, &[10; 16], "Old", 316, "lobby");
+    let session = runtime.session(context(9)).unwrap();
+    assert_eq!(session.decision("login").await.unwrap(), Action::Continue);
+    assert!(drain(&mut old).is_empty());
+    let actions = drain(&mut alice);
+    assert_eq!(actions.len(), 6, "{actions:?}");
+    let PlayerAction::Menu(first) = &actions[0] else {
+        panic!("expected a menu, got {:?}", actions[0]);
+    };
+    assert_eq!(first.menu.state(), Some(&serde_json::json!({"page": 1})));
+    for action in &actions[1..] {
+        let PlayerAction::UpdateMenu(update) = action else {
+            panic!("expected an update, got {action:?}");
+        };
+        assert_eq!(
+            (update.owner.clone(), update.id.as_str()),
+            (crate::dialog::Owner::Script, "kits")
+        );
+    }
+    // The state patch is applied to the open menu by the session.
+    let PlayerAction::UpdateMenu(update) = &actions[4] else {
+        unreachable!();
+    };
+    let mut patched = (*first.menu).clone();
+    patched.apply(&update.patch).unwrap();
+    assert_eq!(patched.state(), Some(&serde_json::json!({"page": 7})));
+
+    // "Next" twice: each redraw carries the page its click read from the
+    // state of the menu it redraws.
+    use crate::menu::{Click, Delivery, MenuEvent};
+    let deliver = |event| Delivery {
+        owner: crate::dialog::Owner::Script,
+        event,
+    };
+    let mut menu = first.menu.clone();
+    for page in [2, 3] {
+        session
+            .menu(deliver(MenuEvent::click(&menu, 53, Click::Left, None)))
+            .await
+            .unwrap();
+        let actions = drain(&mut alice);
+        let [PlayerAction::Menu(next)] = &actions[..] else {
+            panic!("expected a redraw, got {actions:?}");
+        };
+        assert_eq!(next.menu.id(), "kits");
+        assert_eq!(next.menu.state(), Some(&serde_json::json!({"page": page})));
+        let title = format!("{:?}", next.menu.title());
+        assert!(title.contains(&format!("Kits, page {page}")), "{title}");
+        menu = next.menu.clone();
+    }
+    session
+        .menu(deliver(MenuEvent::click(&menu, 0, Click::Left, None)))
+        .await
+        .unwrap();
+    assert_eq!(drain(&mut alice), [PlayerAction::Message("kit k3".into())]);
+}
+
+#[tokio::test]
+async fn invalid_menu_patches_fail_the_callback() {
+    let runtime = runtime(
+        "api_version=2, login=function(ctx) require('rift.players').update_menu('Alice', 'kits', { rows = 2 }) end",
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field \"rows\""),
+        "{error}"
+    );
+    assert!(drain(&mut alice).is_empty());
+}
+
+#[tokio::test]
 async fn invalid_menus_fail_the_callback() {
     for (menu, message) in [
         (

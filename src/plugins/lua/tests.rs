@@ -646,6 +646,62 @@ assert(not ok and err:find("maps button ids to functions"), err)
     assert!(actions.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn plugins_change_their_open_menus_with_update_menu() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, { id = "clock", rows = 1, layout = { "....T...." },
+        keys = { ["."] = { item = "glass_pane" }, T = { item = "clock", name = "10" } } }))
+    assert(rift.players.update_menu(ctx.uuid, "clock", {
+        slots = { { slot = 4, item = "clock", name = "9" } },
+        keys = { ["."] = { item = "black_stained_glass_pane" } },
+        title = { mini = "<red>Hurry" },
+        state = { left = 9 },
+    }))
+    assert(rift.players.update_menu(ctx.uuid, "clock", '{"state":{"left":8}}'))
+    local ok, err = pcall(rift.players.update_menu, ctx.uuid, "clock", { slots = 1 })
+    assert(not ok and err:find("slots"), err)
+    assert(not rift.players.update_menu("Nobody", "clock", { state = 1 }))
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 774, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    let mut menu = (*shown.menu).clone();
+    for left in [9, 8] {
+        let Some(crate::extensions::PlayerAction::UpdateMenu(update)) = actions.try_recv().ok()
+        else {
+            panic!("expected an update");
+        };
+        assert_eq!((&update.owner, update.id.as_str()), (&owner, "clock"));
+        menu.apply(&update.patch).unwrap();
+        assert_eq!(menu.state(), Some(&serde_json::json!({"left": left})));
+    }
+    assert!(menu.title().is_some());
+    assert_eq!(
+        menu.button(0).unwrap().look.item,
+        "black_stained_glass_pane"
+    );
+    assert_ne!(
+        menu.button(4).unwrap().look.name,
+        shown.menu.button(4).unwrap().look.name
+    );
+    assert!(actions.try_recv().is_err());
+    runtime.plugins().shutdown().await;
+}
+
 /// A player table carries the client's `locale` once the session published
 /// it; before that it is nil.
 #[tokio::test]
