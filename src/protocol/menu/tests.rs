@@ -438,3 +438,150 @@ fn rejections_are_recognized_and_acknowledged_up_to_1_16_5() {
         &Packet::new(0x11, vec![0, 0xff, 0xff, 0])
     ));
 }
+
+#[test]
+fn an_anvil_opens_with_0_slots_on_1_12_and_its_menu_from_1_14() {
+    let title = crate::text::Text::Plain("Name".into());
+    for protocol in FAMILIES {
+        let packet = open_screen(version(protocol), 101, MenuKind::Anvil, Some(&title)).unwrap();
+        let mut r = Reader::new(&packet.data);
+        if protocol >= MENUS {
+            assert_eq!(r.varint().unwrap(), 101);
+            let anvil = data::version(protocol)
+                .registry("menu")
+                .unwrap()
+                .id("anvil")
+                .unwrap();
+            assert_eq!(r.varint().unwrap(), anvil, "{protocol}");
+        } else {
+            assert_eq!(r.u8().unwrap(), 101);
+            assert_eq!(r.str().unwrap(), "minecraft:anvil");
+            r.str().unwrap();
+            // Any other number of slots shows a chest.
+            assert_eq!(r.u8().unwrap(), 0);
+            assert!(r.is_empty());
+        }
+    }
+}
+
+#[test]
+fn the_anvil_cost_is_property_0_with_a_byte_then_a_varint_container() {
+    for protocol in FAMILIES {
+        let packet = anvil_cost(version(protocol), 127).unwrap();
+        assert_eq!(
+            packet.id,
+            packet_id(protocol, Direction::Clientbound, "container_set_data"),
+            "{protocol}"
+        );
+        // The container, property 0 and the value 0 as shorts.
+        assert_eq!(packet.data, [127, 0, 0, 0, 0]);
+    }
+    assert_eq!(
+        anvil_cost(version(767), 200).unwrap().data,
+        [200, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        anvil_cost(version(768), 200).unwrap().data,
+        [0xc8, 1, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn renames_are_read_from_rename_item_and_from_mc_item_name_on_1_12() {
+    for protocol in FAMILIES {
+        let ids = ids(protocol);
+        let packet = if protocol >= 393 {
+            let mut w = Writer::new();
+            w.string("Grüße");
+            Packet::new(
+                packet_id(protocol, Direction::Serverbound, "rename_item"),
+                w.into_inner(),
+            )
+        } else {
+            let mut w = Writer::new();
+            w.string("MC|ItemName").string("Grüße");
+            Packet::new(
+                packet_id(protocol, Direction::Serverbound, "custom_payload"),
+                w.into_inner(),
+            )
+        };
+        assert_eq!(
+            rename(&ids, &packet).unwrap().as_deref(),
+            Some("Grüße"),
+            "{protocol}"
+        );
+        // Trailing bytes or a broken string close the session.
+        let mut trailing = packet.clone();
+        trailing.data.push(0);
+        assert!(rename(&ids, &trailing).is_err(), "{protocol}");
+        let mut broken = packet.clone();
+        broken.data.truncate(broken.data.len() - 1);
+        assert!(rename(&ids, &broken).is_err(), "{protocol}");
+        // Other packets are no renames.
+        assert_eq!(rename(&ids, &Packet::new(ids.click, vec![])).unwrap(), None);
+    }
+    // 1.12: an empty message is an empty text; other channels, and a
+    // channel Rift cannot read, are not renames.
+    let ids = ids(340);
+    let payload = packet_id(340, Direction::Serverbound, "custom_payload");
+    let mut empty = Writer::new();
+    empty.string("MC|ItemName");
+    assert_eq!(
+        rename(&ids, &Packet::new(payload, empty.into_inner()))
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    let mut other = Writer::new();
+    other.string("MC|Brand").string("vanilla");
+    assert_eq!(
+        rename(&ids, &Packet::new(payload, other.into_inner())).unwrap(),
+        None
+    );
+    assert_eq!(
+        rename(&ids, &Packet::new(payload, vec![0xff])).unwrap(),
+        None
+    );
+    // A rename_item from 1.13 can be empty.
+    let ids = self::ids(754);
+    let mut w = Writer::new();
+    w.string("");
+    let packet = Packet::new(ids.rename, w.into_inner());
+    assert_eq!(rename(&ids, &packet).unwrap().as_deref(), Some(""));
+}
+
+#[test]
+fn anvil_text_limits_are_35_up_to_1_16_5_and_50_from_1_17() {
+    for (protocol, limit) in [
+        (335, 35),
+        (393, 35),
+        (477, 35),
+        (754, 35),
+        (755, 50),
+        (777, 50),
+    ] {
+        assert_eq!(crate::menu::anvil_text_limit(protocol), limit, "{protocol}");
+        let fits = "x".repeat(limit);
+        assert_eq!(crate::menu::anvil_rename(protocol, &fits), Some(fits));
+        assert_eq!(
+            crate::menu::anvil_rename(protocol, &"x".repeat(limit + 1)),
+            None
+        );
+    }
+}
+
+#[test]
+fn set_experience_is_recognized_for_the_anvil() {
+    for protocol in FAMILIES {
+        let ids = ids(protocol);
+        let packet = Packet::new(
+            packet_id(protocol, Direction::Clientbound, "set_experience"),
+            vec![0, 0, 0, 0, 5, 7],
+        );
+        assert_eq!(
+            backend_packet(&ids, &packet),
+            Some(BackendPacket::Experience),
+            "{protocol}"
+        );
+    }
+}

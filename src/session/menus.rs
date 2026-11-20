@@ -158,6 +158,9 @@ pub(crate) struct Menus {
     /// close packets of both sides.
     backend_container: Option<i32>,
     pub(super) request: Request,
+    /// The backend's last `set_experience`, in the client's protocol, which
+    /// a click on an anvil's result is followed by again.
+    experience: Option<Packet>,
     /// Ends of menus, waiting for the session's owner to deliver them.
     closed: VecDeque<Delivery>,
     /// Events handed out and not yet delivered to their plugin.
@@ -313,6 +316,7 @@ impl Menus {
                     self.request.on_close = true;
                 }
             }
+            Some(BackendPacket::Experience) => self.experience = Some(packet.clone()),
             Some(BackendPacket::InventoryContent) => {
                 self.request.sent = None;
                 if std::mem::take(&mut self.request.again) {
@@ -334,6 +338,7 @@ impl Menus {
         self.end::<C, B>(version, CloseReason::Switch, None, None)?;
         self.backend_container = None;
         self.request = Request::default();
+        self.experience = None;
         Ok(())
     }
 }

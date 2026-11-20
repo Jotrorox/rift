@@ -55,6 +55,16 @@ const CLAIMED_COUNT: i32 = 99;
 const OFFHAND_BUTTON: i8 = 40;
 /// Number keys 1 to 9 are swap buttons 0 to 8.
 const HOTBAR_KEYS: i8 = 9;
+/// The anvil's repair cost in `container_set_data`.
+const ANVIL_COST: i16 = 0;
+/// The anvil sends its text with `rename_item` from 1.13, before as a
+/// plugin message on this channel.
+const RENAME_ITEM: i32 = 393;
+const ITEM_NAME_CHANNEL: &str = "MC|ItemName";
+/// The longest channel name 1.12 reads.
+const MAX_LEGACY_CHANNEL: usize = 20;
+/// The longest string a server reads from a rename.
+const MAX_RENAME: usize = 32767;
 
 /// Whether a player on `protocol` can be shown menus.
 pub fn supported(protocol: i32) -> bool {
@@ -74,6 +84,8 @@ pub(crate) struct Ids {
     set_slot: i32,
     set_content: i32,
     set_cursor: i32,
+    set_data: i32,
+    experience: i32,
     respawn: i32,
     login: i32,
     click: i32,
@@ -81,6 +93,8 @@ pub(crate) struct Ids {
     creative: i32,
     button: i32,
     slot_state: i32,
+    rename: i32,
+    payload: i32,
 }
 
 impl Ids {
@@ -109,6 +123,8 @@ impl Ids {
             set_slot: clientbound("container_set_slot"),
             set_content: clientbound("container_set_content"),
             set_cursor: clientbound("set_cursor_item"),
+            set_data: clientbound("container_set_data"),
+            experience: clientbound("set_experience"),
             respawn: clientbound("respawn"),
             login: clientbound("login"),
             click: serverbound("container_click"),
@@ -116,6 +132,8 @@ impl Ids {
             creative: serverbound("set_creative_mode_slot"),
             button: serverbound("container_button_click"),
             slot_state: serverbound("container_slot_state_changed"),
+            rename: serverbound("rename_item"),
+            payload: serverbound("custom_payload"),
         })
     }
 
@@ -230,6 +248,41 @@ pub(crate) fn empty_cursor(version: ProtocolVersion, state_id: i32) -> io::Resul
         return Ok(Packet::new(ids.set_cursor, empty.into_inner()));
     }
     set_slot(version, i32::from(CURSOR), state_id, CURSOR, &empty.buf)
+}
+
+/// `container_set_data` with an anvil's repair cost of 0: the client hides
+/// the "Enchantment cost" line and does not let the player take the result.
+pub(crate) fn anvil_cost(version: ProtocolVersion, container: i32) -> io::Result<Packet> {
+    let ids = Ids::of_version(version)?;
+    let mut w = Writer::new();
+    write_container(version.number(), &mut w, container)?;
+    w.i16(ANVIL_COST).i16(0);
+    Ok(Packet::new(ids.set_data, w.into_inner()))
+}
+
+/// The text of an anvil rename, if the serverbound packet is one:
+/// `rename_item` from 1.13, the `MC|ItemName` plugin message before (a
+/// string, or nothing for an empty text). A rename Rift cannot read is an
+/// error; a plugin message on another channel, or one whose channel Rift
+/// cannot read, is not a rename.
+pub(crate) fn rename(ids: &Ids, packet: &Packet) -> io::Result<Option<String>> {
+    let mut r = Reader::new(&packet.data);
+    if ids.protocol >= RENAME_ITEM {
+        if packet.id != ids.rename {
+            return Ok(None);
+        }
+    } else {
+        if packet.id != ids.payload || r.string(MAX_LEGACY_CHANNEL).ok() != Some(ITEM_NAME_CHANNEL)
+        {
+            return Ok(None);
+        }
+        if r.is_empty() {
+            return Ok(Some(String::new()));
+        }
+    }
+    let text = r.string(MAX_RENAME)?.to_owned();
+    r.finish()?;
+    Ok(Some(text))
 }
 
 /// `container_close` for the client: it closes whatever screen is open.
@@ -408,6 +461,9 @@ pub(crate) enum BackendPacket {
     InventorySlot,
     /// The whole inventory menu.
     InventoryContent,
+    /// `set_experience`, which Rift replays after a click on an anvil's
+    /// result.
+    Experience,
 }
 
 pub(crate) fn backend_packet(ids: &Ids, packet: &Packet) -> Option<BackendPacket> {
@@ -446,6 +502,8 @@ pub(crate) fn backend_packet(ids: &Ids, packet: &Packet) -> Option<BackendPacket
             return None;
         }
         BackendPacket::InventoryContent
+    } else if id == ids.experience {
+        BackendPacket::Experience
     } else {
         return None;
     })
