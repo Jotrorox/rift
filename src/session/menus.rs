@@ -197,7 +197,7 @@ pub(super) struct Request {
     pub(super) again: bool,
     /// Ask when the menu closes: a 1.17 backend, or a single-slot update the
     /// client dropped while the menu was open.
-    on_close: bool,
+    pub(super) on_close: bool,
 }
 
 impl Request {
@@ -372,29 +372,30 @@ impl Menus {
         }
         let protocol = backend.protocol(version);
         let recipe = packets::recipe(protocol);
-        match recipe {
+        if recipe == Recipe::ClaimAll && self.open.is_some() {
             // Its answer comes slot by slot, which the client drops while a
-            // menu is open.
-            Recipe::ClaimAll if self.open.is_some() => {
-                self.request.on_close = true;
-                return Ok(());
-            }
-            Recipe::ClaimAll => {}
-            Recipe::StateId | Recipe::Transaction => {
-                let now = Instant::now();
-                let soon = self
-                    .request
-                    .last
-                    .is_some_and(|last| now.duration_since(last) < REQUEST_INTERVAL);
-                if self.request.in_flight() || soon {
-                    self.request.again = true;
-                    return Ok(());
-                }
-                self.request.sent = Some(now);
-                self.request.last = Some(now);
-                self.request.again = false;
-            }
+            // menu is open. A request that waited goes out then too.
+            self.request.on_close = true;
+            self.request.again = false;
+            return Ok(());
         }
+        let now = Instant::now();
+        let soon = self
+            .request
+            .last
+            .is_some_and(|last| now.duration_since(last) < REQUEST_INTERVAL);
+        // A 1.17 backend's answer is not followed: its requests only keep
+        // the interval.
+        let waits = recipe != Recipe::ClaimAll && self.request.in_flight();
+        if waits || soon {
+            self.request.again = true;
+            return Ok(());
+        }
+        if recipe != Recipe::ClaimAll {
+            self.request.sent = Some(now);
+        }
+        self.request.last = Some(now);
+        self.request.again = false;
         if recipe == Recipe::Transaction {
             backend.awaiting_rejection = Some(protocol);
         }

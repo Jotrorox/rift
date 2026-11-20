@@ -1977,3 +1977,45 @@ async fn a_client_that_does_not_read_cannot_pile_up_undone_clicks() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn late_clicks_ask_a_1_17_backend_no_more_often_than_the_interval() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 755;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        send(
+            &mut client,
+            &packets::client_close(version(protocol), FIRST).unwrap(),
+        )
+        .await;
+        session.forward().await.unwrap();
+        // Late shift-clicks on the closed menu, as fast as a client sends
+        // them: one request, and one more at the end of the interval.
+        let request = packets::inventory_request(protocol).unwrap();
+        let shift = click(protocol, BUY, 0, 1, &[BUY, 40]);
+        for _ in 0..20 {
+            send(&mut client, &shift).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        }
+        flush(&mut session).await;
+        assert_eq!(next(&mut backend).await, request);
+        nothing(&mut backend).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        assert_eq!(next(&mut backend).await, request);
+        nothing(&mut backend).await;
+        // A menu that opens meanwhile turns the waiting request into one
+        // when it closes, and the timer does not spin.
+        send(&mut client, &shift).await;
+        session.forward().await.unwrap();
+        show(&mut session, &mut client, shop(), owner()).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert_eq!(session.menus.deadline(), None);
+        assert!(session.menus.request.on_close);
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+    })
+    .await
+    .unwrap();
+}
