@@ -4,11 +4,10 @@
 > **Status: design draft, nothing is implemented.** This page is the plan for
 > the branch that adds inventory menus. It describes the plugin API first,
 > because that is the part to agree on, and then how the proxy would do it.
-> [Decisions](#decisions) records what the owner chose and the two questions
-> that choice opened, and [to verify](#to-verify) lists the client and server
-> behavior this design relies on but that has not been checked against the
-> game's code yet. The page grows with the branch and becomes the user guide
-> when it merges.
+> [Decisions](#decisions) records what the owner chose, and
+> [to verify](#to-verify) lists the client and server behavior this design
+> relies on but that has not been checked against the game's code yet. The
+> page grows with the branch and becomes the user guide when it merges.
 
 An inventory menu is a chest-style screen whose slots hold items that act as
 buttons: a server selector, a shop page, a confirmation, a text prompt in an
@@ -465,8 +464,8 @@ changes, so the move needs no change in a plugin's source:
 
 - A Rift with this contract loads only `api = "0.3"` plugins. It refuses a
   0.2 manifest with a pointer to a "Moving from 0.2" section in
-  [plugins](plugins.md), as Rift does today for 0.1. See
-  [what 0.3.0 opens](#what-030-opens) for the alternative.
+  [plugins](plugins.md), as Rift does today for 0.1
+  ([decision 7](#7-what-happens-to-02-plugins)).
 - `min_api` starts again on the new track: a plugin that uses menus needs
   none, because every 0.3 host has them.
 - The [stability policy](stability.md) keeps the contract compatible across
@@ -824,28 +823,22 @@ player saw is not reported (1.17.1 and newer clients).
 - Turned down: **reporting every click** and leaving the guard to each
   plugin.
 
-### What 0.3.0 opens
+### 7. What happens to 0.2 plugins
 
-Choosing 0.3.0 raises two questions the owner has not answered. Each has a
-recommendation, and the rest of this page assumes it.
+**Decided: Rift refuses them, for every engine.** A Rift with contract 0.3
+loads only `api = "0.3"` plugins.
 
-**Does Rift still load 0.2 plugins for a while?**
-
-- **No (recommended).** Rift loads only `api = "0.3"` and refuses a 0.2
-  manifest with a pointer to the guide, as it does for 0.1 today. The move
-  is one line in the manifest, and a rebuild for WebAssembly.
-- **For one minor release.** Rift links both contract versions and warns
-  about 0.2. The host then carries two sets of bindings for that release.
-  The [stability policy](stability.md) says an interface is marked deprecated
-  for one minor release before it is removed; whether a new contract version
-  is a removal in that sense is the owner's reading to make.
-
-**Do persistent Lua plugins have to change `api`?**
-
-- **Yes (recommended).** One rule for every engine, as in the move from 0.1.
-  Nothing else changes for them.
-- **No.** Rift accepts `api = "0.2"` for `engine = "lua"`, because the Lua
-  API only gained functions. Then `api` means different things per engine.
+- A 0.2 manifest is refused with a pointer to the guide, as a 0.1 manifest
+  is today. The move is one line in the manifest, and a rebuild for
+  WebAssembly.
+- Persistent Lua plugins change `api` too, although nothing else changes for
+  them: one rule for every engine, as in the move from 0.1.
+- The [stability policy](stability.md) asks for one minor release of
+  deprecation before an interface is removed. The owner skips it here: the
+  contract has no users besides the owner yet.
+- Turned down: **loading both versions for one minor release**, which means
+  two sets of host bindings, and **accepting `api = "0.2"` for Lua
+  plugins**, which would make `api` mean different things per engine.
 
 ## To verify
 
