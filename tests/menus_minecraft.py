@@ -84,7 +84,7 @@ import matrix_fixtures as fixtures  # noqa: E402
 from matrix_client import Session, SessionError, offline_uuid, text_of  # noqa: E402
 import matrix_registries  # noqa: E402
 from matrix_scenario import CHAT, Commands  # noqa: E402
-from menus_probe import CHANGED_SLOTS, STATE_IDS, empty, from_record, inventory, key, short  # noqa: E402
+from menus_probe import CHANGED_SLOTS, STATE_IDS, empty, from_record, inventory, key, short, stack  # noqa: E402
 from minecraft import varint  # noqa: E402
 
 OUT = env.HOME / "menus-e2e"
@@ -880,7 +880,7 @@ class Pair:
             v = r.value
             if r.name == "set_cursor_item":
                 cursor.append(("set_cursor_item", key(v.get("contents")) is None))
-            elif v.get("windowId") == -1 and v.get("slot") == -1:
+            elif v.get("windowId") in (-1, 255) and v.get("slot") == -1:  # 1.20.5-1.21.1 schemas read a u8.
                 cursor.append(("set_slot(-1)", key(v.get("item")) is None))
             elif v.get("windowId") == self.container:
                 resent[v["slot"]] = v["item"]
@@ -1024,7 +1024,8 @@ class Pair:
     def prepare(self):
         self.section = "setup"
         name = self.client.name
-        for line in (self.cmd.gamemode(name, "survival"), "gamerule keepInventory true",
+        # Peaceful: a survival player on Paper's flat world is otherwise killed by slimes mid-test.
+        for line in ("difficulty peaceful", self.cmd.gamemode(name, "survival"), "gamerule keepInventory true",
                      "gamerule keep_inventory true", f"clear {name}"):
             self.console(line, 0.3)
         mark = self.client.mark()
@@ -1062,8 +1063,17 @@ class Pair:
                            r"Incorrect argument|No player was found|Expected whitespace|"
                            r"id-mapper|legacy|deprecated|SLF4J|tps|overloaded|Unable to find spawn|"
                            r"Invalid game rule|Unknown game ?rule|left the game")
-        bad = [line.strip() for line in log.splitlines() if pattern.search(line) and not noise.search(line)
-               and (self.client.name in line or "Exception" in line or "ERROR" in line)]
+        bad, after_death = [], 0
+        for line in log.splitlines():
+            if f"Killed {self.client.name}" in line or f"{self.client.name} fell out of the world" in line:
+                after_death = 4  # The scripted client reports its old position once after respawning.
+                continue
+            after_death = max(0, after_death - 1)
+            if after_death and "moved too quickly" in line:
+                continue
+            if pattern.search(line) and not noise.search(line) and (
+                    self.client.name in line or "Exception" in line or "ERROR" in line):
+                bad.append(line.strip())
         self.check("the server logged no warning about the player", not bad, " | ".join(bad[-5:]))
 
 
@@ -1112,12 +1122,60 @@ def step_clicks(pair):
     pair.click_case("middle click on clicks=all", "middle", ANY, report=dict(anything, click="middle", key="nil"))
     pair.click_case("left on an inventory-row slot", "left", pair.hotbar(0))
     pair.click_case("click outside the window", "outside", -999)
+    spread_cases(pair)
+    burst(pair)
+
+
+def burst(pair):
+    """Ten shift-clicks within half a second, then one more: Rift keeps at
+    most one inventory request on its way and asks again afterwards, so the
+    last click still gets the inventory back (a request that never got its
+    answer would block every later one)."""
+    mark = pair.client.mark()
+    for _ in range(10):
+        pair.real_click("shift_left", BUY)
+        time.sleep(0.05)
+    time.sleep(2.0)
+    events = [e for e in pair.events(mark) if e.get("click") == "shift_left"]
+    pair.check("a burst of ten shift-clicks: ten events", len(events) == 10, f"{len(events)} events")
+    answers = [r for r in pair.client.packets("window_items", mark) if r.value.get("windowId") == 0]
+    if pair.backend != 755:
+        pair.check("a burst of ten shift-clicks: the inventory comes back, at most a few times",
+                   1 <= len(answers) <= 10, f"{len(answers)} container_set_content(0)")
+    pair.click_case("a shift-click after the burst", "shift_left", BUY,
+                    report=dict(action="buy", slot=BUY, payload="buy:5", state="st-chest:1", key="nil",
+                                click="shift_left"))
+
+
+def spread_cases(pair):
+    """A drag over two menu slots and a double click in the inventory rows:
+    never reported; before 1.17 Rift sends every menu slot again and asks for
+    the inventory, from 1.17 the click's list of changed slots decides."""
+    p = pair.protocol
+    diamonds = from_record(p, json.loads(pair.baseline["slots"][36])) if pair.baseline["slots"][36] else stack(p, 1, 5)
+    legacy = p < CHANGED_SLOTS
+    mark = pair.client.mark()
+    pair.send_click(-999, 0, 5, cursor=diamonds, item=empty(p))
+    pair.send_click(BUY, 1, 5, cursor=diamonds, item=empty(p))
+    pair.send_click(DECORATION, 1, 5, cursor=diamonds, item=empty(p))
+    pair.send_click(-999, 2, 5, changed=[(BUY, diamonds), (DECORATION, diamonds)], item=empty(p))
+    pair.expect_no_event("a drag over two menu slots: not reported", mark, wait=0.8)
+    pair.judge_undo("a drag over two menu slots", mark, list(range(pair.base)) if legacy else [BUY, DECORATION])
+    pair.judge_rows("a drag over two menu slots", mark, legacy)
+    mark = pair.client.mark()
+    row = pair.hotbar(0)
+    pair.send_click(row, 0, 6, changed=[(row, empty(p))], cursor=diamonds, item=diamonds)
+    pair.expect_no_event("a double click in the inventory rows: not reported", mark, wait=0.8)
+    pair.judge_undo("a double click in the inventory rows", mark, list(range(pair.base)) if legacy else [])
+    pair.judge_rows("a double click in the inventory rows", mark, True)
 
 
 def step_backend(pair):
     """Nothing reached the backend; a single-slot update while the menu is
     open is repaired when it closes; a late click for the closed menu is
     dropped; the 1.17 backend is asked when the menu closes."""
+    if pair.menu != "chest" or pair.container is None:
+        raise Skip("the chest is not open")
     view = pair.server_view()
     pair.check("the backend's own view of the inventory is unchanged by the clicks", view == pair.view,
                f"before {pair.view}, after {view}" if view != pair.view else
@@ -1211,15 +1269,21 @@ def step_endings(pair):
 def step_real_click(pair):
     """After the menus (and on a backend up to 1.16.5 after Rift acknowledged
     its own rejections) a real click on the player's own inventory works."""
+    move_diamonds(pair, "after the menus")
+
+
+def move_diamonds(pair, label):
+    """Two real clicks move the diamonds to an empty slot; the backend must
+    act on them (it ignores clicks while it waits for an acknowledgement, or
+    while it thinks another container is open)."""
     p = pair.protocol
     pair.client.check()
     model = inventory(pair.client)
-    filled = model.filled()
-    slot = next((i for i, v in filled.items() if pair.item_name(v) == "minecraft:diamond"), pair.diamond_slot)
-    held = filled.get(slot)
-    if held is None:
-        raise Skip(f"no diamonds in the inventory: {pair.describe_inventory(model.snapshot())}")
-    target = next(i for i in range(9, 36) if model.slots[i] is None)
+    # The server confirms an accepted click without resending the slots, so
+    # where the diamonds are is what the last move made of it.
+    slot = getattr(pair, "diamonds_at", pair.diamond_slot)
+    held = json.loads(pair.baseline["slots"][pair.diamond_slot])
+    target = next(i for i in range(9, 36) if model.slots[i] is None and i != slot)
     mark = pair.client.mark()
     saved = (pair.container, pair.base)
     pair.container, pair.base = 0, 46
@@ -1252,7 +1316,7 @@ def step_real_click(pair):
             if pair.backend < TRANSACTIONS_END:
                 accepted = [r.value for r in pair.client.packets("transaction", mark)
                             if r.value.get("windowId") == 0 and r.value.get("accepted")]
-                pair.check("the backend accepts a real click again (transactions confirmed)",
+                pair.check(f"{label}: the backend accepts real clicks (transactions confirmed)",
                            len(accepted) >= 2, f"transactions {[r.value for r in pair.client.packets('transaction', mark)]}")
     finally:
         pair.container, pair.base = saved
@@ -1260,8 +1324,126 @@ def step_real_click(pair):
     if pair.software == "pumpkin":
         raise Skip("Pumpkin has no console view of the inventory")
     nbt_slot = target  # Container 0 slots 9..35 are NBT slots 9..35.
-    pair.check("a real click after the menus moved the diamonds on the backend",
-               pair.item_in_slot(nbt_slot, "diamond"), f"slot {slot} -> {target}")
+    moved = pair.item_in_slot(nbt_slot, "diamond")
+    if moved:
+        pair.diamonds_at = target
+    pair.check(f"{label}: real clicks moved the diamonds on the backend", moved, f"slot {slot} -> {target}")
+
+
+def summon_container(pair):
+    """A chest minecart at the player, opened with a real interaction: the
+    backend's own container. Its entity ID, or Skip."""
+    mark = pair.client.mark()
+    x, y, z = (int(v // 1) for v in pair.client.position[:3])
+    entity = "minecraft:chest_minecart"
+    pair.console(f"summon {entity} {x} {y} {z}" + (" {NoGravity:1b}" if pair.backend >= 393 else ""), 1.0)
+    spawned = [r.value for r in pair.client.packets(("spawn_entity",), mark)]
+    if not spawned:
+        raise Skip("the chest minecart did not spawn")
+    return spawned[-1]["entityId"]
+
+
+def interact(pair, entity):
+    if pair.protocol >= 775:
+        pair.client.send_packet("use_entity", {"target": entity, "hand": "main_hand", "location": None,
+                                               "sneaking": False})
+    elif pair.protocol >= OFFHAND:
+        pair.client.send_packet("use_entity", {"target": entity, "mouse": 0, "hand": 0, "sneaking": False})
+    else:
+        pair.client.send_packet("use_entity", {"target": entity, "mouse": 0, "hand": 0})
+
+
+def step_backend_screen(pair):
+    """A backend screen and a menu: the menu replaces the backend's chest
+    (Rift closes it on the backend, so real clicks work afterwards), and a
+    backend screen that opens over the menu ends it with reason server."""
+    if pair.software == "pumpkin":
+        raise Skip("Pumpkin: no chest minecart")
+    entity = summon_container(pair)
+    mark = pair.client.mark()
+    interact(pair, entity)
+    try:
+        opened = pair.client.wait_packet("open_window", "the minecart's screen", 6, mark)
+    except SessionError as error:
+        raise Skip(f"the minecart did not open: {error}")
+    backend = opened.value["windowId"]
+    pair.check("the backend's own container has an ID below 101", 0 < backend < 101, f"container {backend}")
+    open_menu(pair, "dispenser")
+    mark = pair.client.mark()
+    pair.client.send_packet("close_window", {"windowId": pair.container})
+    pair.expect_event("a menu over the backend's chest, closed by the player: reason player", mark,
+                      menu="dispenser", kind="close", reason="player")
+    time.sleep(0.5)
+    move_diamonds(pair, "after a menu replaced the backend's chest")
+    # The backend opens its chest while a menu is open.
+    open_menu(pair, "chest")
+    mark = pair.client.mark()
+    interact(pair, entity)
+    pair.expect_event("the backend opens a screen over the menu: reason server", mark, menu="chest",
+                      kind="close", reason="server")
+    try:
+        opened = pair.client.wait_packet("open_window", "the minecart's screen", 6, mark)
+        pair.client.send_packet("close_window", {"windowId": opened.value["windowId"]})
+    except SessionError as error:
+        pair.check("the backend's screen reaches the client", False, error)
+    pair.console(f"kill @e[type={'minecraft:' if pair.backend >= 393 else ''}chest_minecart]", 0.5)
+
+
+def step_creative(pair):
+    """A client in creative mode that drops an item from a menu also asks the
+    backend to create it (set_creative_mode_slot); Rift drops that packet
+    while a menu is open."""
+    if pair.software == "pumpkin":
+        raise Skip("Pumpkin has no console view of the inventory")
+    name, p = pair.client.name, pair.protocol
+    pair.console(pair.cmd.gamemode(name, "creative"), 0.8)
+    try:
+        open_menu(pair, "chest")
+        stone = (pair.registries.id("item", "stone") if pair.registries else None) or 1
+        if p >= 766:
+            item = {"itemCount": 1, "itemId": stone, "addedComponentCount": 0, "removedComponentCount": 0,
+                    "components": [], "removeComponents": []}
+        else:
+            item = stack(p, stone, 1)
+        pair.client.send_packet("set_creative_slot", {"slot": 36, "item": item})
+        time.sleep(1.0)
+        pair.client.check()
+        pair.check("a creative-mode slot while a menu is open does not reach the backend",
+                   not pair.item_in_slot(0, "stone"), "the backend has stone in the first hotbar slot")
+        mark = pair.client.mark()
+        pair.client.send_packet("close_window", {"windowId": pair.container})
+        pair.expect_event("closed by the player in creative mode: reason player", mark, menu="chest",
+                          kind="close", reason="player")
+        # The control: without a menu the backend takes the same packet.
+        time.sleep(0.5)
+        pair.client.send_packet("set_creative_slot", {"slot": 36, "item": item})
+        time.sleep(1.0)
+        pair.check("the control: without a menu the same creative-mode slot reaches the backend",
+                   pair.item_in_slot(0, "stone"), "the backend has no stone in the first hotbar slot")
+        pair.console(f"clear {name} {'minecraft:' if pair.backend >= 393 else ''}stone", 0.5)
+    finally:
+        pair.console(pair.cmd.gamemode(name, "survival"), 0.5)
+
+
+def step_same_id(pair):
+    """Showing the open menu's id again is not an ending: no close event, and
+    the menu keeps working. (This build opens it anew; the design redraws only
+    what changed, which --with redraw is for.)"""
+    open_menu(pair, "chest")
+    mark = pair.client.mark()
+    pair.show("chest")
+    time.sleep(1.5)
+    reopened = [r for r in pair.client.packets("open_window", mark)]
+    pair.note(f"showing the same id again sent {len(reopened)} open_screen")
+    if reopened:
+        pair.container = reopened[-1].value["windowId"]
+    pair.check("the same id again: no close event", not pair.events(mark), pair.events(mark))
+    pair.click_case("the same id again: left on a button", "left", BUY,
+                    report=dict(action="buy", slot=BUY, payload="buy:5", state="st-chest:1", key="nil", click="left"))
+    mark = pair.client.mark()
+    pair.client.send_packet("close_window", {"windowId": pair.container})
+    pair.expect_event("the same id again, then closed: reason player", mark, menu="chest", kind="close",
+                      reason="player")
 
 
 def step_switch(pair):
@@ -1332,7 +1514,7 @@ def step_anvil(pair):
     raise Skip("anvil menus are not in this build")
 
 
-STEPS = [step_clicks, step_backend, step_endings, step_real_click, step_redraw, step_update_menu,
+STEPS = [step_clicks, step_backend, step_endings, step_real_click, step_same_id, step_backend_screen, step_creative, step_redraw, step_update_menu,
          step_stale_click, step_anvil, step_switch, step_disconnect, step_one_close]
 OPTIONAL = {"step_redraw", "step_update_menu", "step_stale_click", "step_anvil"}
 
