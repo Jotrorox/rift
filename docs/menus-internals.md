@@ -30,7 +30,7 @@ fewer packets.
 | Click | The slots the click could have changed, again, and an empty cursor | `container_click` |
 | Anvil text | The result slot and a cost of 0 (`container_set_data`, property 0) after each rename | `rename_item`; the `MC\|ItemName` plugin message on 1.12 |
 | Close | `container_close` when Rift closes the menu | `container_close` when the player does |
-| Other | | `container_button_click` and `container_slot_state_changed` for Rift's container; `set_creative_mode_slot` while a menu is open and for a second after Rift closed it, on every version |
+| Other | | Every other packet that names Rift's container: `container_button_click`, `container_slot_state_changed`, the client's `container_ack` up to 1.16.5, and `place_recipe` (`crafting_recipe_placement` on 1.12). While a menu is open, the packets only a screen of the game's sends, which name no container: `rename_item` for a chest, hopper or dispenser, `select_trade`, `set_beacon` and `bundle_item_selected` (on 1.12 the `MC\|ItemName`, `MC\|TrSel` and `MC\|Beacon` plugin messages). `set_creative_mode_slot` while a menu is open and for a second after Rift closed it, on every version |
 
 Packet IDs come from the translation crate's per-protocol tables, and the
 bodies from its window and screen codecs (`codec/item/window.rs`,

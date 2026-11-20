@@ -585,3 +585,71 @@ fn set_experience_is_recognized_for_the_anvil() {
         );
     }
 }
+
+#[test]
+fn every_serverbound_packet_that_names_a_container_is_read_for_it() {
+    let mut checked = 0;
+    for protocol in 335..=800 {
+        let Some(ids) = Ids::of(protocol) else {
+            continue;
+        };
+        checked += 1;
+        let version = rift_translation::data::try_version(protocol).unwrap();
+        let id = |name| version.packet_id(State::Play, Direction::Serverbound, name);
+        // Rift's container 120 first, then the rest of the packet; 120 is
+        // one byte as a byte and as a VarInt.
+        let container = vec![120, 1, 0];
+        for name in [
+            "container_button_click",
+            "container_ack",
+            "place_recipe",
+            "crafting_recipe_placement",
+        ] {
+            if let Some(id) = id(name) {
+                assert_eq!(
+                    client_container(&ids, &Packet::new(id, container.clone())).unwrap(),
+                    Some((ClientPacket::Other, 120)),
+                    "{name} on {protocol}"
+                );
+            }
+        }
+        if protocol >= 768 {
+            // A VarInt: 200 takes two bytes.
+            let id = id("place_recipe").unwrap();
+            assert_eq!(
+                client_container(&ids, &Packet::new(id, vec![0xc8, 0x01, 1, 0])).unwrap(),
+                Some((ClientPacket::Other, 200))
+            );
+        }
+        assert_eq!(id("container_ack").is_some(), protocol <= 754);
+        // Screens that name no container.
+        for name in [
+            "rename_item",
+            "select_trade",
+            "set_beacon",
+            "bundle_item_selected",
+        ] {
+            if let Some(id) = id(name) {
+                assert!(
+                    screen_only(&ids, &Packet::new(id, vec![0])),
+                    "{name} on {protocol}"
+                );
+            }
+        }
+        let chat = Packet::new(id("chat").unwrap(), vec![1, b'a']);
+        assert!(!screen_only(&ids, &chat));
+        assert_eq!(client_container(&ids, &chat).unwrap(), None);
+        if protocol < 393 {
+            let payload = id("custom_payload").unwrap();
+            for channel in ["MC|ItemName", "MC|TrSel", "MC|Beacon"] {
+                let mut w = Writer::new();
+                w.string(channel).i32(0);
+                assert!(screen_only(&ids, &Packet::new(payload, w.into_inner())));
+            }
+            let mut w = Writer::new();
+            w.string("MC|Brand").string("vanilla");
+            assert!(!screen_only(&ids, &Packet::new(payload, w.into_inner())));
+        }
+    }
+    assert!(checked >= 40, "{checked} protocols");
+}

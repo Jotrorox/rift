@@ -95,6 +95,15 @@ pub(crate) struct Ids {
     slot_state: i32,
     rename: i32,
     payload: i32,
+    /// The client's transaction acknowledgement, up to 1.16.5.
+    ack: i32,
+    /// A recipe book click: `place_recipe` from 1.12.1,
+    /// `crafting_recipe_placement` on 1.12.
+    place_recipe: i32,
+    recipe_placement: i32,
+    select_trade: i32,
+    set_beacon: i32,
+    bundle: i32,
 }
 
 impl Ids {
@@ -134,6 +143,12 @@ impl Ids {
             slot_state: serverbound("container_slot_state_changed"),
             rename: serverbound("rename_item"),
             payload: serverbound("custom_payload"),
+            ack: serverbound("container_ack"),
+            place_recipe: serverbound("place_recipe"),
+            recipe_placement: serverbound("crafting_recipe_placement"),
+            select_trade: serverbound("select_trade"),
+            set_beacon: serverbound("set_beacon"),
+            bundle: serverbound("bundle_item_selected"),
         })
     }
 
@@ -307,13 +322,19 @@ pub(crate) fn client_close(version: ProtocolVersion, container: i32) -> io::Resu
 pub(crate) enum ClientPacket {
     Click,
     Close,
-    /// `container_button_click` and `container_slot_state_changed`, which
+    /// `container_button_click`, `container_slot_state_changed`, the
+    /// client's `container_ack` and the recipe book's `place_recipe`, which
     /// Rift's menus have no use for.
     Other,
 }
 
 /// The container a serverbound packet names, if it is one that names one;
-/// nothing else of the packet is read.
+/// nothing else of the packet is read. These are every serverbound packet
+/// of 1.12 to 26.3 that names a container: `container_click`,
+/// `container_close`, `container_button_click`,
+/// `container_slot_state_changed` (1.20.3+), `container_ack` (up to
+/// 1.16.5), `place_recipe` (1.12.1+) and `crafting_recipe_placement`
+/// (1.12). Each starts with the container, except the slot state.
 pub(crate) fn client_container(
     ids: &Ids,
     packet: &Packet,
@@ -324,7 +345,7 @@ pub(crate) fn client_container(
         (ClientPacket::Click, read_container(protocol, &mut r)?)
     } else if packet.id == ids.client_close {
         (ClientPacket::Close, read_container(protocol, &mut r)?)
-    } else if packet.id == ids.button {
+    } else if [ids.button, ids.ack, ids.place_recipe, ids.recipe_placement].contains(&packet.id) {
         (ClientPacket::Other, read_container(protocol, &mut r)?)
     } else if packet.id == ids.slot_state {
         r.varint()?;
@@ -333,6 +354,26 @@ pub(crate) fn client_container(
         return Ok(None);
     };
     Ok(Some(found))
+}
+
+/// Plugin message channels of 1.12 for what later versions send as
+/// `rename_item`, `select_trade` and `set_beacon`.
+const SCREEN_CHANNELS: [&str; 3] = [ITEM_NAME_CHANNEL, "MC|TrSel", "MC|Beacon"];
+
+/// Whether a serverbound packet can only come from a screen of the game's
+/// that names no container in it: the anvil's rename, the merchant's trade,
+/// the beacon's effects, and the item a bundle in a slot of the open screen
+/// selects (1.21.2+, by the screen's slot number). While Rift's menu is
+/// open, none of those screens is, so such a packet is not for the backend.
+pub(crate) fn screen_only(ids: &Ids, packet: &Packet) -> bool {
+    if [ids.rename, ids.select_trade, ids.set_beacon, ids.bundle].contains(&packet.id) {
+        return true;
+    }
+    ids.protocol < RENAME_ITEM
+        && packet.id == ids.payload
+        && Reader::new(&packet.data)
+            .string(MAX_LEGACY_CHANNEL)
+            .is_ok_and(|channel| SCREEN_CHANNELS.contains(&channel))
 }
 
 /// Whether a serverbound packet is `set_creative_mode_slot`.

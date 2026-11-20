@@ -843,7 +843,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     /// A serverbound packet in play: Rift's when it names Rift's container,
-    /// or is a creative slot while a menu is open. `None` passes it on.
+    /// is a creative slot while a menu is open, or can only come from a
+    /// screen of the game's while Rift's menu is open. `None` passes it on.
     pub(super) fn menu_client_packet(
         &mut self,
         version: ProtocolVersion,
@@ -875,6 +876,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             } else {
                 SessionEvent::Packet
             }));
+        }
+        // Only a screen of the game's could have sent it, and Rift's menu
+        // is what the client shows: a modified client's, or a late one.
+        if self.menus.open.is_some() && packets::screen_only(&ids, packet) {
+            return Ok(Some(SessionEvent::Packet));
         }
         // A packet Rift cannot read is not Rift's: the backend judges it.
         let Some((kind, container)) = packets::client_container(&ids, packet).ok().flatten() else {

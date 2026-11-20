@@ -458,6 +458,70 @@ async fn nothing_of_rift_s_containers_reaches_the_backend_even_late() {
 }
 
 #[tokio::test]
+async fn recipe_clicks_acknowledgements_and_screen_packets_for_rift_s_menu_stay_out() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 754, 774] {
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, shop(), owner()).await;
+            let named = |name: &str, container: i32| {
+                Packet::new(id(protocol, SB, name), vec![container as u8, 0, 0, 0])
+            };
+            let mut rift = vec![named("place_recipe", FIRST)];
+            let mut screens = Vec::new();
+            if protocol <= 754 {
+                rift.push(named("container_ack", FIRST));
+            }
+            if protocol >= 393 {
+                screens.push(Packet::new(id(protocol, SB, "select_trade"), vec![0]));
+                screens.push(Packet::new(id(protocol, SB, "rename_item"), vec![1, b'a']));
+            } else {
+                let mut w = Writer::new();
+                w.string("MC|TrSel").i32(0);
+                screens.push(Packet::new(
+                    id(protocol, SB, "custom_payload"),
+                    w.into_inner(),
+                ));
+            }
+            if protocol >= 768 {
+                screens.push(Packet::new(
+                    id(protocol, SB, "bundle_item_selected"),
+                    vec![11, 0],
+                ));
+            }
+            for packet in rift.iter().chain(&screens) {
+                send(&mut client, packet).await;
+                assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            }
+            flush(&mut session).await;
+            nothing(&mut backend).await;
+            // Late ones for Rift's container are still Rift's; the screen
+            // packets and the backend's own containers are the backend's.
+            session.close_menu(&owner(), None).await.unwrap();
+            drain(&mut client).await;
+            for packet in &rift {
+                send(&mut client, packet).await;
+                assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            }
+            flush(&mut session).await;
+            nothing(&mut backend).await;
+            let mut theirs = vec![named("place_recipe", 3)];
+            if protocol <= 754 {
+                // The client's acknowledgement of a rejection for its own
+                // inventory.
+                theirs.push(named("container_ack", 0));
+            }
+            for packet in theirs.iter().chain(&screens) {
+                send(&mut client, packet).await;
+                session.forward().await.unwrap();
+                assert_eq!(&next(&mut backend).await, packet);
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn backends_up_to_1_16_5_are_asked_with_a_rejected_click_rift_acknowledges() {
     timeout(Duration::from_secs(5), async {
         for protocol in [340, 754] {
@@ -1998,13 +2062,20 @@ async fn renames_are_rift_s_only_while_its_anvil_was_the_last_screen() {
         send(&mut client, &rename(protocol, "theirs")).await;
         session.forward().await.unwrap();
         assert_eq!(next(&mut backend).await, rename(protocol, "theirs"));
-        // A chest of Rift's is no anvil either.
+        // While a chest of Rift's is open no anvil is: nobody's.
         show(&mut session, &mut client, shop(), owner()).await;
         flush(&mut session).await;
         drain(&mut backend).await;
         send(&mut client, &rename(protocol, "chest")).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+        // After it, which was no anvil, the backend's again.
+        send(&mut client, &packets::client_close(v, FIRST + 1).unwrap()).await;
         session.forward().await.unwrap();
-        assert_eq!(next(&mut backend).await, rename(protocol, "chest"));
+        send(&mut client, &rename(protocol, "after")).await;
+        session.forward().await.unwrap();
+        assert_eq!(next(&mut backend).await, rename(protocol, "after"));
     })
     .await
     .unwrap();
