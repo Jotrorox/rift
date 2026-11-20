@@ -17,13 +17,13 @@ use super::{
 };
 use std::{
     cell::Cell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     time::{Duration, Instant},
 };
@@ -227,6 +227,9 @@ pub(crate) enum Job {
         reply: oneshot::Sender<Result<(), String>>,
     },
     Shutdown,
+    /// Nothing to do: wakes the thread for the events that waited behind a
+    /// full queue (see [`Instance::notify_close`]).
+    Wake,
 }
 
 /// A handle that lets host services (subscriptions, timers) feed events into
@@ -372,6 +375,11 @@ pub(crate) struct Shared {
     abandon_at: OnceLock<Instant>,
     /// Deferred answers and background jobs of the running engine.
     pub(crate) background: Background,
+    /// Menu `close` events that found the queue full, in order. They come
+    /// after everything the queue held then; until they are delivered, the
+    /// host queues no other observer event, so no menu event overtakes
+    /// them. Bounded by the menus the plugin showed: one ending each.
+    overflow: Mutex<VecDeque<Event>>,
 }
 
 /// What an awaited call produced.
@@ -547,6 +555,7 @@ impl Instance {
             exited: watch::channel(false).0,
             abandon_at: OnceLock::new(),
             background: Background::default(),
+            overflow: Mutex::default(),
         });
         let spec = Arc::new(spec);
         let instance = Arc::new(Self {
@@ -686,16 +695,48 @@ impl Instance {
     }
 
     /// Queue an observer event. False when the plugin does not want it, is
-    /// unavailable, or its queue is full.
+    /// unavailable, or its queue is full (or `close` events wait behind it).
     pub(crate) fn notify(&self, event: Event) -> bool {
         if self.unavailable().is_some()
             || self
                 .registration()
                 .is_some_and(|registration| !registration.wants(event.hook()))
+            || !self.shared.overflow.lock().unwrap().is_empty()
         {
             return false;
         }
         Queue(self.queue.clone()).notify(event)
+    }
+
+    /// Queue a menu's `close` event, which is never dropped while the plugin
+    /// runs: when the queue is full it waits in [`Shared::overflow`] and is
+    /// delivered once the queue is empty. False when the plugin is
+    /// unavailable.
+    pub(crate) fn notify_close(&self, event: Event) -> bool {
+        if self.unavailable().is_some() {
+            return false;
+        }
+        {
+            let mut overflow = self.shared.overflow.lock().unwrap();
+            if overflow.is_empty() {
+                let job = Job::Call {
+                    event: Box::new(event),
+                    reply: None,
+                    deadline: None,
+                };
+                match self.queue.try_send(job) {
+                    Ok(()) => return true,
+                    Err(TrySendError::Disconnected(_)) => return false,
+                    Err(TrySendError::Full(Job::Call { event, .. })) => overflow.push_back(*event),
+                    Err(TrySendError::Full(_)) => return false,
+                }
+            } else {
+                overflow.push_back(event);
+            }
+        }
+        // A thread that emptied the queue meanwhile waits for the next job.
+        let _ = self.queue.try_send(Job::Wake);
+        true
     }
 
     /// Hot-reload the configuration within the manifest's reload deadline.
@@ -1075,11 +1116,28 @@ impl Worker {
             if self.closing() {
                 return Served::Shutdown;
             }
-            let Ok(job) = self.receiver.recv() else {
-                return Served::Shutdown;
+            // Events that waited behind a full queue come after it.
+            let job = match self.receiver.try_recv() {
+                Ok(job) => job,
+                Err(TryRecvError::Disconnected) => return Served::Shutdown,
+                Err(TryRecvError::Empty) => {
+                    let waiting = self.shared.overflow.lock().unwrap().pop_front();
+                    match waiting {
+                        Some(event) => Job::Call {
+                            event: Box::new(event),
+                            reply: None,
+                            deadline: None,
+                        },
+                        None => match self.receiver.recv() {
+                            Ok(job) => job,
+                            Err(_) => return Served::Shutdown,
+                        },
+                    }
+                }
             };
             match job {
                 Job::Shutdown => return Served::Shutdown,
+                Job::Wake => {}
                 Job::Reload { config_json, reply } => match guarded(|| engine.reload(&config_json))
                 {
                     Ok(result) => {
@@ -1205,6 +1263,7 @@ impl Worker {
         let reason = format!("plugin {} is unavailable", self.spec.name);
         match job {
             Job::Shutdown => return false,
+            Job::Wake => {}
             Job::Call {
                 reply: Some(reply), ..
             } => {

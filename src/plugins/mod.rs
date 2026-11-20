@@ -941,14 +941,30 @@ impl Host {
     }
 
     /// Queue a menu event for the persistent plugin `name`, which showed the
-    /// menu. Dropped when no plugin of that name is active.
+    /// menu. Dropped when no plugin of that name is active; a `close` event
+    /// is never dropped for a full queue (see [`Instance::notify_close`]).
     pub(crate) fn menu(&self, name: &str, input: Context) {
+        let close = input
+            .menu
+            .as_ref()
+            .is_some_and(|event| event.kind == crate::menu::EventKind::Close);
         if let Some(instance) = self
             .active()
             .iter()
             .find(|instance| instance.name() == name)
         {
-            notify(self.monitor(), instance, Event::Menu(input));
+            if close {
+                let queued = instance.notify_close(Event::Menu(input));
+                let outcome = if queued {
+                    monitor::Outcome::Queued
+                } else {
+                    monitor::Outcome::Dropped
+                };
+                self.monitor()
+                    .call(instance.name(), Hook::Menu, outcome, None);
+            } else {
+                notify(self.monitor(), instance, Event::Menu(input));
+            }
         }
     }
 

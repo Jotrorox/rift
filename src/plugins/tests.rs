@@ -1829,3 +1829,93 @@ async fn kick_asks_the_script_then_plugins_that_handle_it() {
     );
     runtime.plugins().shutdown().await;
 }
+
+#[tokio::test]
+async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
+    let root = directory();
+    let mocks = Mocks::default();
+    let (seen, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(Mutex::new(held));
+    mocks.plan(
+        "shop",
+        Plan::new(move |event, _| {
+            if let Event::Menu(context) = event
+                && let Some(menu) = &context.menu
+            {
+                let _ = seen.send(format!("{}:{}", menu.kind.name(), menu.menu));
+                if menu.menu == "hold" {
+                    let _ = held.lock().unwrap().recv();
+                }
+            }
+            Ok(Reply::default_for(event.hook()))
+        }),
+    );
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config("", vec![spec(&root, "shop", "", "{}")]),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let host = runtime.plugins();
+    let event = |id: &str, close: bool| {
+        let menu = crate::menu::Menu::parse(&serde_json::json!({"id": id})).unwrap();
+        let event = if close {
+            crate::menu::MenuEvent::close(&menu, crate::menu::CloseReason::Player)
+        } else {
+            crate::menu::MenuEvent::text(&menu)
+        };
+        Context {
+            menu: Some(event),
+            ..Context::default()
+        }
+    };
+    // The plugin is busy, and its queue fills up.
+    host.menu("shop", event("hold", false));
+    let first = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap();
+    assert_eq!(first.as_deref(), Some("text:hold"));
+    for _ in 0..worker::QUEUE {
+        host.menu("shop", event("click", false));
+    }
+    host.menu("shop", event("dropped", false));
+    // The ends of three menus still arrive, in order, after what was queued,
+    // and nothing overtakes them.
+    for id in ["one", "two", "three"] {
+        host.menu("shop", event(id, true));
+    }
+    host.menu("shop", event("late", false));
+    release.send(()).unwrap();
+    let mut received = Vec::new();
+    while received.len() < worker::QUEUE + 3 {
+        received.push(
+            timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert!(
+        received[..worker::QUEUE]
+            .iter()
+            .all(|event| event == "text:click")
+    );
+    assert_eq!(
+        received[worker::QUEUE..],
+        ["close:one", "close:two", "close:three"]
+    );
+    assert!(
+        timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err()
+    );
+    // Once they are delivered, events are queued again.
+    host.menu("shop", event("after", false));
+    let after = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap();
+    assert_eq!(after.as_deref(), Some("text:after"));
+    runtime.plugins().shutdown().await;
+}

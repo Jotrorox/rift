@@ -247,6 +247,12 @@ A menu that never reached the player still ends once: with `switch` when the
 action met the player between servers, and with `server` when its stacks
 could not be built for the client, which Rift logs as a warning.
 
+A `close` event is never dropped while its plugin runs. When the plugin's
+queue (1024 events) is full, the event waits behind it and is delivered once
+the queue is empty; until then no other event is queued for that plugin, so
+nothing overtakes it. Such events are bounded: one per menu the plugin
+showed.
+
 ## Items and the stack cache
 
 A plugin names an item once. Each client needs it in its own layout: numeric
