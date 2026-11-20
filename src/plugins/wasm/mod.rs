@@ -1,7 +1,7 @@
 //! `engine = "wasm"`: WebAssembly components on Wasmtime.
 //!
 //! A plugin is a component built against the `plugin` world of
-//! `rift:plugin@0.2` (`wit/rift-plugin.wit`). Each instance owns one
+//! `rift:plugin@0.3` (`wit/rift-plugin.wit`). Each instance owns one
 //! [`Store`] and one component instance, created on the plugin's own thread
 //! and called synchronously, one call at a time, by the worker.
 //!
@@ -139,24 +139,34 @@ fn compile(spec: &PluginSpec, wasm: &[u8]) -> Result<Component, String> {
     })
 }
 
-/// Whether `wasm` imports or exports `rift:plugin` 0.1, which this Rift no
-/// longer hosts: the reason is clearer than a list of missing imports.
-fn built_for_old_contract(component: &Component) -> bool {
+/// The older `rift:plugin` track (`0.1` or `0.2`) that `component` imports
+/// or exports, which this Rift no longer hosts: the reason is clearer than a
+/// list of missing imports.
+fn built_for_old_contract(component: &Component) -> Option<&'static str> {
     let engine = component.engine();
     let ty = component.component_type();
-    ty.imports(engine)
+    let names: Vec<String> = ty
+        .imports(engine)
         .map(|(name, _)| name.to_owned())
         .chain(ty.exports(engine).map(|(name, _)| name.to_owned()))
-        .any(|name| name.starts_with("rift:plugin/") && name.contains("@0.1."))
+        .filter(|name| name.starts_with("rift:plugin/"))
+        .collect();
+    ["0.1", "0.2"].into_iter().find(|track| {
+        names
+            .iter()
+            .any(|name| name.contains(&format!("@{track}.")))
+    })
 }
 
 /// Resolve every import against the linker and find the handler exports.
 fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre<State>, String> {
-    if built_for_old_contract(component) {
+    if let Some(track) = built_for_old_contract(component) {
         return Err(format!(
-            "{} was built against rift:plugin 0.1; this Rift implements {}. Rebuild it against the 0.2 SDK (see docs/plugins.md, \"Moving from 0.1\")",
+            "{} was built against rift:plugin {track}; this Rift implements {}. Rebuild it against the {} SDK (see {})",
             entry_name(spec),
-            api::CONTRACT_VERSION
+            api::CONTRACT_VERSION,
+            api::API_VERSION,
+            super::manifest::moving_from(track)
         ));
     }
     linker()?
@@ -417,9 +427,7 @@ impl PluginEngine for WasmEngine {
             Event::Dialog(context) => {
                 done(guest.call_dialog(store, &bindings::dialog_response(context)))
             }
-            // The 0.2 contract has no `menu` hook, and its plugins cannot
-            // show menus: nothing can be addressed to them.
-            Event::Menu(_) => Ok(Ok(Reply::None)),
+            Event::Menu(context) => done(guest.call_menu(store, &bindings::menu_event(context))),
             Event::Job(handle, outcome) => done(guest.call_job_done(
                 store,
                 handle,

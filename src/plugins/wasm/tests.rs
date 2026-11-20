@@ -64,7 +64,7 @@ impl Guest {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
+                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
                 self.name
             ),
         )
@@ -477,7 +477,7 @@ fn install_conformance(wasm: PathBuf, folder: &Path, name: &str, extra: &str) {
     std::fs::write(
         folder.join("plugin.toml"),
         format!(
-            "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+            "name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
         ),
     )
     .unwrap();
@@ -750,6 +750,66 @@ async fn invalid_artifacts_fail_with_a_reason() {
     );
     runtime.plugins().shutdown().await;
     assert!(super::precompile(&config.plugins[0]).is_err());
+}
+
+/// A component that imports `rift:plugin/log` at `version`, and nothing
+/// else.
+fn component_importing_log(version: &str) -> Vec<u8> {
+    let name = format!("rift:plugin/log@{version}");
+    let mut import = vec![1, 0, name.len() as u8];
+    import.extend_from_slice(name.as_bytes());
+    // An instance of the empty instance type 0.
+    import.extend_from_slice(&[5, 0]);
+    let mut wasm = b"\0asm\x0d\x00\x01\x00".to_vec();
+    // A type section with one empty instance type.
+    wasm.extend_from_slice(&[7, 3, 1, 0x42, 0]);
+    wasm.extend_from_slice(&[10, import.len() as u8]);
+    wasm.extend_from_slice(&import);
+    wasm
+}
+
+#[tokio::test]
+async fn components_built_against_an_older_contract_are_refused_with_a_pointer() {
+    for (version, pointer) in [
+        ("0.2.1", "\"Moving from 0.2\""),
+        ("0.2.0", "\"Moving from 0.2\""),
+        ("0.1.5", "\"Moving from 0.1\" and \"Moving from 0.2\""),
+    ] {
+        let root = directory();
+        let guest = Guest {
+            name: "old".into(),
+            wasm: root.join("old.wasm"),
+        };
+        std::fs::write(&guest.wasm, component_importing_log(version)).unwrap();
+        let config = configure(&root, &guest, "[failure]\nrestart = \"never\"\n", "{}");
+        let error = super::precompile(&config.plugins[0]).unwrap_err();
+        let track = &version[..3];
+        assert!(
+            error.contains(&format!("built against rift:plugin {track}"))
+                && error.contains("implements 0.3.0")
+                && error.contains("against the 0.3 SDK")
+                && error.contains(pointer),
+            "{error}"
+        );
+        let runtime =
+            Extensions::with_engines(&config, Broker::default(), None, Engines::builtin()).unwrap();
+        let error = runtime.plugins().start().await.unwrap_err().to_string();
+        assert!(error.contains(pointer), "{error}");
+        runtime.plugins().shutdown().await;
+    }
+    // A component of this track that lacks imports is told what it lacks.
+    let root = directory();
+    let guest = Guest {
+        name: "partial".into(),
+        wasm: root.join("partial.wasm"),
+    };
+    std::fs::write(&guest.wasm, component_importing_log("0.3.0")).unwrap();
+    let config = configure(&root, &guest, "", "{}");
+    let error = super::precompile(&config.plugins[0]).unwrap_err();
+    assert!(
+        error.contains("does not fit this Rift's rift:plugin 0.3.0 host"),
+        "{error}"
+    );
 }
 
 /// `rift check --strict` accepts a component with and without a `chat`
@@ -1177,7 +1237,7 @@ async fn components_convert_text_with_their_own_messages() {
         name: "t".into(),
         wasm: probe.wasm,
     };
-    let manifest = "min_api = \"0.2.1\"\n[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n";
+    let manifest = "min_api = \"0.3.0\"\n[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n";
     // A template from the configuration that does not render fails `init`.
     let root = directory();
     let config = configure(

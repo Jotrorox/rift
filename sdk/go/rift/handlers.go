@@ -266,6 +266,8 @@ func init() {
 	e.Timer = func(h uint64) { onTimer(h) }
 	e.Event = func(ev types.RiftEvent) { onEvent(Event{Subject: ev.Subject, PayloadJSON: ev.PayloadJSON}) }
 	e.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
+	// A plugin that shows no menus never receives a menu event.
+	e.Menu = func(types.MenuEvent) {}
 	e.JobDone = func(handle uint64, outcome bytesResult) {
 		if err := outcome.Err(); err != nil {
 			onJobDone(handle, nil, JobError(*err))

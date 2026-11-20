@@ -195,7 +195,7 @@ fn directory() -> PathBuf {
 
 fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
     let text =
-        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}");
+        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}");
     PluginSpec {
         name: name.into(),
         folder: root.join("plugins").join(name),
@@ -1702,7 +1702,7 @@ fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
         let mut spec = spec(&root, "probe", "", "{}");
         spec.manifest = Manifest::parse(
             &format!(
-                "name = \"probe\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
+                "name = \"probe\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
             ),
             "probe",
         )

@@ -280,7 +280,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.2.1",
+        world: "rift:plugin/plugin@0.3.0",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -421,6 +421,11 @@ pub trait Plugin: Default + 'static {
     /// [`players::show_dialog`]. Delivered without being listed in
     /// [`Registration::hooks`].
     fn dialog(&mut self, response: DialogResponse) {}
+
+    /// A player clicked, typed in or left a menu this plugin showed with
+    /// `players::menu`. Delivered without being listed in
+    /// [`Registration::hooks`].
+    fn menu(&mut self, event: menu::MenuEvent) {}
 
     /// A job started with [`background::run`] finished: `handle` is the one
     /// `run` returned and `outcome` what [`Plugin::work`] returned on the
@@ -746,6 +751,11 @@ impl TitleSpec {
     }
 }
 
+/// Inventory menus.
+pub mod menu {
+    pub use crate::bindings::rift::plugin::types::MenuEvent;
+}
+
 /// The joined players, and what Rift remembers about those who left.
 /// `target` is a name, a UUID or a connection id.
 ///
@@ -768,8 +778,8 @@ pub mod players {
     use crate::Text;
     use crate::bindings::rift::plugin::players as host;
     pub use host::{
-        boss_bar, clear_dialog, dialog, get, list, lookup, names, search, set_language, title,
-        transfer,
+        boss_bar, clear_dialog, close_menu, dialog, get, list, lookup, menu, names, search,
+        set_language, title, transfer, update_menu,
     };
 
     /// Send a chat message to a player.
@@ -1692,6 +1702,10 @@ pub mod __private {
 
         fn dialog(response: DialogResponse) {
             with(|p: &mut P| p.dialog(response))
+        }
+
+        fn menu(event: menu::MenuEvent) {
+            with(|p: &mut P| p.menu(event))
         }
 
         fn job_done(handle: u64, outcome: Result<Vec<u8>, String>) {

@@ -378,8 +378,9 @@ typedef struct {
 typedef struct rift_plugin_types_registration_t {
   rift_plugin_types_list_command_spec_t   commands;
   // Events to deliver. An empty list delivers every hook except
-  // `chat` and `kick`. `dialog` and `job-done` need no entry: they go
-  // to the plugin that showed the dialog or started the job.
+  // `chat` and `kick`. `dialog`, `menu` and `job-done` need no entry:
+  // they go to the plugin that showed the dialog or menu or started
+  // the job.
   rift_plugin_types_list_hook_t   hooks;
 } rift_plugin_types_registration_t;
 
@@ -445,6 +446,40 @@ typedef struct rift_plugin_types_dialog_response_t {
   // keeps it, so the client can neither see nor change it.
   rift_plugin_option_string_t   payload_json;
 } rift_plugin_types_dialog_response_t;
+
+// Something a player did in a menu this plugin showed with
+// `players.menu`. See docs/menus.md.
+typedef struct rift_plugin_types_menu_event_t {
+  // The player. `server` is their current backend; the command,
+  // target and suggestion fields are empty.
+  rift_plugin_types_context_t   ctx;
+  // The menu's `id`.
+  rift_plugin_string_t   menu;
+  // `click`, `text` or `close`. Later versions may add kinds: ignore
+  // the ones you do not know.
+  rift_plugin_string_t   kind;
+  // `click`: the button's `id`.
+  rift_plugin_option_string_t   action;
+  // `click`: the slot number, from 0.
+  rift_plugin_option_u32_t   slot;
+  // `click`: `left`, `right`, `shift_left`, `shift_right`, `middle`,
+  // `drop`, `drop_all`, `number_key` or `offhand`. Later versions may
+  // add kinds.
+  rift_plugin_option_string_t   click;
+  // `click` with `number_key`: 1 to 9.
+  rift_plugin_option_u32_t   key;
+  // Every event of an anvil menu: what the text field holds. It
+  // comes from the client: check it like chat.
+  rift_plugin_option_string_t   text;
+  // `close`: `player`, `plugin`, `replaced`, `server`, `switch` or
+  // `disconnect`. Later versions may add reasons.
+  rift_plugin_option_string_t   reason;
+  // `click`: the button's `payload` as JSON, as the plugin wrote it.
+  // Rift keeps it, so the client can neither see nor change it.
+  rift_plugin_option_string_t   payload_json;
+  // The menu's `state` as JSON, as the plugin last set it.
+  rift_plugin_option_string_t   state_json;
+} rift_plugin_types_menu_event_t;
 
 typedef rift_plugin_types_player_info_t rift_plugin_players_player_info_t;
 
@@ -643,6 +678,8 @@ typedef rift_plugin_types_dialog_response_t exports_rift_plugin_handler_dialog_r
 
 typedef rift_plugin_types_chat_attempt_t exports_rift_plugin_handler_chat_attempt_t;
 
+typedef rift_plugin_types_menu_event_t exports_rift_plugin_handler_menu_event_t;
+
 typedef struct {
   bool is_err;
   union {
@@ -681,7 +718,7 @@ typedef struct {
   } val;
 } exports_rift_plugin_handler_result_list_u8_string_t;
 
-// Imported Functions from `rift:plugin/players@0.2.1`
+// Imported Functions from `rift:plugin/players@0.3.0`
 // Players, optionally only those on one server or service group.
 extern bool rift_plugin_players_list(rift_plugin_string_t *maybe_server, rift_plugin_players_list_player_info_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_get(rift_plugin_string_t *target, rift_plugin_players_option_player_info_t *ret, rift_plugin_string_t *err);
@@ -706,6 +743,22 @@ extern bool rift_plugin_players_kick(rift_plugin_string_t *target, rift_plugin_p
 extern bool rift_plugin_players_dialog(rift_plugin_string_t *target, rift_plugin_string_t *dialog_json, bool *ret, rift_plugin_string_t *err);
 // Close the dialog this Rift showed, if it is still open.
 extern bool rift_plugin_players_clear_dialog(rift_plugin_string_t *target, bool *ret, rift_plugin_string_t *err);
+// Show an inventory menu to a player on Minecraft 1.12 or newer, or
+// redraw the open menu with the same `id` in place. `menu-json` is a
+// menu definition; see docs/menus.md. Clicks, anvil text and the end
+// of the menu come back through the `menu` hook. Returns false when
+// the player is offline, older than 1.12 or has too many undelivered
+// actions; an invalid menu is an error.
+extern bool rift_plugin_players_menu(rift_plugin_string_t *target, rift_plugin_string_t *menu_json, bool *ret, rift_plugin_string_t *err);
+// Change part of this plugin's menu `menu` with a patch (`slots`,
+// `keys`, `title`, `state`, `text`; see docs/menus.md). Does nothing
+// when the player no longer has that menu open. Returns false as `menu`
+// does; an invalid patch is an error.
+extern bool rift_plugin_players_update_menu(rift_plugin_string_t *target, rift_plugin_string_t *menu, rift_plugin_string_t *patch_json, bool *ret, rift_plugin_string_t *err);
+// Close this plugin's menu `menu`, or with `none` whatever Rift menu
+// the player has open, whoever showed it. Returns false as `menu`
+// does.
+extern bool rift_plugin_players_close_menu(rift_plugin_string_t *target, rift_plugin_string_t *maybe_menu, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_transfer(rift_plugin_string_t *target, rift_plugin_string_t *server, bool *ret, rift_plugin_string_t *err);
 // Returns how many players received the message.
 extern bool rift_plugin_players_broadcast(rift_plugin_players_text_t *text, uint32_t *ret, rift_plugin_string_t *err);
@@ -723,7 +776,7 @@ extern bool rift_plugin_players_search(rift_plugin_string_t *prefix, uint32_t li
 // `login`. Returns whether the player is known.
 extern bool rift_plugin_players_set_language(rift_plugin_string_t *target, rift_plugin_string_t *maybe_language, bool *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/store@0.2.1`
+// Imported Functions from `rift:plugin/store@0.3.0`
 extern bool rift_plugin_store_get(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_option_list_u8_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_store_set(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_list_u8_t *value, rift_plugin_string_t *err);
 // Returns whether an entry existed.
@@ -733,7 +786,7 @@ extern bool rift_plugin_store_increment(rift_plugin_string_t *namespace_, rift_p
 // Entries whose key starts with `prefix`, sorted by key.
 extern bool rift_plugin_store_list(rift_plugin_string_t *namespace_, rift_plugin_string_t *prefix, rift_plugin_list_tuple2_string_list_u8_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/permissions@0.2.1`
+// Imported Functions from `rift:plugin/permissions@0.3.0`
 // Whether the node is true in the player's current contexts.
 extern bool rift_plugin_permissions_has(rift_plugin_string_t *uuid, rift_plugin_string_t *node);
 // Set the user's global permission node; `none` removes it.
@@ -755,7 +808,7 @@ extern bool rift_plugin_permissions_meta(rift_plugin_string_t *uuid, rift_plugin
 // changed.
 extern bool rift_plugin_permissions_set_meta(rift_plugin_string_t *uuid, rift_plugin_string_t *key, rift_plugin_string_t *maybe_value, rift_plugin_string_t *maybe_contexts_json, uint64_t *maybe_expires_at, bool *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/bus@0.2.1`
+// Imported Functions from `rift:plugin/bus@0.3.0`
 // Returns how many subscribers received the message.
 extern bool rift_plugin_bus_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, rift_plugin_string_t *maybe_reply, uint32_t *ret, rift_plugin_string_t *err);
 // Send a request and wait for the first reply.
@@ -767,7 +820,7 @@ extern bool rift_plugin_bus_unsubscribe(uint64_t handle);
 // Append to a durable stream; returns the sequence number.
 extern bool rift_plugin_bus_stream_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, uint64_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/servers@0.2.1`
+// Imported Functions from `rift:plugin/servers@0.3.0`
 extern bool rift_plugin_servers_create(rift_plugin_string_t *group, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_remove(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_start(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
@@ -777,7 +830,7 @@ extern bool rift_plugin_servers_download(rift_plugin_string_t *template_, rift_p
 // templates, transfer, drain, maintenance, reload) with a JSON payload.
 extern bool rift_plugin_servers_control(rift_plugin_string_t *operation, rift_plugin_string_t *payload_json, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/timers@0.2.1`
+// Imported Functions from `rift:plugin/timers@0.3.0`
 // Repeats every `ms` milliseconds (at least 10).
 extern uint64_t rift_plugin_timers_every(uint32_t ms);
 // Fires once after `ms` milliseconds.
@@ -785,7 +838,7 @@ extern uint64_t rift_plugin_timers_after(uint32_t ms);
 // Returns whether the timer existed.
 extern bool rift_plugin_timers_cancel(uint64_t handle);
 
-// Imported Functions from `rift:plugin/background@0.2.1`
+// Imported Functions from `rift:plugin/background@0.3.0`
 // Call inside `login`, `initial-server`, `before-transfer`, `command`,
 // `chat` or `kick`: the hook's own return value is ignored, and the
 // answer is the one given to `resolve` with the returned ticket. The
@@ -804,10 +857,10 @@ extern bool rift_plugin_background_run(rift_plugin_list_u8_t *payload, uint64_t 
 // Whether this instance is a background worker.
 extern bool rift_plugin_background_is_worker(void);
 
-// Imported Functions from `rift:plugin/log@0.2.1`
+// Imported Functions from `rift:plugin/log@0.3.0`
 extern void rift_plugin_log_log(rift_plugin_log_level_t level, rift_plugin_string_t *message);
 
-// Imported Functions from `rift:plugin/meta@0.2.1`
+// Imported Functions from `rift:plugin/meta@0.3.0`
 extern void rift_plugin_meta_name(rift_plugin_string_t *ret);
 extern void rift_plugin_meta_version(rift_plugin_string_t *ret);
 // Guest path of the plugin's private data directory (`/data`).
@@ -818,10 +871,10 @@ extern bool rift_plugin_meta_config_dir(rift_plugin_string_t *ret);
 extern double rift_plugin_meta_clock(void);
 // Unix time in seconds.
 extern int64_t rift_plugin_meta_time(void);
-// The `rift:plugin` version this host implements, such as `0.2.1`.
+// The `rift:plugin` version this host implements, such as `0.3.0`.
 extern void rift_plugin_meta_api(rift_plugin_string_t *ret);
 
-// Imported Functions from `rift:plugin/text@0.2.1`
+// Imported Functions from `rift:plugin/text@0.3.0`
 // The JSON text component `text` becomes: markup, legacy codes and
 // messages resolved, in `language` or the default. Also the way to
 // check a template from the plugin's own configuration during `init`.
@@ -833,7 +886,7 @@ extern bool rift_plugin_text_to_legacy(rift_plugin_text_text_t *text, rift_plugi
 // Markup that writes the text.
 extern bool rift_plugin_text_to_mini(rift_plugin_text_text_t *text, rift_plugin_string_t *maybe_language, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 
-// Exported Functions from `rift:plugin/handler@0.2.1`
+// Exported Functions from `rift:plugin/handler@0.3.0`
 bool exports_rift_plugin_handler_init(rift_plugin_string_t *config_json, exports_rift_plugin_handler_registration_t *ret, rift_plugin_string_t *err);
 bool exports_rift_plugin_handler_reload(rift_plugin_string_t *config_json, rift_plugin_string_t *err);
 void exports_rift_plugin_handler_shutdown(rift_plugin_string_t *reason);
@@ -854,6 +907,7 @@ void exports_rift_plugin_handler_message(exports_rift_plugin_handler_bus_message
 void exports_rift_plugin_handler_timer(uint64_t handle);
 void exports_rift_plugin_handler_event(exports_rift_plugin_handler_rift_event_t *event);
 void exports_rift_plugin_handler_dialog(exports_rift_plugin_handler_dialog_response_t *response);
+void exports_rift_plugin_handler_menu(exports_rift_plugin_handler_menu_event_t *event);
 void exports_rift_plugin_handler_job_done(uint64_t handle, exports_rift_plugin_handler_result_list_u8_string_t *outcome);
 bool exports_rift_plugin_handler_work_init(rift_plugin_string_t *config_json, rift_plugin_string_t *err);
 bool exports_rift_plugin_handler_work(rift_plugin_list_u8_t *payload, rift_plugin_list_u8_t *ret, rift_plugin_string_t *err);
@@ -931,6 +985,8 @@ void rift_plugin_types_title_spec_free(rift_plugin_types_title_spec_t *ptr);
 void rift_plugin_types_chat_attempt_free(rift_plugin_types_chat_attempt_t *ptr);
 
 void rift_plugin_types_dialog_response_free(rift_plugin_types_dialog_response_t *ptr);
+
+void rift_plugin_types_menu_event_free(rift_plugin_types_menu_event_t *ptr);
 
 void rift_plugin_players_player_info_free(rift_plugin_players_player_info_t *ptr);
 
@@ -1019,6 +1075,8 @@ void exports_rift_plugin_handler_registration_free(exports_rift_plugin_handler_r
 void exports_rift_plugin_handler_dialog_response_free(exports_rift_plugin_handler_dialog_response_t *ptr);
 
 void exports_rift_plugin_handler_chat_attempt_free(exports_rift_plugin_handler_chat_attempt_t *ptr);
+
+void exports_rift_plugin_handler_menu_event_free(exports_rift_plugin_handler_menu_event_t *ptr);
 
 void exports_rift_plugin_handler_result_registration_string_free(exports_rift_plugin_handler_result_registration_string_t *ptr);
 

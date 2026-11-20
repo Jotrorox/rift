@@ -15,16 +15,19 @@
 ///   concurrently.
 /// - Additive changes keep compiled components loading: new host functions,
 ///   new types and new interfaces, never a changed type or a new case in an
-///   existing enum or variant. Wasmtime matches `@0.2.x` names with each
-///   other, so a component built against 0.2.0 loads on every later 0.2.
-/// - Breaking changes move to the next minor version until 1.0. 0.2.0 is
-///   0.1.5 without its duplicates: one `text` type instead of plain and
-///   `-json` forms, one `decision`, and `dialog`, `chat` and `kick` in
-///   `handler`. Components built against 0.1 do not load.
-/// - 0.2.1 adds the `text` interface. A plugin that calls it sets
-///   `min_api = "0.2.1"` in its manifest, so an older Rift refuses it with
-///   a reason instead of a missing import.
-package rift:plugin@0.2.1;
+///   existing enum or variant. Wasmtime matches `@0.3.x` names with each
+///   other, so a component built against 0.3.0 loads on every later 0.3.
+/// - Breaking changes move to the next minor version until 1.0, and a Rift
+///   hosts one track only. A new hook is one: a component exports exactly
+///   what `handler` lists.
+/// - 0.3.0 is 0.2.1 plus inventory menus: the `menu-event` record,
+///   `players.menu`, `update-menu` and `close-menu`, and the `menu` hook in
+///   `handler`. Components built against 0.2 do not load; they need only a
+///   rebuild against the 0.3 SDK.
+/// - A plugin that needs a later 0.3 release than 0.3.0 says so with
+///   `min_api` in its manifest, so an older Rift refuses it with a reason
+///   instead of a missing import.
+package rift:plugin@0.3.0;
 
 interface types {
     /// Log severity.
@@ -296,8 +299,9 @@ interface types {
     record registration {
         commands: list<command-spec>,
         /// Events to deliver. An empty list delivers every hook except
-        /// `chat` and `kick`. `dialog` and `job-done` need no entry: they go
-        /// to the plugin that showed the dialog or started the job.
+        /// `chat` and `kick`. `dialog`, `menu` and `job-done` need no entry:
+        /// they go to the plugin that showed the dialog or menu or started
+        /// the job.
         hooks: list<hook>,
     }
 
@@ -363,6 +367,40 @@ interface types {
         /// keeps it, so the client can neither see nor change it.
         payload-json: option<string>,
     }
+
+    /// Something a player did in a menu this plugin showed with
+    /// `players.menu`. See docs/menus.md.
+    record menu-event {
+        /// The player. `server` is their current backend; the command,
+        /// target and suggestion fields are empty.
+        ctx: context,
+        /// The menu's `id`.
+        menu: string,
+        /// `click`, `text` or `close`. Later versions may add kinds: ignore
+        /// the ones you do not know.
+        kind: string,
+        /// `click`: the button's `id`.
+        action: option<string>,
+        /// `click`: the slot number, from 0.
+        slot: option<u32>,
+        /// `click`: `left`, `right`, `shift_left`, `shift_right`, `middle`,
+        /// `drop`, `drop_all`, `number_key` or `offhand`. Later versions may
+        /// add kinds.
+        click: option<string>,
+        /// `click` with `number_key`: 1 to 9.
+        key: option<u32>,
+        /// Every event of an anvil menu: what the text field holds. It
+        /// comes from the client: check it like chat.
+        text: option<string>,
+        /// `close`: `player`, `plugin`, `replaced`, `server`, `switch` or
+        /// `disconnect`. Later versions may add reasons.
+        reason: option<string>,
+        /// `click`: the button's `payload` as JSON, as the plugin wrote it.
+        /// Rift keeps it, so the client can neither see nor change it.
+        payload-json: option<string>,
+        /// The menu's `state` as JSON, as the plugin last set it.
+        state-json: option<string>,
+    }
 }
 
 /// The joined players. `target` is a name, a UUID or a connection id.
@@ -393,6 +431,22 @@ interface players {
     dialog: func(target: string, dialog-json: string) -> result<bool, string>;
     /// Close the dialog this Rift showed, if it is still open.
     clear-dialog: func(target: string) -> result<bool, string>;
+    /// Show an inventory menu to a player on Minecraft 1.12 or newer, or
+    /// redraw the open menu with the same `id` in place. `menu-json` is a
+    /// menu definition; see docs/menus.md. Clicks, anvil text and the end
+    /// of the menu come back through the `menu` hook. Returns false when
+    /// the player is offline, older than 1.12 or has too many undelivered
+    /// actions; an invalid menu is an error.
+    menu: func(target: string, menu-json: string) -> result<bool, string>;
+    /// Change part of this plugin's menu `menu` with a patch (`slots`,
+    /// `keys`, `title`, `state`, `text`; see docs/menus.md). Does nothing
+    /// when the player no longer has that menu open. Returns false as `menu`
+    /// does; an invalid patch is an error.
+    update-menu: func(target: string, menu: string, patch-json: string) -> result<bool, string>;
+    /// Close this plugin's menu `menu`, or with `none` whatever Rift menu
+    /// the player has open, whoever showed it. Returns false as `menu`
+    /// does.
+    close-menu: func(target: string, menu: option<string>) -> result<bool, string>;
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: text) -> result<u32, string>;
@@ -528,7 +582,7 @@ interface meta {
     clock: func() -> f64;
     /// Unix time in seconds.
     time: func() -> s64;
-    /// The `rift:plugin` version this host implements, such as `0.2.1`.
+    /// The `rift:plugin` version this host implements, such as `0.3.0`.
     api: func() -> string;
 }
 
@@ -554,7 +608,7 @@ interface handler {
     use types.{
         context, connection, route-decision, decision, suggestion, ping,
         status-override, http-request, http-response, bus-message, rift-event,
-        registration, dialog-response, chat-attempt,
+        registration, dialog-response, chat-attempt, menu-event,
     };
 
     /// Called once per instance with the `rift.plugin(name, config)` table
@@ -596,6 +650,10 @@ interface handler {
     event: func(event: rift-event);
     /// A player clicked a plugin action of a dialog this plugin showed.
     dialog: func(response: dialog-response);
+    /// A player clicked, typed in or left a menu this plugin showed with
+    /// `players.menu`. Every menu that was shown ends with exactly one
+    /// `close`.
+    menu: func(event: menu-event);
     /// A job started with `background.run` finished: what `work` returned,
     /// or why it failed.
     job-done: func(handle: u64, outcome: result<list<u8>, string>);

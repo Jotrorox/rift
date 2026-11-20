@@ -31,7 +31,7 @@ impl Fixture for LuaFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
             ),
         )
         .unwrap();
@@ -76,7 +76,7 @@ fn folder(extra: &str, files: &[(&str, &str)]) -> PathBuf {
     }
     std::fs::write(
         plugin.join("plugin.toml"),
-        format!("name = \"t\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
+        format!("name = \"t\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}"),
     )
     .unwrap();
     root
@@ -995,7 +995,7 @@ async fn aliases_the_console_the_directory_and_background_work_reach_lua() {
             (
                 "init.lua",
                 r#"
-assert(rift.meta.api == "0.2.1")
+assert(rift.meta.api == "0.3.0")
 assert(not rift.background.is_worker())
 assert(not pcall(rift.on, "work", function() end), "work belongs in the worker script")
 rift.command("whois", {

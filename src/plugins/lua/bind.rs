@@ -381,7 +381,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
-    // The exact `rift:plugin` version, such as "0.2.1".
+    // The exact `rift:plugin` version, such as "0.3.0".
     meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 

@@ -1,7 +1,7 @@
 //! What a player did in a menu, as Rift reports it to whoever showed the
-//! menu: the configuration script or one persistent plugin (and, with the
-//! next contract, a WebAssembly plugin). The fields are those of the `menu`
-//! event in docs/menus.md.
+//! menu: the configuration script or one persistent plugin, Lua or
+//! WebAssembly. The fields are those of the `menu` event in docs/menus.md and
+//! of the contract's `menu-event`.
 use super::{Click, Menu, Patch, Textures};
 use crate::dialog::Owner;
 use serde::{Deserialize, Serialize};

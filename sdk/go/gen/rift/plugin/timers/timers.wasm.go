@@ -2,16 +2,16 @@
 
 package timers
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.1".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.3.0".
 
-//go:wasmimport rift:plugin/timers@0.2.1 every
+//go:wasmimport rift:plugin/timers@0.3.0 every
 //go:noescape
 func wasmimport_Every(ms0 uint32) (result0 uint64)
 
-//go:wasmimport rift:plugin/timers@0.2.1 after
+//go:wasmimport rift:plugin/timers@0.3.0 after
 //go:noescape
 func wasmimport_After(ms0 uint32) (result0 uint64)
 
-//go:wasmimport rift:plugin/timers@0.2.1 cancel
+//go:wasmimport rift:plugin/timers@0.3.0 cancel
 //go:noescape
 func wasmimport_Cancel(handle0 uint64) (result0 uint32)

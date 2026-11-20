@@ -6,20 +6,20 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.1".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.3.0".
 
-//go:wasmimport rift:plugin/text@0.2.1 render
+//go:wasmimport rift:plugin/text@0.3.0 render
 //go:noescape
 func wasmimport_Render(text0 uint32, text1 *uint8, text2 uint32, language0 uint32, language1 *uint8, language2 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/text@0.2.1 plain
+//go:wasmimport rift:plugin/text@0.3.0 plain
 //go:noescape
 func wasmimport_Plain(text0 uint32, text1 *uint8, text2 uint32, language0 uint32, language1 *uint8, language2 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/text@0.2.1 to-legacy
+//go:wasmimport rift:plugin/text@0.3.0 to-legacy
 //go:noescape
 func wasmimport_ToLegacy(text0 uint32, text1 *uint8, text2 uint32, language0 uint32, language1 *uint8, language2 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/text@0.2.1 to-mini
+//go:wasmimport rift:plugin/text@0.3.0 to-mini
 //go:noescape
 func wasmimport_ToMini(text0 uint32, text1 *uint8, text2 uint32, language0 uint32, language1 *uint8, language2 uint32, result *cm.Result[string, string, string])

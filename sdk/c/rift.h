@@ -1233,7 +1233,7 @@ static inline bool rift_set_language(const rift_string_t *target, const char *la
 }
 
 // ---------------------------------------------------------------------------
-// Text conversions (rift:plugin 0.2.1: set `min_api = "0.2.1"` in plugin.toml)
+// Text conversions
 //
 // What `rift.text` does in Lua: Rift converts `text` (borrowed) with markup,
 // legacy codes and messages resolved, the plugin's own messages by

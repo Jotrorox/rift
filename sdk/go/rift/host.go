@@ -418,10 +418,10 @@ func Clock() float64 { return meta.Clock() }
 // Time returns Unix time in seconds.
 func Time() int64 { return meta.Time() }
 
-// API returns the rift:plugin version the host implements, such as "0.2.1".
+// API returns the rift:plugin version the host implements, such as "0.3.0".
 func API() string { return meta.API() }
 
-// Text conversions (rift:plugin 0.2.1: set min_api = "0.2.1" in plugin.toml)
+// Text conversions
 
 // RenderText returns the JSON text component t becomes, with markup, legacy
 // codes and messages resolved, in language (such as "de" or "de_de"; "" for
