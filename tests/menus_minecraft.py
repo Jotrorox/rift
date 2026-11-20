@@ -468,12 +468,13 @@ local function s(v) if v == nil then return "nil" end return tostring(v) end
 local function enc(v)
     if type(v) ~= "table" then return s(v) end
     if v.tag ~= nil then return s(v.tag) .. ":" .. s(v.n) end
-    -- Other tables: key:value pairs sorted by key, without spaces.
-    local keys, parts = {}, {}
-    for k in pairs(v) do keys[#keys + 1] = tostring(k) end
-    table.sort(keys)
-    for _, k in ipairs(keys) do parts[#parts + 1] = k .. ":" .. s(v[k]) end
-    return table.concat(parts, ",")
+    -- Other tables (the test's have one key): key:value pairs without spaces.
+    -- No table.sort: rift.lua's sandbox has no table library.
+    local text = ""
+    for k, value in pairs(v) do
+        text = text .. (text == "" and "" or ",") .. tostring(k) .. ":" .. s(value)
+    end
+    return text
 end
 
 -- Every event, every field, to every player: the clients read it as chat.
