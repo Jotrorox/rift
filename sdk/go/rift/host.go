@@ -167,6 +167,38 @@ func ShowDialog(target, dialogJSON string) (bool, error) {
 // ClearDialog closes the dialog Rift showed the player, if it is still open.
 func ClearDialog(target string) (bool, error) { return unwrap(players.ClearDialog(target)) }
 
+// ShowMenu shows a player an inventory menu (Minecraft 1.12 or newer), or
+// redraws the open menu with the same ID in place. Clicks, typing and the end
+// of the menu come back to the OnMenu handler. A player has one Rift screen at
+// a time: a menu replaces an open menu or dialog. It reports false for an
+// offline player, one older than 1.12 or one with too many undelivered
+// actions; an invalid menu is an error.
+func ShowMenu(target string, menu Menu) (bool, error) { return ShowMenuJSON(target, menu.JSON()) }
+
+// ShowMenuJSON is ShowMenu with the menu definition written as JSON text (see
+// docs/menus.md).
+func ShowMenuJSON(target, menuJSON string) (bool, error) {
+	return unwrap(players.Menu(target, menuJSON))
+}
+
+// UpdateMenu changes part of the menu with this ID, for a clock or a
+// countdown. It reports false, and does nothing, when the player no longer
+// has that menu open.
+func UpdateMenu(target, id string, patch MenuPatch) (bool, error) {
+	return UpdateMenuJSON(target, id, patch.JSON())
+}
+
+// UpdateMenuJSON is UpdateMenu with the patch written as JSON text.
+func UpdateMenuJSON(target, id, patchJSON string) (bool, error) {
+	return unwrap(players.UpdateMenu(target, id, patchJSON))
+}
+
+// CloseMenu closes this plugin's menu with that ID, if the player still has it
+// open. With "" it closes whatever Rift menu is open, for any plugin.
+func CloseMenu(target, id string) (bool, error) {
+	return unwrap(players.CloseMenu(target, optional(id)))
+}
+
 // Kick disconnects a player with a reason.
 func Kick(target string, reason Text) (bool, error) {
 	return unwrap(players.Kick(target, reason.lower()))

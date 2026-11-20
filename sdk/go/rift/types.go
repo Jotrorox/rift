@@ -224,7 +224,7 @@ type Registration struct {
 	Commands []CommandSpec
 	// Hooks to deliver. An empty list delivers every hook except HookChat
 	// and HookKick; nil lets the SDK list the hooks that have a handler. The
-	// dialog and job-done handlers need no entry.
+	// dialog, menu and job-done handlers need no entry.
 	Hooks []Hook
 }
 

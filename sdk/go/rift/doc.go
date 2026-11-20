@@ -37,6 +37,10 @@
 // never read as markup (see docs/text.md). The zero Text means "none" where
 // text is optional.
 //
+// Menus: ShowMenu opens an inventory menu from the plain structs Menu, Button
+// and MenuPatch (see docs/menus.md); clicks, typing and the end of the menu
+// reach the OnMenu handler as a MenuEvent with typed Kind, Click and Reason.
+//
 // Background work: a plugin runs one call at a time, so a hook that needs a
 // slow lookup calls Defer and Run and returns. A background worker, a
 // separate instance of the same component, runs the OnWork handler; the
