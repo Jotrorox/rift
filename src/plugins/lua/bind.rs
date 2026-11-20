@@ -1021,6 +1021,20 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     )?;
     let services = state.services.clone();
     api.raw_set(
+        "update_menu",
+        function(
+            lua,
+            state,
+            move |_, (target, id, spec): (String, String, Value)| {
+                let players = services.players();
+                let patch =
+                    players.for_target(&target, || crate::extensions::players::menu_patch(spec))?;
+                players.update_menu(&target, &id, patch).map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
         "close_menu",
         function(
             lua,

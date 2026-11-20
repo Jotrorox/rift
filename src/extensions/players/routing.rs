@@ -62,6 +62,13 @@ pub enum WireBody {
         plugin: Option<String>,
         context: Context,
     },
+    /// An event of a menu the receiving peer showed on another peer's
+    /// player. `context.menu` holds the event; `plugin` is the owner, the
+    /// configuration script for `None`.
+    MenuEvent {
+        plugin: Option<String>,
+        context: Context,
+    },
     /// Permission contexts that the backend `server` reported for a player
     /// of the receiving peer through the peer its bus client is connected
     /// to. Answered with whether the receiving peer accepted them.
@@ -157,4 +164,12 @@ pub trait SessionHooks: Send + Sync + 'static {
 
     /// Deliver a click on a dialog this peer showed to `owner`.
     fn dialog(&self, context: Context, owner: Owner) -> RouteFuture<io::Result<()>>;
+
+    /// Deliver an event of a menu this peer showed to `owner`.
+    fn menu(&self, _context: Context, _owner: Owner) -> RouteFuture<io::Result<()>> {
+        Box::pin(std::future::ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this peer takes no menu events",
+        ))))
+    }
 }

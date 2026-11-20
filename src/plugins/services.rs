@@ -500,6 +500,32 @@ impl PlayersApi<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// `players.update-menu`: change part of this plugin's menu `id` given as
+    /// a JSON patch (docs/menus.md), if the player still has it open.
+    pub fn update_menu_json(
+        &self,
+        target: &str,
+        id: &str,
+        patch_json: &str,
+    ) -> Result<bool, String> {
+        let patch = self.for_target(target, || crate::menu::Patch::parse_json(patch_json))?;
+        self.update_menu(target, id, patch)
+    }
+
+    /// Change part of this plugin's menu `id` with an already validated
+    /// patch (see [`PlayersApi::for_target`]).
+    pub fn update_menu(
+        &self,
+        target: &str,
+        id: &str,
+        patch: crate::menu::Patch,
+    ) -> Result<bool, String> {
+        let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
+        self.players()
+            .update_menu(target, id, patch, owner)
+            .map_err(|error| error.to_string())
+    }
+
     /// `players.close-menu`: close this plugin's menu `id`, or with `None`
     /// whatever menu of Rift's is open.
     pub fn close_menu(&self, target: &str, id: Option<&str>) -> Result<bool, String> {

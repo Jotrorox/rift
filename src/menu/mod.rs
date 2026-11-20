@@ -22,7 +22,7 @@ pub mod stack;
 #[cfg(test)]
 mod tests;
 
-pub use event::{CloseReason, Delivery, EventKind, MenuEvent, Shown, Ticket};
+pub use event::{CloseReason, Delivery, EventKind, MenuEvent, Shown, Ticket, Update};
 pub use stack::{StackCache, Textures};
 
 /// The largest menu definition or patch, as compact JSON.
@@ -99,7 +99,7 @@ const PLACEMENT_FIELDS: &[&str] = &["slot", "slots", "empty"];
 const PATCH_FIELDS: &[&str] = &["slots", "keys", "title", "state", "text"];
 
 /// The menu types Rift shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// A chest with 1 to 6 rows of 9 slots.
     Chest { rows: u8 },
@@ -254,7 +254,7 @@ impl Click {
 }
 
 /// The click kinds a button reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Clicks(u16);
 
 impl Clicks {
@@ -279,7 +279,7 @@ impl Default for Clicks {
 }
 
 /// Custom model data: one number, or the lists 1.21.4 and newer read.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Model {
     pub floats: Vec<f32>,
     pub flags: Vec<bool>,
@@ -289,7 +289,7 @@ pub struct Model {
 }
 
 /// The skin of a `player_head` button.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Head {
     /// A texture property as head databases publish it.
     Texture(Textures),
@@ -298,11 +298,16 @@ pub enum Head {
     Player(String),
 }
 
+/// An item name of the newest protocol, without namespace. An alias, so
+/// that serde reads it through [`item_name`] instead of borrowing it.
+pub type Item = &'static str;
+
 /// Everything about a button that goes into its item stack.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Look {
     /// The item in the newest protocol, without namespace.
-    pub item: &'static str,
+    #[serde(with = "item_name")]
+    pub item: Item,
     pub count: u8,
     /// `None` keeps the item's own name; an empty plain text is no name.
     pub name: Option<Text>,
@@ -340,7 +345,7 @@ impl Look {
 }
 
 /// What clicking a button does.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Action {
     /// The action name clicks report; `None` for decoration.
     pub id: Option<String>,
@@ -372,7 +377,7 @@ impl Action {
 }
 
 /// An item with an optional action.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Button {
     pub look: Look,
     pub action: Action,
@@ -380,7 +385,10 @@ pub struct Button {
 
 /// A validated menu: what every slot holds, ready to send to any client
 /// from 1.12 on.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Serializable, so that a peer of a cluster can show it to a player of
+/// another peer; the receiving peer trusts its peers' menus.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Menu {
     id: String,
     kind: Kind,
@@ -422,7 +430,7 @@ impl Diff {
 
 /// A change to part of an open menu (`update_menu`). Slot numbers are
 /// checked against the menu when it is applied.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Patch {
     /// Slot numbers as written and what they get: `None` empties them.
     slots: Vec<(Vec<i64>, Option<Button>)>,
@@ -750,6 +758,14 @@ impl Patch {
     /// Validate a patch given as JSON text.
     pub fn parse_json(text: &str) -> Result<Self, String> {
         Self::parse(&from_json(text, "patch")?)
+    }
+
+    /// Every button the patch places.
+    pub fn buttons(&self) -> impl Iterator<Item = &Button> {
+        self.slots
+            .iter()
+            .filter_map(|(_, button)| button.as_ref())
+            .chain(self.keys.iter().map(|(_, button)| button))
     }
 }
 
@@ -1276,5 +1292,24 @@ impl<'a> Fields<'a> {
         };
         size(state, MAX_STATE_BYTES, &self.path(key))?;
         Ok(Some(state.clone()))
+    }
+}
+
+/// A button's item as its name in the newest protocol: a menu from another
+/// peer names an item this build knows, or is refused.
+mod item_name {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(item: &&'static str, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(item)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<&'static str, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        rift_translation::codec::item::newest::item_id(&name)
+            .and_then(rift_translation::codec::item::newest::item_name)
+            .ok_or_else(|| D::Error::custom(format!("unknown item {name:?}")))
     }
 }

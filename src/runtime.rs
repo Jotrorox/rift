@@ -1214,6 +1214,9 @@ pub async fn handle(
                             PlayerAction::Menu(shown) => {
                                 timeout(HANDSHAKE_TIMEOUT, session.show_menu(shown)).await??;
                             }
+                            PlayerAction::UpdateMenu(update) => {
+                                timeout(HANDSHAKE_TIMEOUT, session.update_menu(update)).await??;
+                            }
                             PlayerAction::CloseMenu { owner, id } => {
                                 timeout(HANDSHAKE_TIMEOUT, session.close_menu(&owner, id.as_deref())).await??;
                             }

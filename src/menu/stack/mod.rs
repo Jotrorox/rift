@@ -99,7 +99,7 @@ const DETAILS: &[&str] = &[
 
 /// The signed `textures` property of a player profile, as the session
 /// server returns it and head databases publish it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Textures {
     /// Base64 JSON naming the skin.
     pub value: String,

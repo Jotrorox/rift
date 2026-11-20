@@ -2,7 +2,7 @@
 //! menu: the configuration script or one persistent plugin (and, with the
 //! next contract, a WebAssembly plugin). The fields are those of the `menu`
 //! event in docs/menus.md.
-use super::{Click, Menu, Textures};
+use super::{Click, Menu, Patch, Textures};
 use crate::dialog::Owner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -178,7 +178,7 @@ impl Eq for Ticket {}
 /// A menu for one player's session (a queued player action): the menu
 /// parsed in the player's language, who showed it, and the skins of the
 /// online players its heads name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shown {
     pub menu: Arc<Menu>,
     pub owner: Owner,
@@ -201,20 +201,19 @@ impl PartialEq for Shown {
 // Menus hold validated numbers only, never NaN.
 impl Eq for Shown {}
 
-/// Player actions travel to other cluster peers serialized; menus are shown
-/// only to players of the peer whose plugin shows them.
-impl Serialize for Shown {
-    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-        Err(serde::ser::Error::custom(
-            "menus are shown only to players of this peer",
-        ))
-    }
+/// A change to part of an open menu for one player's session (a queued
+/// player action, `update_menu`): the patch parsed in the player's
+/// language, the menu it changes, and the skins of the online players its
+/// heads name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Update {
+    /// Who showed the menu: a patch from anyone else changes nothing.
+    pub owner: Owner,
+    /// The menu's `id`.
+    pub id: String,
+    pub patch: Arc<Patch>,
+    pub heads: Arc<BTreeMap<String, Textures>>,
 }
 
-impl<'de> Deserialize<'de> for Shown {
-    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom(
-            "menus are shown only to players of this peer",
-        ))
-    }
-}
+// Patches hold validated numbers only, never NaN.
+impl Eq for Update {}

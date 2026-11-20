@@ -9,11 +9,12 @@
 //! past the translator.
 //!
 //! The only state kept for a session without a menu is the backend's open
-//! container and whether an inventory request is on its way.
+//! container, the containers Rift used, and whether an inventory request is
+//! on its way.
 use super::{Connection, Session, SessionEvent};
 use crate::{
     dialog::Owner,
-    menu::{self, CloseReason, Delivery, Menu, MenuEvent, Shown, StackCache, Ticket},
+    menu::{self, CloseReason, Delivery, Menu, MenuEvent, Shown, StackCache, Ticket, Update},
     protocol::{
         self, Packet, ProtocolVersion, State,
         menu::{self as packets, BackendPacket, ClientPacket, Ids, Recipe},
@@ -27,14 +28,42 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Clients up to 1.21.1 apply a `container_set_slot` for the player's
 /// inventory only to the hotbar while another container is open.
 const WHOLE_INVENTORY_SLOTS: i32 = 768;
-/// State IDs count up to this and start again at 1.
+/// State IDs count up to this and start again at 1; 0 is a menu that got no
+/// slot yet.
 const MAX_STATE_ID: i32 = 0x7fff;
+/// An inventory request without an answer after this long counts as lost:
+/// the next click that needs one sends a new request.
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Rift's container IDs, 101 to 127.
+const CONTAINERS: usize = (packets::LAST_CONTAINER - packets::FIRST_CONTAINER + 1) as usize;
+
+/// The state ID the client reads for Rift's `updates`-th update of a
+/// container.
+fn state_id(updates: u64) -> i32 {
+    match updates {
+        0 => 0,
+        // The remainder is below MAX_STATE_ID.
+        n => ((n - 1) % MAX_STATE_ID as u64) as i32 + 1,
+    }
+}
+
+/// The update a client's state ID `state` names after Rift's `updates`
+/// updates: the latest one with that ID. 0 when it names none, as for a
+/// menu that got no slot since it opened or since its title changed.
+fn seen(updates: u64, state: i32) -> u64 {
+    if !(1..=MAX_STATE_ID).contains(&state) {
+        return 0;
+    }
+    let age = (state_id(updates) - state).rem_euclid(MAX_STATE_ID);
+    updates.saturating_sub(age as u64)
+}
 
 /// The menu a player has open.
 pub(crate) struct OpenMenu {
@@ -43,9 +72,12 @@ pub(crate) struct OpenMenu {
     pub(crate) owner: Owner,
     /// Rift's container ID for this menu, one of 101 to 127.
     pub(crate) container: i32,
-    /// The state ID of Rift's last update of the container, for 1.17.1 and
-    /// newer clients.
-    pub(crate) state: i32,
+    /// Rift's updates of the container since it opened, for the state IDs of
+    /// 1.17.1 and newer clients.
+    updates: u64,
+    /// For each slot, the update that first showed its current action
+    /// (`id`, `payload` and `close`); 0 for the action it opened with.
+    changed: Vec<u64>,
     /// Each slot's stack as the client reads it.
     pub(crate) stacks: Vec<Arc<[u8]>>,
     /// The skins of the players its heads name, for slots built again.
@@ -76,26 +108,39 @@ impl OpenMenu {
 
     /// The state ID of the next update.
     fn next_state(&mut self) -> i32 {
-        self.state = if self.state >= MAX_STATE_ID {
-            1
-        } else {
-            self.state + 1
-        };
-        self.state
+        self.updates += 1;
+        state_id(self.updates)
+    }
+
+    /// Whether a click that names the state ID `state` was made on an older
+    /// action than the slot has now. Clients before 1.17.1 name none, and
+    /// their clicks are never stale.
+    fn stale(&self, slot: usize, state: Option<i32>) -> bool {
+        state.is_some_and(|state| {
+            seen(self.updates, state) < self.changed.get(slot).copied().unwrap_or_default()
+        })
     }
 }
 
 /// Whether the backend is being asked for the player's inventory.
 #[derive(Debug, Default)]
-struct Request {
-    /// A request is on its way: until its answer, after the rejection's
-    /// acknowledgement where there is one.
-    in_flight: bool,
+pub(super) struct Request {
+    /// When the request on its way was sent; it is on its way until its
+    /// answer, after the rejection's acknowledgement where there is one, or
+    /// until [`REQUEST_TIMEOUT`] passed.
+    pub(super) sent: Option<Instant>,
     /// Another click disturbed the inventory rows meanwhile.
     again: bool,
     /// Ask when the menu closes: a 1.17 backend, or a single-slot update the
     /// client dropped while the menu was open.
     on_close: bool,
+}
+
+impl Request {
+    fn in_flight(&self) -> bool {
+        self.sent
+            .is_some_and(|sent| sent.elapsed() < REQUEST_TIMEOUT)
+    }
 }
 
 #[derive(Default)]
@@ -105,17 +150,25 @@ pub(crate) struct Menus {
     pub(crate) open: Option<OpenMenu>,
     /// The container ID the next menu takes.
     next_container: i32,
-    /// Rift's previous container and its number of slots: late packets for
-    /// it are still Rift's, until the backend opens that ID itself.
-    previous: Option<(i32, usize)>,
+    /// For each of Rift's container IDs that Rift used, its number of slots;
+    /// 0 for one it did not use or the backend opened since. Late packets
+    /// for those are still Rift's.
+    used: [u8; CONTAINERS],
     /// The container the backend has open, from its `open_screen` and the
     /// close packets of both sides.
     backend_container: Option<i32>,
-    request: Request,
+    pub(super) request: Request,
     /// Ends of menus, waiting for the session's owner to deliver them.
     closed: VecDeque<Delivery>,
     /// Events handed out and not yet delivered to their plugin.
     undelivered: Arc<AtomicUsize>,
+}
+
+/// The index of Rift's container `id` in [`Menus::used`].
+fn used_index(id: i32) -> Option<usize> {
+    usize::try_from(id - packets::FIRST_CONTAINER)
+        .ok()
+        .filter(|index| *index < CONTAINERS)
 }
 
 impl Menus {
@@ -123,8 +176,9 @@ impl Menus {
         *self.ids.get_or_insert_with(|| Ids::of(version.number()))
     }
 
-    /// A fresh container ID, never the backend's.
-    fn take_container(&mut self) -> i32 {
+    /// A fresh container ID for a menu of `slots` slots, never the
+    /// backend's.
+    fn take_container(&mut self, slots: usize) -> i32 {
         let next = |id: i32| {
             if id >= packets::LAST_CONTAINER {
                 packets::FIRST_CONTAINER
@@ -139,7 +193,17 @@ impl Menus {
             id = next(id);
         }
         self.next_container = next(id);
+        if let Some(index) = used_index(id) {
+            self.used[index] = u8::try_from(slots).unwrap_or(u8::MAX);
+        }
         id
+    }
+
+    /// The number of slots of the menu Rift showed earlier with container
+    /// `id`, if a late packet for it is still Rift's.
+    fn earlier(&self, id: i32) -> Option<usize> {
+        let slots = self.used[used_index(id)?];
+        (slots > 0).then_some(usize::from(slots))
     }
 
     fn delivery(&self, owner: Owner, mut event: MenuEvent) -> Delivery {
@@ -160,7 +224,6 @@ impl Menus {
         let Some(open) = self.open.take() else {
             return Ok(());
         };
-        self.previous = Some((open.container, open.slots()));
         if let Some(client) = client {
             client.inject(&packets::close(version, open.container)?)?;
         }
@@ -198,11 +261,12 @@ impl Menus {
             }
             Recipe::ClaimAll => {}
             Recipe::StateId | Recipe::Transaction => {
-                if self.request.in_flight {
+                if self.request.in_flight() {
                     self.request.again = true;
                     return Ok(());
                 }
-                self.request.in_flight = true;
+                self.request.sent = Some(Instant::now());
+                self.request.again = false;
             }
         }
         if recipe == Recipe::Transaction {
@@ -230,11 +294,9 @@ impl Menus {
                 // The backend's screen replaces Rift's on the client.
                 self.end::<C, B>(version, CloseReason::Server, None, Some(backend))?;
                 self.backend_container = Some(container);
-                if self
-                    .previous
-                    .is_some_and(|(previous, _)| previous == container)
-                {
-                    self.previous = None;
+                // Packets for that ID are the backend's from now on.
+                if let Some(index) = used_index(container) {
+                    self.used[index] = 0;
                 }
             }
             Some(BackendPacket::Closed | BackendPacket::World) => {
@@ -252,7 +314,7 @@ impl Menus {
                 }
             }
             Some(BackendPacket::InventoryContent) => {
-                self.request.in_flight = false;
+                self.request.sent = None;
                 if std::mem::take(&mut self.request.again) {
                     self.request_inventory(version, backend)?;
                 }
@@ -278,10 +340,11 @@ impl Menus {
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
     /// Show a menu (1.12+), replacing any menu or dialog Rift has open on the
-    /// client; showing the open menu's `id` again for the same owner opens it
-    /// anew without ending it. Its events go to `shown.owner` as
-    /// [`SessionEvent::Menu`] and [`Self::take_menu_events`]. A player who is
-    /// not in a world (between servers) does not get it.
+    /// client. Showing the `id` of the open menu again for the same owner
+    /// redraws it: only what changed is sent, and it does not end. Its
+    /// events go to `shown.owner` as [`SessionEvent::Menu`] and
+    /// [`Self::take_menu_events`]. A player who is not in a world (between
+    /// servers) does not get it.
     pub async fn show_menu(&mut self, shown: Shown) -> io::Result<()> {
         self.client.flush_pending().await?;
         if !self.joined || !self.client.state.settled(State::Play) {
@@ -292,11 +355,23 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if !packets::supported(protocol) || shown.menu.kind() == menu::Kind::Anvil {
             return Ok(());
         }
+        let mut menu = Arc::unwrap_or_clone(shown.menu.clone());
+        if let Some(open) = &self.menus.open
+            && open.menu.id() == menu.id()
+            && open.owner == shown.owner
+        {
+            menu.keep_text(&open.menu);
+            if !open.menu.diff(&menu).reopen {
+                self.redraw(version, menu, shown)?;
+                return self.flush_injected().await;
+            }
+        }
         let mut open = OpenMenu {
-            menu: Arc::unwrap_or_clone(shown.menu.clone()),
+            changed: vec![0; menu.kind().slots()],
+            menu,
             owner: shown.owner.clone(),
             container: 0,
-            state: 0,
+            updates: 0,
             stacks: Vec::new(),
             shown,
         };
@@ -304,7 +379,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             log_error!("menu {}: {error}", open.menu.id());
             return Ok(());
         }
-        let container = self.menus.take_container();
+        let container = self.menus.take_container(open.slots());
         open.container = container;
         let state = open.next_state();
         let mut sent = vec![packets::open_screen(
@@ -325,8 +400,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             }
         }
         if let Some(old) = self.menus.open.take() {
-            self.menus.previous = Some((old.container, old.slots()));
-            // Showing the open menu again is a redraw, not an ending.
+            // The same menu with another type or number of rows opens anew,
+            // which is no ending either.
             if old.menu.id() != open.menu.id() || old.owner != open.owner {
                 let event = MenuEvent::close(&old.menu, CloseReason::Replaced);
                 let delivery = self.menus.delivery(old.owner, event);
@@ -347,6 +422,103 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.flush_injected().await
     }
 
+    /// Change part of the menu `id` of `owner`, if the player still has it
+    /// open (docs/menus.md, "Changing an open menu"). A patch that names a
+    /// slot outside the menu changes nothing.
+    pub async fn update_menu(&mut self, update: Update) -> io::Result<()> {
+        let Some(open) = self
+            .menus
+            .open
+            .as_ref()
+            .filter(|open| open.menu.id() == update.id && open.owner == update.owner)
+        else {
+            return Ok(());
+        };
+        let mut menu = open.menu.clone();
+        if let Err(error) = menu.apply(&update.patch) {
+            log_error!("menu {}: {error}", update.id);
+            return Ok(());
+        }
+        let mut heads = (*open.shown.heads).clone();
+        heads.extend(
+            update
+                .heads
+                .iter()
+                .map(|(player, textures)| (player.clone(), textures.clone())),
+        );
+        let shown = Shown {
+            menu: Arc::new(menu.clone()),
+            owner: update.owner,
+            heads: Arc::new(heads),
+        };
+        self.client.flush_pending().await?;
+        let version = self.version()?;
+        self.redraw(version, menu, shown)?;
+        self.flush_injected().await
+    }
+
+    /// Turn the open menu into `menu`, of the same type and rows, by
+    /// sending the client only what changed: the slots that look different
+    /// or do something else, or for a new title the screen again with the
+    /// same container and every slot, because the client builds it anew.
+    fn redraw(&mut self, version: ProtocolVersion, menu: Menu, shown: Shown) -> io::Result<()> {
+        let Some(open) = self.menus.open.as_mut() else {
+            return Ok(());
+        };
+        let diff = open.menu.diff(&menu);
+        let old = (
+            std::mem::replace(&mut open.menu, menu),
+            std::mem::replace(&mut open.shown, shown),
+            std::mem::take(&mut open.stacks),
+        );
+        if let Err(error) = open.build_stacks(version.number()) {
+            log_error!("menu {}: {error}", open.menu.id());
+            (open.menu, open.shown, open.stacks) = old;
+            return Ok(());
+        }
+        let mut sent = Vec::new();
+        let slots: Vec<usize> = if diff.title {
+            sent.push(packets::open_screen(
+                version,
+                open.container,
+                open.menu.kind(),
+                open.menu.title(),
+            )?);
+            (0..open.slots())
+                .filter(|slot| open.menu.slots()[*slot].is_some())
+                .collect()
+        } else {
+            // A slot that only does something else looks the same, but is
+            // sent too: the client then names the state that showed it.
+            let mut slots = diff.slots.clone();
+            slots.extend(&diff.actions);
+            slots.sort_unstable();
+            slots.dedup();
+            slots
+        };
+        if !slots.is_empty() {
+            let state = open.next_state();
+            for slot in slots {
+                sent.push(packets::set_slot(
+                    version,
+                    open.container,
+                    state,
+                    slot as i16,
+                    &open.stacks[slot],
+                )?);
+            }
+        }
+        for slot in diff.actions {
+            if let Some(changed) = open.changed.get_mut(slot) {
+                *changed = open.updates;
+            }
+        }
+        for packet in &sent {
+            self.client.inject(packet)?;
+        }
+        Ok(())
+    }
+
     /// Close the menu Rift shows: any menu (`id` is `None`), or only the
     /// menu `id` of `owner`. Its owner gets the `plugin` ending.
     pub async fn close_menu(&mut self, owner: &Owner, id: Option<&str>) -> io::Result<()> {
@@ -361,7 +533,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.end_menu(CloseReason::Plugin, true)?;
         self.flush_injected().await
     }
-
     /// The menu events the session holds for its owner to deliver, oldest
     /// first: every ending of a menu. Clicks come as [`SessionEvent::Menu`].
     pub fn take_menu_events(&mut self) -> Vec<Delivery> {
@@ -451,9 +622,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 ClientPacket::Other => SessionEvent::Packet,
             }));
         }
-        if let Some((previous, slots)) = self.menus.previous
-            && previous == container
-        {
+        if let Some(slots) = self.menus.earlier(container) {
             // A late packet for a menu that is gone. The client may still
             // have moved its own items.
             if kind == ClientPacket::Click
@@ -472,7 +641,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 
     /// A click on the open menu: undo what the client predicted, ask for the
     /// inventory if its rows were touched, and report the click if the
-    /// button reports this kind.
+    /// button reports this kind and the player saw the action they clicked.
     fn menu_click(
         &mut self,
         version: ProtocolVersion,
@@ -485,6 +654,24 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             return Ok(SessionEvent::Packet);
         };
         let slots = open.slots();
+        let mut report = None;
+        let mut close = false;
+        if click.on_menu(slots)
+            && let Some((kind, key)) = click.kind()
+            && let Some(button) = open.menu.button(i32::from(click.slot))
+        {
+            let slot = click.slot as usize;
+            // What the slot does changed after what the player saw.
+            if !open.stale(slot, click.state_id) {
+                if button.action.reports(kind) && undelivered < menu::MAX_PENDING_EVENTS {
+                    report = Some((
+                        open.owner.clone(),
+                        MenuEvent::click(&open.menu, slot, kind, key),
+                    ));
+                }
+                close = button.action.closes(kind);
+            }
+        }
         let state = open.next_state();
         for slot in click.menu_slots(slots) {
             let stack = packets::set_slot(
@@ -498,21 +685,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         self.client
             .inject(&packets::empty_cursor(version, state)?)?;
-        let mut report = None;
-        let mut close = false;
-        if click.on_menu(slots)
-            && let Some((kind, key)) = click.kind()
-            && let Some(button) = open.menu.button(i32::from(click.slot))
-        {
-            let slot = click.slot as usize;
-            if button.action.reports(kind) && undelivered < menu::MAX_PENDING_EVENTS {
-                report = Some((
-                    open.owner.clone(),
-                    MenuEvent::click(&open.menu, slot, kind, key),
-                ));
-            }
-            close = button.action.closes(kind);
-        }
         if click.touches_inventory(slots)
             && let Some(backend) = self.backend.as_mut()
         {
@@ -526,5 +698,31 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             self.end_menu(CloseReason::Plugin, true)?;
         }
         Ok(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_ids_wrap_and_name_the_latest_update_with_them() {
+        assert_eq!(state_id(0), 0);
+        assert_eq!(state_id(1), 1);
+        assert_eq!(state_id(MAX_STATE_ID as u64), MAX_STATE_ID);
+        assert_eq!(state_id(MAX_STATE_ID as u64 + 1), 1);
+        assert_eq!(seen(5, 5), 5);
+        assert_eq!(seen(5, 3), 3);
+        // An ID Rift never sent, 0, and garbage name no update.
+        assert_eq!(seen(5, 0), 0);
+        assert_eq!(seen(5, -4), 0);
+        assert_eq!(seen(5, MAX_STATE_ID + 1), 0);
+        assert_eq!(seen(5, 6), 0);
+        // Across the wrap.
+        let updates = MAX_STATE_ID as u64 + 2;
+        assert_eq!(state_id(updates), 2);
+        assert_eq!(seen(updates, 2), updates);
+        assert_eq!(seen(updates, 1), updates - 1);
+        assert_eq!(seen(updates, MAX_STATE_ID), updates - 2);
     }
 }

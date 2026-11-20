@@ -451,6 +451,31 @@ impl rift::extensions::routing::SessionHooks for RemoteSessions {
                 .await
         })
     }
+
+    fn menu(
+        &self,
+        mut context: rift::extensions::Context,
+        owner: rift::dialog::Owner,
+    ) -> rift::extensions::routing::RouteFuture<io::Result<()>> {
+        let snapshot = self.snapshot();
+        Box::pin(async move {
+            let Some(snapshot) = snapshot else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "this peer is not serving players",
+                ));
+            };
+            let Some(event) = context.menu.take() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "menu event without an event",
+                ));
+            };
+            let delivery = rift::menu::Delivery { owner, event };
+            let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+            snapshot.extensions.menu(context, delivery, &jobs).await
+        })
+    }
 }
 
 pub struct Registration {

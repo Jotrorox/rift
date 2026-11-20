@@ -23,7 +23,7 @@ for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
     permissions = { "check", "compiled", "meta", "user", "group", "groups", "track" },
     http = { "request" },
-    players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "dialog", "clear_dialog", "menu", "close_menu", "kick", "transfer", "broadcast" },
+    players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "dialog", "clear_dialog", "menu", "update_menu", "close_menu", "kick", "transfer", "broadcast" },
     servers = { "create", "remove", "start", "stop", "download" },
     cluster = { "lease", "renew", "release", "is_leader", "peer" },
 }) do

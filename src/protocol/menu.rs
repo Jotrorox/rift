@@ -370,7 +370,10 @@ impl Click {
     /// The menu slots the click may have changed on the client.
     pub(crate) fn menu_slots(&self, menu_slots: usize) -> Vec<usize> {
         let ours = |slot: i16| usize::try_from(slot).ok().filter(|slot| *slot < menu_slots);
-        if self.spreads() && self.changed.is_none() {
+        // A shift-click on the inventory rows moves the stack into the
+        // menu's slots, wherever it fits.
+        let shifted_in = self.mode == 1 && self.slot >= 0 && ours(self.slot).is_none();
+        if (self.spreads() || shifted_in) && self.changed.is_none() {
             return (0..menu_slots).collect();
         }
         let mut slots: Vec<usize> = ours(self.slot).into_iter().collect();

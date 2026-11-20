@@ -92,9 +92,13 @@ pub enum PlayerAction {
     },
     /// Close the dialog Rift showed, if it is still open.
     ClearDialog,
-    /// Show a menu, replacing any open menu or dialog of Rift's; its events
-    /// go to the owner. Menus never travel to another peer.
+    /// Show a menu, replacing any open menu or dialog of Rift's, or redraw
+    /// the open one with the same `id` and owner; its events go to the
+    /// owner.
     Menu(crate::menu::Shown),
+    /// Change part of the menu the player has open, if it is still the
+    /// menu of that `id` and owner.
+    UpdateMenu(crate::menu::Update),
     /// Close the menu Rift shows: any menu without an `id`, else only the
     /// menu `id` of `owner`.
     CloseMenu {
@@ -536,6 +540,18 @@ pub(crate) fn menu(value: Value) -> mlua::Result<crate::menu::Menu> {
     .map_err(mlua::Error::runtime)
 }
 
+/// A menu patch from Lua (`update_menu`): a table in the format of
+/// docs/menus.md or the same as JSON text.
+pub(crate) fn menu_patch(value: Value) -> mlua::Result<crate::menu::Patch> {
+    match value {
+        Value::String(text) => crate::menu::Patch::parse_json(&text.to_str()?),
+        Value::Table(_) => crate::dialog::lua_json(value, "patch", MAX_MENU_LUA_VALUES)
+            .and_then(|spec| crate::menu::Patch::parse(&spec)),
+        _ => Err("patch expects a table or JSON text".into()),
+    }
+    .map_err(mlua::Error::runtime)
+}
+
 /// A parsed menu Rift can show today.
 pub(crate) fn menu_available(menu: crate::menu::Menu) -> Result<crate::menu::Menu, String> {
     if menu.kind() == crate::menu::Kind::Anvil {
@@ -572,14 +588,14 @@ fn find<'a>(
     }))
 }
 
-/// The skins of the online players whose heads `menu` shows, by the name or
-/// UUID its buttons give.
-fn heads(
+/// The skins of the online players whose heads `buttons` show, by the name
+/// or UUID the buttons give.
+fn heads<'a>(
     sessions: &BTreeMap<u64, Entry>,
-    menu: &crate::menu::Menu,
+    buttons: impl Iterator<Item = &'a crate::menu::Button>,
 ) -> BTreeMap<String, crate::menu::Textures> {
     let mut heads = BTreeMap::new();
-    for button in menu.slots().iter().flatten() {
+    for button in buttons {
         let Some(crate::menu::Head::Player(player)) = &button.look.head else {
             continue;
         };
@@ -1726,8 +1742,15 @@ impl Players {
         if !crate::protocol::dialogs_supported(remote.player.protocol) {
             return Ok(false);
         }
+        let owner = self.remote_owner(owner);
+        Ok(self.dispatch(remote.player.peer, Self::request(&remote, action(owner))))
+    }
+
+    /// Who showed a dialog or a menu, as the peer of a player of another
+    /// peer names it: this peer, so that the events come back here.
+    fn remote_owner(&self, owner: crate::dialog::Owner) -> crate::dialog::Owner {
         let identity = self.roster.identity();
-        let owner = match owner {
+        match owner {
             crate::dialog::Owner::Script => crate::dialog::Owner::Remote {
                 peer: identity.peer,
                 incarnation: identity.incarnation,
@@ -1739,14 +1762,13 @@ impl Players {
                 plugin: Some(plugin),
             },
             forwarded @ crate::dialog::Owner::Remote { .. } => forwarded,
-        };
-        Ok(self.dispatch(remote.player.peer, Self::request(&remote, action(owner))))
+        }
     }
 
     /// Show a menu (`Some`) or close the one Rift shows (`None`, only the
     /// menu `id` of `owner` when an `id` is given). False means that the
-    /// player is offline, older than 1.12, on another peer of the cluster,
-    /// or has a full queue.
+    /// player is offline, older than 1.12, or has a full queue. A menu for
+    /// a player on another peer brings its events back here.
     pub fn menu(
         &self,
         target: &str,
@@ -1754,24 +1776,62 @@ impl Players {
         owner: crate::dialog::Owner,
         id: Option<String>,
     ) -> std::io::Result<bool> {
-        let sessions = self.lock();
-        let entry = find(&sessions, target)
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
-        let Some((_, entry)) = entry else {
-            return Ok(false);
-        };
-        if !crate::protocol::menus_supported(entry.protocol) {
-            return Ok(false);
-        }
-        let action = match menu {
+        self.menu_action(target, owner, |sessions, owner| match menu {
             Some(menu) => PlayerAction::Menu(crate::menu::Shown {
-                heads: Arc::new(heads(&sessions, &menu)),
+                heads: Arc::new(heads(sessions, menu.slots().iter().flatten())),
                 menu: Arc::new(menu),
                 owner,
             }),
             None => PlayerAction::CloseMenu { owner, id },
+        })
+    }
+
+    /// Change part of the menu `id` that `owner` showed the player, if it is
+    /// still open when the session takes the action. Returns as
+    /// [`Self::menu`] does.
+    pub fn update_menu(
+        &self,
+        target: &str,
+        id: &str,
+        patch: crate::menu::Patch,
+        owner: crate::dialog::Owner,
+    ) -> std::io::Result<bool> {
+        self.menu_action(target, owner, |sessions, owner| {
+            PlayerAction::UpdateMenu(crate::menu::Update {
+                heads: Arc::new(heads(sessions, patch.buttons())),
+                patch: Arc::new(patch),
+                id: id.to_owned(),
+                owner,
+            })
+        })
+    }
+
+    /// Queue the menu action `action` builds for `target`, on this peer or
+    /// another one.
+    fn menu_action(
+        &self,
+        target: &str,
+        owner: crate::dialog::Owner,
+        action: impl FnOnce(&BTreeMap<u64, Entry>, crate::dialog::Owner) -> PlayerAction,
+    ) -> std::io::Result<bool> {
+        let sessions = self.lock();
+        let entry = find(&sessions, target)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        if let Some((_, entry)) = entry {
+            if !crate::protocol::menus_supported(entry.protocol) {
+                return Ok(false);
+            }
+            return Ok(entry.actions.try_send(action(&sessions, owner)).is_ok());
+        }
+        let Some(remote) = self.remote(target) else {
+            return Ok(false);
         };
-        Ok(entry.actions.try_send(action).is_ok())
+        if !crate::protocol::menus_supported(remote.player.protocol) {
+            return Ok(false);
+        }
+        let action = action(&sessions, self.remote_owner(owner));
+        drop(sessions);
+        Ok(self.dispatch(remote.player.peer, Self::request(&remote, action)))
     }
 
     /// Send a click on a dialog that peer `peer` showed back to it.
@@ -1786,15 +1846,41 @@ impl Players {
             incarnation,
             body: WireBody::DialogClick { plugin, context },
         };
+        self.route_event(peer, request, "dialog click").await
+    }
+
+    /// Send an event of a menu that peer `peer` showed back to it.
+    /// `context.menu` holds the event.
+    pub async fn route_menu_event(
+        &self,
+        peer: u16,
+        incarnation: u64,
+        plugin: Option<String>,
+        context: super::Context,
+    ) -> std::io::Result<()> {
+        let request = WireRequest {
+            incarnation,
+            body: WireBody::MenuEvent { plugin, context },
+        };
+        self.route_event(peer, request, "menu event").await
+    }
+
+    /// Deliver an event for the peer that showed a dialog or a menu.
+    async fn route_event(
+        &self,
+        peer: u16,
+        request: WireRequest,
+        what: &str,
+    ) -> std::io::Result<()> {
         match self.router().deliver(peer, request).await {
             Ok(WireResult::Sent(_)) => Ok(()),
             Ok(WireResult::Stale) => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "the peer that showed this dialog has restarted",
+                format!("the peer that showed this {what} has restarted"),
             )),
             Ok(WireResult::Error(reason)) => Err(std::io::Error::other(reason)),
             Ok(other) => Err(std::io::Error::other(format!(
-                "unexpected answer to a dialog click: {other:?}"
+                "unexpected answer to a {what}: {other:?}"
             ))),
             Err(error) => Err(std::io::Error::other(error)),
         }
@@ -1893,6 +1979,19 @@ impl Players {
                 };
                 match self.hooks() {
                     Some(hooks) => match hooks.dialog(context, owner).await {
+                        Ok(()) => WireResult::Sent(true),
+                        Err(error) => WireResult::Error(error.to_string()),
+                    },
+                    None => WireResult::Error("this peer runs no extensions".into()),
+                }
+            }
+            WireBody::MenuEvent { plugin, context } => {
+                let owner = match plugin {
+                    Some(plugin) => crate::dialog::Owner::Plugin(plugin),
+                    None => crate::dialog::Owner::Script,
+                };
+                match self.hooks() {
+                    Some(hooks) => match hooks.menu(context, owner).await {
                         Ok(()) => WireResult::Sent(true),
                         Err(error) => WireResult::Error(error.to_string()),
                     },
@@ -2007,6 +2106,37 @@ impl Players {
                 if !crate::protocol::dialogs_supported(entry.protocol) =>
             {
                 WireResult::Sent(false)
+            }
+            PlayerAction::Menu(_)
+            | PlayerAction::UpdateMenu(_)
+            | PlayerAction::CloseMenu { .. }
+                if !crate::protocol::menus_supported(entry.protocol) =>
+            {
+                WireResult::Sent(false)
+            }
+            // Heads of this peer's players get their skins here.
+            PlayerAction::Menu(mut shown) => {
+                let mut found = heads(&sessions, shown.menu.slots().iter().flatten());
+                found.extend(shown.heads.iter().map(|(k, v)| (k.clone(), v.clone())));
+                shown.heads = Arc::new(found);
+                let entry = sessions.get(&connection);
+                WireResult::Sent(
+                    entry.is_some_and(|entry| {
+                        entry.actions.try_send(PlayerAction::Menu(shown)).is_ok()
+                    }),
+                )
+            }
+            PlayerAction::UpdateMenu(mut update) => {
+                let mut found = heads(&sessions, update.patch.buttons());
+                found.extend(update.heads.iter().map(|(k, v)| (k.clone(), v.clone())));
+                update.heads = Arc::new(found);
+                let entry = sessions.get(&connection);
+                WireResult::Sent(entry.is_some_and(|entry| {
+                    entry
+                        .actions
+                        .try_send(PlayerAction::UpdateMenu(update))
+                        .is_ok()
+                }))
             }
             action => WireResult::Sent(entry.actions.try_send(action).is_ok()),
         }
@@ -2388,6 +2518,17 @@ impl Players {
                 let menu = players.rendering_for(None, &target, || menu(spec))?;
                 players
                     .menu(&target, Some(menu), crate::dialog::Owner::Script, None)
+                    .map_err(lua_error)
+            })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "update_menu",
+            lua.create_function(move |_, (target, id, spec): (String, String, Value)| {
+                charge()?;
+                let patch = players.rendering_for(None, &target, || menu_patch(spec))?;
+                players
+                    .update_menu(&target, &id, patch, crate::dialog::Owner::Script)
                     .map_err(lua_error)
             })?,
         )?;

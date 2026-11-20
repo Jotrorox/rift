@@ -1608,8 +1608,16 @@ impl Extensions {
                 self.call("menu", &input, jobs).await?;
             }
             crate::dialog::Owner::Plugin(name) => self.plugins.menu(&name, input),
-            // Menus are shown only to this peer's players.
-            crate::dialog::Owner::Remote { .. } => {}
+            // Shown from another peer of the cluster: the event goes back.
+            crate::dialog::Owner::Remote {
+                peer,
+                incarnation,
+                plugin,
+            } => {
+                self.players
+                    .route_menu_event(peer, incarnation, plugin, input)
+                    .await?;
+            }
         }
         Ok(())
     }

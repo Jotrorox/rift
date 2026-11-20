@@ -642,14 +642,18 @@ async fn every_ending_has_its_reason() {
             closes(&mut session),
             [("shop".into(), CloseReason::Replaced)]
         );
-        show(&mut session, &mut client, hopper("other"), owner()).await;
+        session
+            .show_menu(shown(hopper("other"), owner()))
+            .await
+            .unwrap();
+        nothing(&mut client).await;
         assert!(closes(&mut session).is_empty());
         show(&mut session, &mut client, hopper("other"), Owner::Script).await;
         assert_eq!(
             closes(&mut session),
             [("other".into(), CloseReason::Replaced)]
         );
-        container += 4;
+        container += 3;
 
         // The backend opens a screen of its own.
         let mut open = Writer::new();
@@ -875,6 +879,428 @@ async fn a_translated_backend_s_rejection_is_caught_before_the_translator() {
                 .translated
                 .is_empty()
         );
+    })
+    .await
+    .unwrap();
+}
+
+/// (slot, state ID) of each `container_set_slot` for container `container`.
+fn slots_and_states(protocol: i32, container: i32, packets: &[Packet]) -> Vec<(i16, i32)> {
+    packets
+        .iter()
+        .map(|packet| {
+            assert_eq!(
+                packet.id,
+                id(protocol, CB, "container_set_slot"),
+                "{packets:?}"
+            );
+            let mut r = WireReader::new(&packet.data);
+            let slot = window::SetSlot::read(protocol, &mut r).unwrap();
+            assert_eq!(slot.container, container);
+            (slot.slot, slot.state_id)
+        })
+        .collect()
+}
+
+/// A click that names the state ID `state`, on the first container.
+fn click_seen(protocol: i32, slot: i16, state: i32) -> Packet {
+    let mut packet = click(protocol, slot, 0, 0, &[slot]);
+    let mut r = WireReader::new(&packet.data);
+    let mut click = window::Click::read(protocol, &mut r).unwrap();
+    click.state_id = state;
+    let mut w = Writer::new();
+    click.write(protocol, &mut w).unwrap();
+    packet.data = w.into_inner();
+    packet
+}
+
+/// The shop with `change` applied to its definition.
+fn shop_with(change: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut spec = shop();
+    change(&mut spec);
+    spec
+}
+
+fn update(id: &str, patch: serde_json::Value, owner: Owner) -> crate::menu::Update {
+    crate::menu::Update {
+        owner,
+        id: id.into(),
+        patch: Arc::new(crate::menu::Patch::parse(&patch).unwrap()),
+        heads: Arc::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_redraw_sends_only_the_slots_that_changed() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        let redrawn = shop_with(|spec| {
+            spec["keys"]["B"]["name"] = json!("Cheap diamond");
+            spec["keys"]["A"]["item"] = json!("golden_apple");
+        });
+        session
+            .show_menu(shown(redrawn.clone(), owner()))
+            .await
+            .unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(
+            slots_and_states(protocol, FIRST, &packets),
+            [(BUY, 2), (15, 2)]
+        );
+        // Each redraw names a new state.
+        let again = shop_with(|spec| {
+            spec["keys"]["B"]["name"] = json!("Cheap diamond");
+            spec["keys"]["A"]["item"] = json!("golden_apple");
+            spec["keys"]["D"]["lore"] = json!(["Dig it"]);
+        });
+        session
+            .show_menu(shown(again.clone(), owner()))
+            .await
+            .unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(slots_and_states(protocol, FIRST, &packets), [(DIG, 3)]);
+        // The same definition sends nothing; a redraw is no ending.
+        session.show_menu(shown(again, owner())).await.unwrap();
+        nothing(&mut client).await;
+        assert!(closes(&mut session).is_empty());
+        assert!(session.menu_open());
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+        // Clicks still go to the redrawn menu.
+        send(&mut client, &click_seen(protocol, BUY, 3)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.action.as_deref(), Some("buy"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_new_title_opens_the_same_container_again_with_every_slot() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 774] {
+            let (mut session, mut client, _backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, shop(), owner()).await;
+            let titled = shop_with(|spec| spec["title"] = json!("Shop, page 2"));
+            session
+                .show_menu(shown(titled.clone(), owner()))
+                .await
+                .unwrap();
+            let packets = drain(&mut client).await;
+            let menu = Menu::parse(&titled).unwrap();
+            assert_eq!(
+                packets[0],
+                packets::open_screen(version(protocol), FIRST, menu.kind(), menu.title()).unwrap()
+            );
+            let slots = slots_and_states(protocol, FIRST, &packets[1..]);
+            assert_eq!(slots.len(), SHOP_FILLED, "{protocol}");
+            assert!(slots.contains(&(BUY, if protocol >= 756 { 2 } else { 0 })));
+            assert!(closes(&mut session).is_empty());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn another_type_or_number_of_rows_opens_the_menu_anew_without_ending_it() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        let taller = shop_with(|spec| {
+            spec["layout"] = json!(["#########", "# B D A #", "#       #", "####X####"]);
+        });
+        let packets = show(&mut session, &mut client, taller.clone(), owner()).await;
+        let menu = Menu::parse(&taller).unwrap();
+        assert_eq!(
+            packets[0],
+            packets::open_screen(version(protocol), FIRST + 1, menu.kind(), menu.title()).unwrap()
+        );
+        assert_eq!(packets.len(), 1 + SHOP_FILLED + 2);
+        let mut hopper = hopper("shop");
+        hopper["title"] = json!("Shop");
+        let packets = show(&mut session, &mut client, hopper, owner()).await;
+        assert_eq!(slot_of(protocol, &packets[1]).0, FIRST + 2);
+        assert!(closes(&mut session).is_empty());
+        // A late click on the first container is still Rift's.
+        send(&mut client, &click(protocol, BUY, 0, 0, &[BUY])).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+        // The menu reopened by the same plugin ends once.
+        session.end_menus();
+        assert_eq!(
+            closes(&mut session),
+            [("shop".into(), CloseReason::Disconnect)]
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_redraw_after_the_player_closed_the_menu_opens_it_anew() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        send(
+            &mut client,
+            &packets::client_close(version(protocol), FIRST).unwrap(),
+        )
+        .await;
+        session.forward().await.unwrap();
+        assert_eq!(closes(&mut session), [("shop".into(), CloseReason::Player)]);
+        let packets = show(&mut session, &mut client, shop(), owner()).await;
+        assert_eq!(packets.len(), 1 + SHOP_FILLED);
+        assert_eq!(slot_of(protocol, &packets[1]).0, FIRST + 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn update_menu_changes_each_part_of_the_open_menu() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+
+        // Slots, one placed and one emptied.
+        let patch = json!({"slots": [
+            {"slot": 10, "item": "emerald", "id": "gem"},
+            {"slot": 11, "empty": true},
+        ]});
+        session
+            .update_menu(update("shop", patch, owner()))
+            .await
+            .unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(
+            slots_and_states(protocol, FIRST, &packets),
+            [(10, 2), (BUY, 2)]
+        );
+        assert!(slot_of(protocol, &packets[0]).2);
+        assert!(!slot_of(protocol, &packets[1]).2);
+        send(&mut client, &click_seen(protocol, 10, 2)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.action.as_deref(), Some("gem"));
+        flush(&mut session).await;
+        drain(&mut client).await;
+
+        // Keys: every slot the layout gave that character.
+        let patch = json!({"keys": {"#": {"item": "black_stained_glass_pane", "name": " "}}});
+        session
+            .update_menu(update("shop", patch, owner()))
+            .await
+            .unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(packets.len(), 19);
+        assert!(
+            slots_and_states(protocol, FIRST, &packets)
+                .iter()
+                .all(|(slot, _)| ![10, BUY, DIG, 15, CLOSE].contains(slot))
+        );
+
+        // State: nothing to send, and every later event carries it.
+        let patch = json!({"state": {"page": 3}});
+        session
+            .update_menu(update("shop", patch, owner()))
+            .await
+            .unwrap();
+        nothing(&mut client).await;
+        send(&mut client, &click_seen(protocol, DIG, 4)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.state, Some(json!({"page": 3})));
+        flush(&mut session).await;
+        drain(&mut client).await;
+
+        // Title: the same container again, with every slot.
+        let patch = json!({"title": "Sold out"});
+        session
+            .update_menu(update("shop", patch, owner()))
+            .await
+            .unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(packets[0].id, id(protocol, CB, "open_screen"));
+        assert_eq!(
+            slots_and_states(protocol, FIRST, &packets[1..]).len(),
+            SHOP_FILLED
+        );
+
+        // Text is for anvils, and a slot outside the menu changes nothing.
+        for patch in [
+            json!({"text": "x"}),
+            json!({"slots": [{"slot": 27, "item": "stone"}]}),
+        ] {
+            session
+                .update_menu(update("shop", patch, owner()))
+                .await
+                .unwrap();
+            nothing(&mut client).await;
+        }
+
+        // Another plugin's menu, or another id, is not changed.
+        let patch = json!({"title": "Mine"});
+        session
+            .update_menu(update("shop", patch.clone(), Owner::Script))
+            .await
+            .unwrap();
+        session
+            .update_menu(update("other", patch.clone(), owner()))
+            .await
+            .unwrap();
+        nothing(&mut client).await;
+
+        // A menu that is gone is not changed either.
+        session.close_menu(&owner(), None).await.unwrap();
+        drain(&mut client).await;
+        session
+            .update_menu(update("shop", patch, owner()))
+            .await
+            .unwrap();
+        nothing(&mut client).await;
+        assert!(!session.menu_open());
+        let ends = session.take_menu_events();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].event.state, Some(json!({"page": 3})));
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_click_on_an_action_the_player_did_not_see_is_undone_and_not_reported() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, mut backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        // At state 2: the buy button costs more, the dig button only looks
+        // different, and the close button gets an id.
+        let redrawn = shop_with(|spec| {
+            spec["keys"]["B"]["payload"] = json!({"price": 6});
+            spec["keys"]["D"]["name"] = json!("Dig");
+            spec["keys"]["X"]["id"] = json!("leave");
+        });
+        session.show_menu(shown(redrawn, owner())).await.unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(
+            slots_and_states(protocol, FIRST, &packets),
+            [(BUY, 2), (DIG, 2), (CLOSE, 2)]
+        );
+
+        // Clicks made on what state 1 showed.
+        send(&mut client, &click_seen(protocol, BUY, 1)).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        assert_undone(protocol, &mut client, FIRST, &[BUY]).await;
+        send(&mut client, &click_seen(protocol, DIG, 1)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.action.as_deref(), Some("dig"));
+        send(&mut client, &click_seen(protocol, 15, 1)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.action.as_deref(), Some("eat"));
+        send(&mut client, &click_seen(protocol, CLOSE, 1)).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert!(session.menu_open());
+        flush(&mut session).await;
+        drain(&mut client).await;
+
+        // The same clicks on what state 2 showed.
+        send(&mut client, &click_seen(protocol, BUY, 2)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.payload, Some(json!({"price": 6})));
+        send(&mut client, &click_seen(protocol, CLOSE, 2)).await;
+        let event = delivery(session.forward().await.unwrap()).event;
+        assert_eq!(event.action.as_deref(), Some("leave"));
+        assert!(!session.menu_open());
+        assert_eq!(closes(&mut session), [("shop".into(), CloseReason::Plugin)]);
+        flush(&mut session).await;
+        nothing(&mut backend).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn clients_before_1_17_1_report_every_click() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 755] {
+            let (mut session, mut client, _backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, shop(), owner()).await;
+            let redrawn = shop_with(|spec| spec["keys"]["B"]["payload"] = json!({"price": 6}));
+            session.show_menu(shown(redrawn, owner())).await.unwrap();
+            let packets = drain(&mut client).await;
+            assert_eq!(slots_and_states(protocol, FIRST, &packets), [(BUY, 0)]);
+            send(&mut client, &click(protocol, BUY, 0, 0, &[BUY])).await;
+            let event = delivery(session.forward().await.unwrap()).event;
+            assert_eq!(event.payload, Some(json!({"price": 6})), "{protocol}");
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_shift_click_on_the_inventory_rows_before_1_17_puts_every_menu_slot_back() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 340;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        send(&mut client, &click(protocol, 40, 0, 1, &[])).await;
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        flush(&mut session).await;
+        let all: Vec<i16> = (0..27).collect();
+        assert_undone(protocol, &mut client, FIRST, &all).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_unanswered_inventory_request_counts_as_lost_after_a_while() {
+    timeout(Duration::from_secs(5), async {
+        for protocol in [340, 767, 774] {
+            let (mut session, mut client, mut backend) = menu_session(protocol).await;
+            show(&mut session, &mut client, shop(), owner()).await;
+            let request = packets::inventory_request(protocol).unwrap();
+            let shift = click(protocol, BUY, 0, 1, &[BUY, 40]);
+            send(&mut client, &shift).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            assert_eq!(next(&mut backend).await, request);
+            // The backend never answers: the next click waits ...
+            send(&mut client, &shift).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            nothing(&mut backend).await;
+            // ... until the request counts as lost.
+            let lost = std::time::Instant::now()
+                .checked_sub(crate::session::menus::REQUEST_TIMEOUT)
+                .unwrap();
+            session.menus.request.sent = Some(lost);
+            send(&mut client, &shift).await;
+            session.forward().await.unwrap();
+            flush(&mut session).await;
+            assert_eq!(next(&mut backend).await, request, "{protocol}");
+            // A request waiting for the menu to close is not held back by a
+            // lost one either.
+            session.menus.request.sent = Some(lost);
+            if protocol < 768 {
+                send(&mut backend, &hotbar_slot(protocol)).await;
+                session.forward().await.unwrap();
+                session.close_menu(&owner(), None).await.unwrap();
+                flush(&mut session).await;
+                assert_eq!(next(&mut backend).await, request, "{protocol}");
+            }
+            drain(&mut client).await;
+            nothing(&mut backend).await;
+        }
     })
     .await
     .unwrap();
