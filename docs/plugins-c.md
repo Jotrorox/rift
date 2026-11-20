@@ -80,7 +80,7 @@ Rust, Go and Lua examples.
 | `text` | `rift_text_plain("...")` and `rift_text_json(json)`; see [text](#text). |
 | `decision` | `rift_decision_continue`, `rift_decision_deny(ret, text)`, `rift_decision_message(ret, text)`, `rift_decision_server`, `rift_decision_queue`, `rift_decision_leave_queue`; `rift_decision_deny_fmt` and `rift_decision_message_fmt` format plain text. |
 | `suggest`, `status` | `rift_suggestions_add(ret, text, tooltip_or_NULL)`; `rift_status_override_init`, `rift_status_override_add_sample` and owned texts in `motd` and `version`. |
-| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_tab_list`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift.h` wraps the common ones and logs their errors: `rift_message`, `rift_action_bar`, `rift_title`, `rift_kick`, `rift_broadcast`, `rift_show_dialog`, `rift_player_lookup`, `rift_player_search`, `rift_set_language`, `rift_add_group`, `rift_background_*`. |
+| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_tab_list`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift.h` wraps the common ones and logs their errors: `rift_message`, `rift_action_bar`, `rift_title`, `rift_kick`, `rift_broadcast`, `rift_show_dialog`, `rift_show_menu`, `rift_update_menu`, `rift_close_menu`, `rift_player_lookup`, `rift_player_search`, `rift_set_language`, `rift_add_group`, `rift_background_*`. |
 | `chat`, `kick` | `exports_rift_plugin_handler_chat` and `exports_rift_plugin_handler_kick`; see [chat and kick](#chat-and-kick). |
 | `background` | `rift_background_defer`, `rift_background_resolve`, `rift_background_run`, `rift_background_is_worker`; see [background work](#background-work). |
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
@@ -89,6 +89,7 @@ Rust, Go and Lua examples.
 | `text` | `rift_text_render`, `rift_text_to_plain`, `rift_text_to_legacy`, `rift_text_to_mini` (since 0.2.1); see [converting text](#converting-text). |
 | configuration JSON | `rift_json_get_string(&config, "key", &out)` reads one top-level string; use cJSON or jsmn for more. |
 | `dialog`, `players.dialog` | [Dialogs](dialogs.md): `rift_show_dialog(&target, json)` and `rift_plugin_players_clear_dialog`; clicks reach `exports_rift_plugin_handler_dialog(rift_dialog_response_t *)`, which owns its argument (free it with `rift_dialog_response_free`). The weak default ignores clicks. No registration needed. |
+| `menu`, `players.menu` | [Menus](menus.md): the menu is JSON text, since C has no builder. `rift_show_menu(&target, json)`, `rift_update_menu(&target, id, patch_json)` and `rift_close_menu(&target, id)` (`NULL` closes whatever menu is open); events reach `exports_rift_plugin_handler_menu(rift_menu_event_t *)`, which owns its argument (free it with `rift_menu_event_free`). `rift_menu_kind`, `rift_menu_click` and `rift_menu_close_reason` return enums with an `_OTHER` case, and `rift_menu_payload_string` and `rift_menu_state_string` read a JSON string. The weak default ignores events. No registration needed. |
 
 ## Text
 
