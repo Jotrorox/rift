@@ -417,6 +417,9 @@ impl PluginEngine for WasmEngine {
             Event::Dialog(context) => {
                 done(guest.call_dialog(store, &bindings::dialog_response(context)))
             }
+            // The 0.2 contract has no `menu` hook, and its plugins cannot
+            // show menus: nothing can be addressed to them.
+            Event::Menu(_) => Ok(Ok(Reply::None)),
             Event::Job(handle, outcome) => done(guest.call_job_done(
                 store,
                 handle,

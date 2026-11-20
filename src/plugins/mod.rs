@@ -940,6 +940,18 @@ impl Host {
         }
     }
 
+    /// Queue a menu event for the persistent plugin `name`, which showed the
+    /// menu. Dropped when no plugin of that name is active.
+    pub(crate) fn menu(&self, name: &str, input: Context) {
+        if let Some(instance) = self
+            .active()
+            .iter()
+            .find(|instance| instance.name() == name)
+        {
+            notify(self.monitor(), instance, Event::Menu(input));
+        }
+    }
+
     /// Run a plugin command for the operator console: `line` is the command
     /// with its arguments, with or without a leading slash. Only commands
     /// registered with `console` run; their `message` answer is the output.

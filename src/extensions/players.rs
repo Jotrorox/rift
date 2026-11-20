@@ -92,6 +92,15 @@ pub enum PlayerAction {
     },
     /// Close the dialog Rift showed, if it is still open.
     ClearDialog,
+    /// Show a menu, replacing any open menu or dialog of Rift's; its events
+    /// go to the owner. Menus never travel to another peer.
+    Menu(crate::menu::Shown),
+    /// Close the menu Rift shows: any menu without an `id`, else only the
+    /// menu `id` of `owner`.
+    CloseMenu {
+        owner: crate::dialog::Owner,
+        id: Option<String>,
+    },
     /// Leave this proxy: a 1.20.5+ client in configuration or play gets the
     /// Transfer packet to `host:port` (another peer of the cluster); any
     /// other is disconnected with `fallback`. Sent by a peer that drains.
@@ -511,6 +520,30 @@ pub(crate) fn dialog(value: Value) -> mlua::Result<crate::dialog::Dialog> {
     .map_err(mlua::Error::runtime)
 }
 
+/// Values of a menu table built in Lua.
+const MAX_MENU_LUA_VALUES: usize = 65_536;
+
+/// A menu from Lua: a table in the format of docs/menus.md or the same as
+/// JSON text.
+pub(crate) fn menu(value: Value) -> mlua::Result<crate::menu::Menu> {
+    match value {
+        Value::String(text) => crate::menu::Menu::parse_json(&text.to_str()?),
+        Value::Table(_) => crate::dialog::lua_json(value, "menu", MAX_MENU_LUA_VALUES)
+            .and_then(|spec| crate::menu::Menu::parse(&spec)),
+        _ => Err("menu expects a table or JSON text".into()),
+    }
+    .and_then(menu_available)
+    .map_err(mlua::Error::runtime)
+}
+
+/// A parsed menu Rift can show today.
+pub(crate) fn menu_available(menu: crate::menu::Menu) -> Result<crate::menu::Menu, String> {
+    if menu.kind() == crate::menu::Kind::Anvil {
+        return Err("anvil menus are not available yet".into());
+    }
+    Ok(menu)
+}
+
 const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";
 
 /// Whether `target` is a lowercase UUID (else a name).
@@ -537,6 +570,38 @@ fn find<'a>(
             entry.name.eq_ignore_ascii_case(target)
         }
     }))
+}
+
+/// The skins of the online players whose heads `menu` shows, by the name or
+/// UUID its buttons give.
+fn heads(
+    sessions: &BTreeMap<u64, Entry>,
+    menu: &crate::menu::Menu,
+) -> BTreeMap<String, crate::menu::Textures> {
+    let mut heads = BTreeMap::new();
+    for button in menu.slots().iter().flatten() {
+        let Some(crate::menu::Head::Player(player)) = &button.look.head else {
+            continue;
+        };
+        let uuid = player.replace('-', "").to_ascii_lowercase();
+        let textures = sessions
+            .values()
+            .find(|entry| entry.uuid == uuid || entry.name.eq_ignore_ascii_case(player))
+            .and_then(|entry| {
+                entry
+                    .properties
+                    .iter()
+                    .find(|property| property.name == "textures")
+            })
+            .map(|property| crate::menu::Textures {
+                value: property.value.clone(),
+                signature: property.signature.clone(),
+            });
+        if let Some(textures) = textures {
+            heads.insert(player.clone(), textures);
+        }
+    }
+    heads
 }
 
 fn hex(uuid: &[u8; 16]) -> String {
@@ -1678,6 +1743,37 @@ impl Players {
         Ok(self.dispatch(remote.player.peer, Self::request(&remote, action(owner))))
     }
 
+    /// Show a menu (`Some`) or close the one Rift shows (`None`, only the
+    /// menu `id` of `owner` when an `id` is given). False means that the
+    /// player is offline, older than 1.12, on another peer of the cluster,
+    /// or has a full queue.
+    pub fn menu(
+        &self,
+        target: &str,
+        menu: Option<crate::menu::Menu>,
+        owner: crate::dialog::Owner,
+        id: Option<String>,
+    ) -> std::io::Result<bool> {
+        let sessions = self.lock();
+        let entry = find(&sessions, target)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let Some((_, entry)) = entry else {
+            return Ok(false);
+        };
+        if !crate::protocol::menus_supported(entry.protocol) {
+            return Ok(false);
+        }
+        let action = match menu {
+            Some(menu) => PlayerAction::Menu(crate::menu::Shown {
+                heads: Arc::new(heads(&sessions, &menu)),
+                menu: Arc::new(menu),
+                owner,
+            }),
+            None => PlayerAction::CloseMenu { owner, id },
+        };
+        Ok(entry.actions.try_send(action).is_ok())
+    }
+
     /// Send a click on a dialog that peer `peer` showed back to it.
     pub async fn route_dialog_click(
         &self,
@@ -2281,6 +2377,27 @@ impl Players {
                 charge()?;
                 players
                     .dialog(&target, None, crate::dialog::Owner::Script)
+                    .map_err(lua_error)
+            })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "menu",
+            lua.create_function(move |_, (target, spec): (String, Value)| {
+                charge()?;
+                let menu = players.rendering_for(None, &target, || menu(spec))?;
+                players
+                    .menu(&target, Some(menu), crate::dialog::Owner::Script, None)
+                    .map_err(lua_error)
+            })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "close_menu",
+            lua.create_function(move |_, (target, id): (String, Option<String>)| {
+                charge()?;
+                players
+                    .menu(&target, None, crate::dialog::Owner::Script, id)
                     .map_err(lua_error)
             })?,
         )?;

@@ -17,10 +17,12 @@ use crate::text::Text;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
+mod event;
 pub mod stack;
 #[cfg(test)]
 mod tests;
 
+pub use event::{CloseReason, Delivery, EventKind, MenuEvent, Shown, Ticket};
 pub use stack::{StackCache, Textures};
 
 /// The largest menu definition or patch, as compact JSON.
@@ -195,7 +197,8 @@ impl Kind {
 }
 
 /// How a player clicked a slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Click {
     Left,
     Right,

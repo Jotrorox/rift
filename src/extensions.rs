@@ -39,6 +39,7 @@ const HOOKS: &[&str] = &[
     "before_transfer",
     "after_transfer",
     "dialog",
+    "menu",
     "chat",
     "kick",
 ];
@@ -271,6 +272,7 @@ impl ExtensionScript {
                 "before_transfer",
                 "after_transfer",
                 "dialog",
+                "menu",
                 "chat",
                 "kick",
                 "commands",
@@ -504,6 +506,11 @@ impl ExtensionScript {
             if let Some(dialog) = &input.dialog {
                 dialog_fields(&lua, &ctx, dialog, deadline)?;
             }
+            if let Some(menu) = &input.menu {
+                menu_fields(&ctx, menu, |value| {
+                    crate::http_script::json_value(&lua, value, 0, deadline)
+                })?;
+            }
             if let Some(chat) = &input.chat {
                 ctx.set("kind", chat.kind.name())?;
                 ctx.set("text", chat.text.as_str())?;
@@ -623,6 +630,30 @@ pub(crate) fn dialog_fields(
             "payload",
             crate::http_script::json_value(lua, payload, 0, deadline)?,
         )?;
+    }
+    Ok(())
+}
+
+/// The fields of a `menu` event's `ctx`, in script mode and in persistent
+/// Lua plugins alike; `json` turns a JSON value into Lua.
+pub(crate) fn menu_fields(
+    ctx: &Table,
+    event: &crate::menu::MenuEvent,
+    json: impl Fn(&serde_json::Value) -> mlua::Result<Value>,
+) -> mlua::Result<()> {
+    ctx.set("menu", event.menu.as_str())?;
+    ctx.set("kind", event.kind.name())?;
+    ctx.set("action", event.action.as_deref())?;
+    ctx.set("slot", event.slot)?;
+    ctx.set("click", event.click.map(crate::menu::Click::name))?;
+    ctx.set("key", event.key)?;
+    ctx.set("text", event.text.as_deref())?;
+    ctx.set("reason", event.reason.map(crate::menu::CloseReason::name))?;
+    if let Some(payload) = &event.payload {
+        ctx.set("payload", json(payload)?)?;
+    }
+    if let Some(state) = &event.state {
+        ctx.set("state", json(state)?)?;
     }
     Ok(())
 }
@@ -826,6 +857,9 @@ pub struct Context {
     /// hold its root name and the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat: Option<ChatInput>,
+    /// `menu`: what the player did in a menu the receiver showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<crate::menu::MenuEvent>,
     /// The language a plugin set for the player, known from `login` on,
     /// else the client's locale once it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1558,6 +1592,28 @@ impl Extensions {
         Ok(())
     }
 
+    /// Deliver a menu event to whoever showed the menu: the configuration
+    /// script's `menu` handler, or the persistent plugin of that name
+    /// (queued like other observers). A plugin that is gone, or a script
+    /// without a handler, drops it.
+    pub async fn menu(
+        &self,
+        mut input: Context,
+        delivery: crate::menu::Delivery,
+        jobs: &Arc<Semaphore>,
+    ) -> io::Result<()> {
+        input.menu = Some(delivery.event);
+        match delivery.owner {
+            crate::dialog::Owner::Script => {
+                self.call("menu", &input, jobs).await?;
+            }
+            crate::dialog::Owner::Plugin(name) => self.plugins.menu(&name, input),
+            // Menus are shown only to this peer's players.
+            crate::dialog::Owner::Remote { .. } => {}
+        }
+        Ok(())
+    }
+
     /// The plugin chain: the Lua hook first because it is cheap and local,
     /// then persistent plugins, then a configured bus decision. Script
     /// commands go to the script only; observers also reach every
@@ -1581,8 +1637,9 @@ impl Extensions {
                 self.plugins.observe(hook, input);
                 result?
             }
-            // A dialog click goes to its owner only; see `Extensions::dialog`.
-            "dialog" => match script {
+            // A dialog click or a menu event goes to its owner only; see
+            // `Extensions::dialog` and `Extensions::menu`.
+            "dialog" | "menu" => match script {
                 Some(script) => script.await?,
                 None => Action::Continue,
             },
@@ -1931,6 +1988,13 @@ impl ExtensionSession {
     ) -> io::Result<()> {
         self.runtime
             .dialog(self.context.clone(), owner, response, &self.jobs)
+            .await
+    }
+
+    /// Deliver a menu event for this player; see [`Extensions::menu`].
+    pub async fn menu(&self, delivery: crate::menu::Delivery) -> io::Result<()> {
+        self.runtime
+            .menu(self.context.clone(), delivery, &self.jobs)
             .await
     }
 

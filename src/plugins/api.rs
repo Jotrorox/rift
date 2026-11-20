@@ -278,10 +278,13 @@ pub enum Hook {
     /// plugin and never registered, like `dialog`.
     #[serde(rename = "job_done")]
     Job,
+    /// Something a player did in a menu the plugin showed. Addressed to
+    /// that plugin and never registered, like `dialog`.
+    Menu,
 }
 
 impl Hook {
-    pub const ALL: [Hook; 18] = [
+    pub const ALL: [Hook; 19] = [
         Hook::Route,
         Hook::Login,
         Hook::InitialServer,
@@ -300,6 +303,7 @@ impl Hook {
         Hook::Chat,
         Hook::Kick,
         Hook::Job,
+        Hook::Menu,
     ];
 
     /// The snake_case name used by manifests, Lua and the bus.
@@ -323,6 +327,7 @@ impl Hook {
             Self::Chat => "chat",
             Self::Kick => "kick",
             Self::Job => "job_done",
+            Self::Menu => "menu",
         }
     }
 
@@ -343,6 +348,7 @@ impl Hook {
                 | Self::Event
                 | Self::Dialog
                 | Self::Job
+                | Self::Menu
         )
     }
 
@@ -387,7 +393,7 @@ impl Registration {
     /// (see [`Registration::chat`]).
     pub fn wants(&self, hook: Hook) -> bool {
         match hook {
-            Hook::Dialog | Hook::Job => true,
+            Hook::Dialog | Hook::Job | Hook::Menu => true,
             Hook::Chat => self.chat,
             Hook::Kick => self.kick,
             _ => self.hooks.is_empty() || self.hooks.contains(&hook),
@@ -449,6 +455,8 @@ pub enum Event {
     /// A background job finished: its handle and what `work` returned.
     #[serde(rename = "job_done")]
     Job(u64, Result<Vec<u8>, String>),
+    /// A menu event; `Context::menu` holds it.
+    Menu(Context),
 }
 
 impl Event {
@@ -472,6 +480,7 @@ impl Event {
             Self::Chat(_) => Hook::Chat,
             Self::Kick(_) => Hook::Kick,
             Self::Job(..) => Hook::Job,
+            Self::Menu(_) => Hook::Menu,
         }
     }
 
@@ -489,7 +498,8 @@ impl Event {
             | Self::Disconnect(context)
             | Self::Dialog(context)
             | Self::Chat(context)
-            | Self::Kick(context) => context.language.as_deref(),
+            | Self::Kick(context)
+            | Self::Menu(context) => context.language.as_deref(),
             Self::Route(_)
             | Self::Status(_)
             | Self::Http(_)
@@ -537,7 +547,8 @@ impl Reply {
             | Hook::Timer
             | Hook::Event
             | Hook::Dialog
-            | Hook::Job => Self::None,
+            | Hook::Job
+            | Hook::Menu => Self::None,
         }
     }
 }
@@ -583,6 +594,7 @@ mod tests {
         .unwrap();
         assert!(registration.wants(Hook::Login));
         assert!(registration.wants(Hook::Dialog));
+        assert!(registration.wants(Hook::Menu));
         assert!(!registration.wants(Hook::Chat), "chat needs a handler");
         assert_eq!(
             registration.commands[0].suggest,

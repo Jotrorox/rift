@@ -128,6 +128,42 @@ impl Network<'_> {
         }
     }
 
+    /// Deliver a menu event to whoever showed the menu, as a dialog click is
+    /// delivered.
+    pub async fn menu<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &Session<C, B>,
+        current: &str,
+        event: &Connection,
+        delivery: rift::menu::Delivery,
+    ) {
+        let result = match &session.extension {
+            Some(extension) => extension.menu(delivery).await,
+            None => {
+                let mut context = rift::extensions::Context {
+                    id: event.id(),
+                    protocol: session.handshake.protocol,
+                    server: Some(current.to_owned()),
+                    ..Default::default()
+                };
+                if let Some(identity) = session.identity() {
+                    context.name = identity.name;
+                }
+                if let Some(uuid) = expected_uuid(session) {
+                    context.uuid = uuid.to_string();
+                }
+                let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+                self.snapshot
+                    .extensions
+                    .menu(context, delivery, &jobs)
+                    .await
+            }
+        };
+        if let Err(error) = result {
+            log_error!("menu: {error}");
+        }
+    }
+
     /// Publish the player's compiled subject for backend replicas before the
     /// connection to `backend` is forwarded.
     pub fn push_permissions<
@@ -240,6 +276,7 @@ impl Network<'_> {
                             }
                     }
                     SessionEvent::Dialog(click) => self.dialog(session, current, event, click).await,
+                    SessionEvent::Menu(delivery) => self.menu(session, current, event, delivery).await,
                     SessionEvent::Chat(chat) => self.chat(session, chat).await?,
                     SessionEvent::ClientClosed => return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof, "client closed while destination was starting",

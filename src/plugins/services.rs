@@ -480,6 +480,35 @@ impl PlayersApi<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// `players.menu`: show a menu given as JSON (docs/menus.md), or redraw
+    /// the open one with the same `id`. Its events come back to this
+    /// plugin.
+    pub fn menu(&self, target: &str, menu_json: &str) -> Result<bool, String> {
+        let menu = self.for_target(target, || {
+            crate::menu::Menu::parse_json(menu_json)
+                .and_then(crate::extensions::players::menu_available)
+        })?;
+        self.show_menu(target, menu)
+    }
+
+    /// Show an already validated menu on behalf of this plugin (see
+    /// [`PlayersApi::for_target`]).
+    pub fn show_menu(&self, target: &str, menu: crate::menu::Menu) -> Result<bool, String> {
+        let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
+        self.players()
+            .menu(target, Some(menu), owner, None)
+            .map_err(|error| error.to_string())
+    }
+
+    /// `players.close-menu`: close this plugin's menu `id`, or with `None`
+    /// whatever menu of Rift's is open.
+    pub fn close_menu(&self, target: &str, id: Option<&str>) -> Result<bool, String> {
+        let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
+        self.players()
+            .menu(target, None, owner, id.map(str::to_owned))
+            .map_err(|error| error.to_string())
+    }
+
     /// `players.visible-to`: the node a viewer needs to see the player (the
     /// resolved `rift.visible-to` meta), or `None` when everyone sees them.
     /// `players.lookup`: what Rift remembers about a player, online or not.

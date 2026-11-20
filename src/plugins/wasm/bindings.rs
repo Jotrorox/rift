@@ -746,7 +746,8 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog` and `job_done` have no WIT case: they need no listing.
+        // `dialog`, `job_done` and `menu` have no WIT case: they need no
+        // listing.
         assert_eq!(names, api::Hook::ALL[..14]);
         assert_eq!(hook(types::Hook::Chat), api::Hook::Chat);
         assert_eq!(hook(types::Hook::Kick), api::Hook::Kick);

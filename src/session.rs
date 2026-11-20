@@ -20,6 +20,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
+mod menus;
+
 pub struct Connection<S> {
     pub io: S,
     pub state: ConnectionState,
@@ -37,6 +39,14 @@ pub struct Connection<S> {
     translation: Option<Translation>,
     /// The frame of the packet `next` last read, for passing it on unchanged.
     raw: Option<RawFrame>,
+    /// Frames written between the session's own, whole: a translator's
+    /// answers to the backend, and packets Rift sends on its own.
+    replies: Vec<u8>,
+    replies_offset: usize,
+    /// The protocol of a backend up to 1.16.5 that Rift asked for the
+    /// player's inventory: its rejection of the request is taken out of the
+    /// stream, before any translator, and acknowledged here.
+    awaiting_rejection: Option<i32>,
 }
 
 struct Translation {
@@ -47,12 +57,11 @@ struct Translation {
     /// request is a login plugin message, which a client older than 1.13 has
     /// no packet for, and it is never the client's to answer anyway.
     forwarding: Option<Forwarding>,
-    /// Translated backend packets not yet handed to the session.
+    /// Translated backend packets not yet handed to the session. Frames the
+    /// translator answers the backend with on its own, such as configuration
+    /// acknowledgements an older client never sends, go to the connection's
+    /// `replies`.
     translated: VecDeque<Packet>,
-    /// Frames the translator answered the backend with on its own, such as
-    /// configuration acknowledgements an older client never sends.
-    replies: Vec<u8>,
-    replies_offset: usize,
 }
 
 /// A frame as read, valid for any connection with the same compression threshold.
@@ -85,7 +94,34 @@ impl<S> Connection<S> {
             bungeecord_registered: false,
             translation: None,
             raw: None,
+            replies: Vec::new(),
+            replies_offset: 0,
+            awaiting_rejection: None,
         }
+    }
+
+    /// The protocol the peer speaks: the backend's own when translated.
+    fn protocol(&self, client: ProtocolVersion) -> i32 {
+        self.translation
+            .as_ref()
+            .map_or(client, |translation| translation.version)
+            .number()
+    }
+
+    /// Send `packet`, in the session's protocol, between the session's own
+    /// frames; a translated backend gets it translated.
+    fn inject(&mut self, packet: &Packet) -> io::Result<()> {
+        let frames = self.encode(packet)?;
+        self.replies.extend(frames);
+        Ok(())
+    }
+
+    /// Send `packet`, already in the peer's own protocol, past any
+    /// translator.
+    fn inject_raw(&mut self, packet: &Packet) -> io::Result<()> {
+        let frame = self.codec.encode(packet)?;
+        self.replies.extend(frame);
+        Ok(())
     }
 
     /// The frames that carry `packet` to this connection's peer. A translated
@@ -127,7 +163,7 @@ impl<S> Connection<S> {
                         .login_plugins
                         .request(&packet, translation.forwarding.as_ref())?
                         .ok_or_else(|| protocol::invalid("unanswered Velocity forwarding"))?;
-                    translation.replies.extend(self.codec.encode(&response)?);
+                    self.replies.extend(self.codec.encode(&response)?);
                     return Ok(());
                 }
                 _ => {}
@@ -141,8 +177,7 @@ impl<S> Connection<S> {
             .translated
             .extend(out.client.into_iter().map(|sent| untranslated(sent.packet)));
         for sent in out.backend {
-            translation
-                .replies
+            self.replies
                 .extend(self.codec.encode(&untranslated(sent.packet))?);
         }
         Ok(())
@@ -208,10 +243,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             if !session_frame_started && let Poll::Ready(Err(error)) = self.poll_replies(cx) {
                 return Poll::Ready(Err(error));
             }
-            let replies_started = self
-                .translation
-                .as_ref()
-                .is_some_and(|translation| translation.replies_offset > 0);
+            let replies_started = self.replies_offset > 0;
             if let Some(pending) = &mut self.pending
                 && !replies_started
             {
@@ -251,20 +283,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
     /// Write the translator's own answers as far as the socket accepts them.
     fn poll_replies(&mut self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
-        let Some(translation) = &mut self.translation else {
-            return Poll::Ready(Ok(()));
-        };
-        while translation.replies_offset < translation.replies.len() {
-            let rest = &translation.replies[translation.replies_offset..];
+        while self.replies_offset < self.replies.len() {
+            let rest = &self.replies[self.replies_offset..];
             match Pin::new(&mut self.io).poll_write(cx, rest) {
                 Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-                Poll::Ready(Ok(size)) => translation.replies_offset += size,
+                Poll::Ready(Ok(size)) => self.replies_offset += size,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             }
         }
-        translation.replies.clear();
-        translation.replies_offset = 0;
+        self.replies.clear();
+        self.replies_offset = 0;
         Poll::Ready(Ok(()))
     }
 
@@ -289,6 +318,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 Poll::Ready(Ok(Some(frame))) => frame,
             };
             let packet = self.codec.decode(&frame)?;
+            if let Some(protocol) = self.awaiting_rejection
+                && protocol::menu::is_rejection(protocol, &packet)
+            {
+                self.awaiting_rejection = None;
+                let acknowledgement = protocol::menu::acknowledgement(protocol)?;
+                self.inject_raw(&acknowledgement)?;
+                // Until it is acknowledged the backend ignores every click.
+                if self
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.offset == 0)
+                    && let Poll::Ready(Err(error)) = self.poll_replies(cx)
+                {
+                    return Poll::Ready(Err(error));
+                }
+                continue;
+            }
             if self.translation.is_some() {
                 self.translate_received(packet)?;
                 // Answers leave promptly unless a session frame is under way.
@@ -358,6 +404,9 @@ pub enum SessionEvent {
     BungeeCord(crate::bungeecord::Request),
     /// A click on a plugin action of the dialog Rift showed.
     Dialog(DialogClick),
+    /// A reported click on a menu Rift showed, for whoever showed it. The
+    /// ends of menus wait in [`Session::take_menu_events`].
+    Menu(crate::menu::Delivery),
     /// A chat message or backend command the session holds back for the
     /// `chat` hook. Answer with [`Session::release_chat`] or
     /// [`Session::drop_chat`] before forwarding again; a held packet nobody
@@ -472,6 +521,9 @@ pub struct Session<C, B> {
     /// The dialog Rift showed and who receives its clicks, while it may
     /// still be open: a backend dialog, a clear or a reconfiguration ends it.
     dialog: Option<(std::sync::Arc<crate::dialog::Dialog>, crate::dialog::Owner)>,
+    /// The menu Rift shows, the backend's open container and the inventory
+    /// request; see [`menus`].
+    menus: menus::Menus,
     suggestions: SuggestionBudget,
     /// The chat packet reported as [`SessionEvent::Chat`], until its owner
     /// releases or drops it.
@@ -527,6 +579,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             tab_list: protocol::TabList::default(),
             boss_bars: protocol::BossBars::default(),
             dialog: None,
+            menus: menus::Menus::default(),
             suggestions: SuggestionBudget::default(),
             held_chat: None,
             chat_chain_broken: false,
@@ -995,8 +1048,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 .as_ref()
                 .map(|forwarding| forwarding.for_backend(backend_version)),
             translated: VecDeque::new(),
-            replies: Vec::new(),
-            replies_offset: 0,
         });
         let mut handshake = self.handshake.clone();
         handshake.protocol = backend_version.number();
@@ -1044,7 +1095,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         event = self.forward(), if self.backend.is_some() => match event? {
                             // Dropped: the client asks again for its next keystroke.
                             // Dialog clicks are dropped like commands: the old world is going away.
-                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) | SessionEvent::Dialog(_) => {}
+                            // So are menu clicks; their menu ends before the switch starts.
+                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) | SessionEvent::Dialog(_) | SessionEvent::Menu(_) => {}
                             // Nobody can ask the hook here, so chat is not let through.
                             SessionEvent::Chat(_) => self.pass_chat().await?,
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
@@ -1074,6 +1126,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // All errors above leave the old attachment and client world intact.
             self.switch_in_progress = true;
             self.client.flush_pending().await?;
+            self.end_menu_for_switch().await?;
             // A failed backend may have left an unfinished bundle on the wire.
             // Close it before the unbundled configuration transition.
             let closed_bundle = self.bundle_open;
@@ -1298,7 +1351,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     | SessionEvent::ProxyCommand(_)
                     | SessionEvent::Suggestions(_)
                     | SessionEvent::BungeeCord(_)
-                    | SessionEvent::Dialog(_),
+                    | SessionEvent::Dialog(_)
+                    | SessionEvent::Menu(_),
                 )) => {}
                 // Nobody can ask the hook here, so chat is not let through.
                 Poll::Ready(Ok(SessionEvent::Chat(_))) => self.pass_chat().await?,
@@ -1647,6 +1701,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             return Ok(());
         }
         let packet = protocol::dialog::show(self.version()?, dialog.wire())?;
+        if self.menu_open() {
+            // A dialog replaces a menu. Closed first, the menu cannot come
+            // back when the dialog closes.
+            self.end_menu(crate::menu::CloseReason::Replaced, true)?;
+            poll_fn(|cx| self.client.poll_replies(cx)).await?;
+        }
         self.send_client(&packet).await?;
         self.dialog = Some((dialog, owner));
         Ok(())
@@ -1885,6 +1945,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         let payload = click.payload()?;
                         return Ok(self.dialog_click(&click.id, payload));
                     }
+                    // Packets for Rift's menus never reach the backend.
+                    if phase == State::Play
+                        && let Some(event) = self.menu_client_packet(version, &packet)?
+                    {
+                        return Ok(event);
+                    }
                     self.remember_client_packet(phase, &packet)?;
                     let backend = self.backend.as_mut().unwrap();
                     if kind == PacketKind::LoginPluginResponse {
@@ -2033,6 +2099,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         self.dialog = None;
                     }
                     if phase == State::Play {
+                        self.menus
+                            .backend_packet(version, &packet, &mut self.client, backend)?;
                         self.legacy_state.observe(version, &packet)?;
                         if !self.tab_list.observe(version, &packet)? {
                             // Rift owns the header and footer.
@@ -2134,6 +2202,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             self.tab_list.reset();
                             self.boss_bars.reset();
                             self.dialog = None;
+                            self.end_menu_for_configuration()?;
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

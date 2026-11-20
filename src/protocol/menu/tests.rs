@@ -109,7 +109,10 @@ fn slots_and_the_cursor_read_back_with_the_translation_codec() {
         assert_eq!(read.container, 101);
         assert_eq!(read.slot, 4);
         assert_eq!(read.state_id, if protocol >= 756 { 7 } else { 0 });
-        assert_eq!(read.item.as_ref().map(|item| (item.id, item.count)), Some((1, 3)));
+        assert_eq!(
+            read.item.as_ref().map(|item| (item.id, item.count)),
+            Some((1, 3))
+        );
 
         let cursor = empty_cursor(v, 7).unwrap();
         let mut r = Reader::new(&cursor.data);
@@ -255,7 +258,11 @@ fn click_modes_map_to_the_design_s_click_kinds() {
         ((0, 1, 5), None),
         ((0, 0, 6), None),
     ] {
-        assert_eq!(click(slot, button, mode).kind(), kind, "{slot} {button} {mode}");
+        assert_eq!(
+            click(slot, button, mode).kind(),
+            kind,
+            "{slot} {button} {mode}"
+        );
     }
 }
 
@@ -277,7 +284,10 @@ fn what_a_click_changed_on_the_client() {
     assert_eq!(old(4, 0, 6).menu_slots(9), (0..9).collect::<Vec<_>>());
     assert_eq!(old(-999, 0, 5).menu_slots(5), (0..5).collect::<Vec<_>>());
     for (button, mode) in [(0, 1), (3, 2), (40, 2), (0, 5), (0, 6)] {
-        assert!(old(4, button, mode).touches_inventory(27), "{button} {mode}");
+        assert!(
+            old(4, button, mode).touches_inventory(27),
+            "{button} {mode}"
+        );
     }
     assert!(old(30, 0, 0).touches_inventory(27));
     assert!(old(30, 0, 0).menu_slots(27).is_empty());
@@ -308,7 +318,10 @@ fn backend_screens_and_inventory_updates_are_recognized() {
             open.u8(7).string("minecraft:chest");
         }
         let packet = Packet::new(ids.open_screen, open.into_inner());
-        assert_eq!(backend_packet(&ids, &packet), Some(BackendPacket::Opened(7)));
+        assert_eq!(
+            backend_packet(&ids, &packet),
+            Some(BackendPacket::Opened(7))
+        );
         for (id, expected) in [
             (ids.sign_editor, BackendPacket::Screen),
             (ids.close, BackendPacket::Closed),
@@ -420,5 +433,8 @@ fn rejections_are_recognized_and_acknowledged_up_to_1_16_5() {
         assert_eq!(acknowledgement.data, [0, 0xff, 0xff, 1]);
     }
     assert!(acknowledgement(755).is_err());
-    assert!(!is_rejection(755, &Packet::new(0x11, vec![0, 0xff, 0xff, 0])));
+    assert!(!is_rejection(
+        755,
+        &Packet::new(0x11, vec![0, 0xff, 0xff, 0])
+    ));
 }

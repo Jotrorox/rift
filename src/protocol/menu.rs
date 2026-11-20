@@ -183,9 +183,9 @@ pub(crate) fn open_screen(
     let mut data = w.into_inner();
     let nbt = version.nbt_components();
     match title {
-        Some(title) => super::packets::with_text(title, Some(version), |text| {
-            text.write(nbt, &mut data)
-        })?,
+        Some(title) => {
+            super::packets::with_text(title, Some(version), |text| text.write(nbt, &mut data))?
+        }
         None => super::packets::Text::Literal("").write(nbt, &mut data)?,
     }
     if let MenuType::Window { slots, .. } = menu {
@@ -489,7 +489,9 @@ fn claimed() -> ItemStack {
 /// space between its slots, so it moves nothing on any server.
 pub(crate) fn inventory_request(protocol: i32) -> io::Result<Packet> {
     let id = data::try_version(protocol)
-        .and_then(|version| version.packet_id(State::Play, Direction::Serverbound, "container_click"))
+        .and_then(|version| {
+            version.packet_id(State::Play, Direction::Serverbound, "container_click")
+        })
         .ok_or_else(unsupported)?;
     let empty = if window::hashed_clicks(protocol) {
         ClickSlot::Hashed(None)

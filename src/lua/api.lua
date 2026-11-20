@@ -9,7 +9,7 @@ local events = {
     route = "on_route", http = "on_http", message = "on_message", status = "on_status",
     login = "login", initial_server = "initial_server", join = "join",
     disconnect = "disconnect", before_transfer = "before_transfer",
-    after_transfer = "after_transfer", dialog = "dialog", kick = "kick",
+    after_transfer = "after_transfer", dialog = "dialog", menu = "menu", kick = "kick",
 }
 
 api.config = config
@@ -23,7 +23,7 @@ for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
     permissions = { "check", "compiled", "meta", "user", "group", "groups", "track" },
     http = { "request" },
-    players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "dialog", "clear_dialog", "kick", "transfer", "broadcast" },
+    players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "dialog", "clear_dialog", "menu", "close_menu", "kick", "transfer", "broadcast" },
     servers = { "create", "remove", "start", "stop", "download" },
     cluster = { "lease", "renew", "release", "is_leader", "peer" },
 }) do
@@ -202,9 +202,10 @@ return function(returned)
         if type(list) ~= "table" then error("messaging.subscriptions must be a list") end
         for _, entry in ipairs(subjects) do list[#list + 1] = entry end
     end
-    -- Dialog handlers use rift.players (API v2). Settle the version before
-    -- another event creates the table, whatever order pairs() visits them in.
-    if handlers.dialog then extensions(2) end
+    -- Dialog and menu handlers use rift.players (API v2). Settle the version
+    -- before another event creates the table, whatever order pairs() visits
+    -- them in.
+    if handlers.dialog or handlers.menu then extensions(2) end
     for event, list in pairs(handlers) do
         local target = (event == "route" or event == "http" or event == "message" or event == "status")
             and config or extensions()
