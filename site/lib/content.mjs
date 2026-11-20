@@ -54,7 +54,7 @@ export const DOCS = [
   page('Plugins', 'host-services', 'Host services', 'Durable state, timers, HTTP integrations and permissions for plugin code.'),
   page('Plugins', 'players-api', 'Online players API', 'Messages, titles, tab lists, kicks, broadcasts and transfers.'),
   page('Plugins', 'dialogs', 'Dialogs', 'Screens with inputs and buttons on 1.21.6+, shown by plugins through the proxy.'),
-  page('Plugins', 'menus', 'Inventory menus (design)', 'The plan for chest, hopper, dispenser and anvil screens that plugins open through the proxy.'),
+  page('Plugins', 'menus', 'Inventory menus', 'Chest, hopper, dispenser and anvil screens with item buttons, shown by plugins on 1.12+ through the proxy.'),
   page('Plugins', 'plugins-lua', 'Lua plugins', 'Persistent plugins in their own LuaJIT state, and the JIT switch.'),
   page('Plugins', 'plugins-rust', 'Rust plugins', 'WebAssembly components with the rift-plugin crate.'),
   page('Plugins', 'plugins-c', 'C plugins', 'WebAssembly components with wasi-sdk and the C SDK.'),
@@ -78,6 +78,7 @@ export const DOCS = [
 
   page('Reference', 'network-protocol', 'Network protocol', 'Supported releases, login, forwarding and backend switching for Java 1.8.9 through 26.3.'),
   page('Reference', 'translation-internals', 'How translation works', 'The translation pipeline, its data sources and how it is verified.'),
+  page('Reference', 'menus-internals', 'How menus work', 'The packets of inventory menus per protocol, the inventory request and how menus were tested.'),
   page('Reference', 'clustering-internals', 'How clustering works', 'The design of clustering: Raft, the replicated database, presence, the federated bus and leader work.'),
   page('Reference', 'stability','Stability and versioning', 'Release channels, what a version number promises and how the database upgrades.'),
   page('Reference', 'performance', 'Performance', 'CPU, memory and latency against Velocity, with reproducible runs.'),
