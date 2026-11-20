@@ -609,3 +609,33 @@ fn an_anvil_s_left_item_is_named_exactly_on_1_12() {
     let name = display(&left(393)).str("Name").unwrap().to_owned();
     assert!(name.contains("\"Steve\""), "{name}");
 }
+
+#[test]
+fn the_cache_keeps_to_its_bytes_whatever_a_player_types() {
+    // An anvil whose left item carries a large texture: every text the
+    // player types is another result stack of that size.
+    let texture = "e".repeat(30_000);
+    let mut menu = Menu::parse(&json!({
+        "id": "nick",
+        "type": "anvil",
+        "slots": [{"slot": 0, "item": "player_head", "head": {"texture": texture}}],
+    }))
+    .unwrap();
+    let budget = 1024 * 1024;
+    let cache = StackCache::bounded(4096, budget);
+    for typed in 0..200 {
+        menu.typed(format!("name {typed}"));
+        menu.slot_stack(crate::menu::ANVIL_RESULT, 777, &no_heads, &cache)
+            .unwrap();
+        assert!(cache.bytes() <= budget, "{} bytes", cache.bytes());
+    }
+    assert!(cache.len() < 200);
+    // Each stack is counted once, also when it is converted again.
+    let small = StackCache::bounded(16, usize::MAX);
+    let stone = newest(json!({"item": "stone"}));
+    small.encode(340, Some(&stone)).unwrap();
+    let once = small.bytes();
+    small.encode(340, Some(&stone)).unwrap();
+    assert_eq!(small.bytes(), once);
+    assert!(StackCache::shared().max_bytes <= 16 * 1024 * 1024);
+}

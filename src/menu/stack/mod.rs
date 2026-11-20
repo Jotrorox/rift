@@ -42,6 +42,10 @@ mod tests;
 
 /// Converted stacks the shared cache keeps before it starts over.
 const CACHE_ENTRIES: usize = 4096;
+/// Bytes of keys and stacks the shared cache keeps before it starts over:
+/// a stack can be large (32 lore lines, a head's texture), and an anvil's
+/// stacks change with every text the player types.
+const CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// Stack counts before 1.20.5 are shown up to this.
 const MAX_LEGACY_COUNT: i32 = 64;
 /// Item names became JSON text in 1.13.
@@ -348,22 +352,34 @@ fn legacy_upright(text: &str, color: char) -> String {
 }
 
 /// Converted stacks by client protocol, then by the newest-protocol stack's
-/// bytes.
-type Entries = HashMap<i32, HashMap<Vec<u8>, Arc<[u8]>>>;
+/// bytes, and the bytes of every key and stack together.
+#[derive(Default)]
+struct Entries {
+    stacks: HashMap<i32, HashMap<Vec<u8>, Arc<[u8]>>>,
+    bytes: usize,
+}
 
 /// Converted stacks by client protocol and newest-protocol stack, so a
 /// button shown to many players on one version is converted once.
 pub struct StackCache {
     entries: Mutex<Entries>,
     capacity: usize,
+    max_bytes: usize,
 }
 
 impl StackCache {
-    /// A cache that starts over after `capacity` stacks.
+    /// A cache that starts over after `capacity` stacks, or 16 MiB.
     pub fn new(capacity: usize) -> Self {
+        Self::bounded(capacity, CACHE_BYTES)
+    }
+
+    /// A cache that starts over after `capacity` stacks, or when its keys
+    /// and stacks would take more than `max_bytes`.
+    pub fn bounded(capacity: usize, max_bytes: usize) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(Entries::default()),
             capacity,
+            max_bytes,
         }
     }
 
@@ -384,26 +400,41 @@ impl StackCache {
         let key = key.into_inner();
         if let Some(bytes) = self
             .lock()
+            .stacks
             .get(&protocol)
             .and_then(|stacks| stacks.get(key.as_slice()))
         {
             return Ok(bytes.clone());
         }
         let bytes: Arc<[u8]> = encode(protocol, Some(stack))?.into();
+        let key_len = key.len();
+        let size = key_len + bytes.len();
         let mut entries = self.lock();
-        if entries.values().map(HashMap::len).sum::<usize>() >= self.capacity {
-            entries.clear();
+        let count: usize = entries.stacks.values().map(HashMap::len).sum();
+        if count >= self.capacity || entries.bytes + size > self.max_bytes {
+            *entries = Entries::default();
         }
-        entries
+        let replaced = entries
+            .stacks
             .entry(protocol)
             .or_default()
             .insert(key, bytes.clone());
+        entries.bytes += size;
+        // Another session may have converted the same stack meanwhile.
+        if let Some(old) = replaced {
+            entries.bytes -= key_len + old.len();
+        }
         Ok(bytes)
     }
 
     /// Stacks the cache holds.
     pub fn len(&self) -> usize {
-        self.lock().values().map(HashMap::len).sum()
+        self.lock().stacks.values().map(HashMap::len).sum()
+    }
+
+    /// Bytes of the keys and stacks the cache holds.
+    pub fn bytes(&self) -> usize {
+        self.lock().bytes
     }
 
     pub fn is_empty(&self) -> bool {
