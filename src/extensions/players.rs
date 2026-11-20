@@ -105,6 +105,12 @@ pub enum PlayerAction {
         owner: crate::dialog::Owner,
         id: Option<String>,
     },
+    /// Run `run` of the persistent plugin `owner` ended: close its menu,
+    /// whatever its `id`. Its `close` event reaches nobody.
+    EndMenus {
+        owner: crate::dialog::Owner,
+        run: u64,
+    },
     /// Leave this proxy: a 1.20.5+ client in configuration or play gets the
     /// Transfer packet to `host:port` (another peer of the cluster); any
     /// other is disconnected with `fallback`. Sent by a peer that drains.
@@ -526,6 +532,27 @@ pub(crate) fn dialog(value: Value) -> mlua::Result<crate::dialog::Dialog> {
         _ => Err("dialog expects a table or JSON text".into()),
     }
     .map_err(mlua::Error::runtime)
+}
+
+/// Queue `action` for a session even when its queue is full: then a task
+/// waits for room, as long as the session lives. For actions that must not
+/// be lost and are few, such as closing the menus of a plugin that stopped.
+/// False only when the session is gone or no runtime can wait.
+fn queue_surely(actions: &mpsc::Sender<PlayerAction>, action: PlayerAction) -> bool {
+    match actions.try_send(action) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(action)) => {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                return false;
+            };
+            let actions = actions.clone();
+            drop(runtime.spawn(async move {
+                let _ = actions.send(action).await;
+            }));
+            true
+        }
+    }
 }
 
 /// Values of a menu table built in Lua.
@@ -1104,10 +1131,19 @@ impl Players {
     /// Queue `action` for this peer's players on `servers` (everyone for
     /// `None`) and count those that accepted it.
     fn broadcast_local(&self, servers: Option<&BTreeSet<String>>, action: &PlayerAction) -> usize {
+        let surely = matches!(action, PlayerAction::EndMenus { .. });
         self.lock()
             .values()
             .filter(|entry| servers.is_none_or(|servers| servers.contains(&entry.server)))
-            .filter(|entry| entry.actions.try_send(action.clone()).is_ok())
+            .filter(|entry| {
+                if surely {
+                    // Only clients that can show a menu can have one open.
+                    crate::protocol::menus_supported(entry.protocol)
+                        && queue_surely(&entry.actions, action.clone())
+                } else {
+                    entry.actions.try_send(action.clone()).is_ok()
+                }
+            })
             .count()
     }
 
@@ -1770,6 +1806,7 @@ impl Players {
         target: &str,
         menu: Option<crate::menu::Menu>,
         owner: crate::dialog::Owner,
+        run: u64,
         id: Option<String>,
     ) -> std::io::Result<bool> {
         self.menu_action(target, owner, |sessions, owner| match menu {
@@ -1777,9 +1814,27 @@ impl Players {
                 heads: Arc::new(heads(sessions, menu.slots().iter().flatten())),
                 menu: Arc::new(menu),
                 owner,
+                run,
             }),
             None => PlayerAction::CloseMenu { owner, id },
         })
+    }
+
+    /// Run `run` of the persistent plugin `plugin` ended: close its menus
+    /// for every player of this peer and of every other peer. The action
+    /// cannot be lost to a full queue (see [`queue_surely`]).
+    pub fn end_menus(&self, plugin: &str, run: u64) {
+        let owner = crate::dialog::Owner::Plugin(plugin.to_owned());
+        let action = PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run,
+        };
+        self.broadcast_local(None, &action);
+        let remote = PlayerAction::EndMenus {
+            owner: self.remote_owner(owner),
+            run,
+        };
+        self.fan_out(None, &remote);
     }
 
     /// Change part of the menu `id` that `owner` showed the player, if it is
@@ -2126,6 +2181,7 @@ impl Players {
             PlayerAction::Menu(_)
             | PlayerAction::UpdateMenu(_)
             | PlayerAction::CloseMenu { .. }
+            | PlayerAction::EndMenus { .. }
                 if !crate::protocol::menus_supported(entry.protocol) =>
             {
                 WireResult::Sent(false)
@@ -2153,6 +2209,9 @@ impl Players {
                         .try_send(PlayerAction::UpdateMenu(update))
                         .is_ok()
                 }))
+            }
+            action @ PlayerAction::EndMenus { .. } => {
+                WireResult::Sent(queue_surely(&entry.actions, action))
             }
             action => WireResult::Sent(entry.actions.try_send(action).is_ok()),
         }
@@ -2533,7 +2592,7 @@ impl Players {
                 charge()?;
                 let menu = players.rendering_for(None, &target, || menu(spec))?;
                 players
-                    .menu(&target, Some(menu), crate::dialog::Owner::Script, None)
+                    .menu(&target, Some(menu), crate::dialog::Owner::Script, 0, None)
                     .map_err(lua_error)
             })?,
         )?;
@@ -2554,7 +2613,7 @@ impl Players {
             lua.create_function(move |_, (target, id): (String, Option<String>)| {
                 charge()?;
                 players
-                    .menu(&target, None, crate::dialog::Owner::Script, id)
+                    .menu(&target, None, crate::dialog::Owner::Script, 0, id)
                     .map_err(lua_error)
             })?,
         )?;

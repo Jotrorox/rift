@@ -529,17 +529,18 @@ async fn menus_for_another_peers_players_bring_their_events_back() {
 
     // Shown from A to a player of B: the menu crosses whole.
     assert!(
-        a.menu("Alice", Some(menu.clone()), owner.clone(), None)
+        a.menu("Alice", Some(menu.clone()), owner.clone(), 7, None)
             .unwrap()
     );
     let PlayerAction::Menu(shown) = next(&mut alice).await else {
         panic!("expected a menu");
     };
     assert_eq!(shown.owner, remote);
+    assert_eq!(shown.run, 7);
     assert_eq!(*shown.menu, menu);
     // A client older than 1.12 gets none.
     assert!(
-        !a.menu("Old", Some(menu.clone()), owner.clone(), None)
+        !a.menu("Old", Some(menu.clone()), owner.clone(), 7, None)
             .unwrap()
     );
 
@@ -558,7 +559,7 @@ async fn menus_for_another_peers_players_bring_their_events_back() {
     );
     assert!(!a.update_menu("Old", "shop", patch, owner.clone()).unwrap());
     assert!(
-        a.menu("Alice", None, owner.clone(), Some("shop".into()))
+        a.menu("Alice", None, owner.clone(), 7, Some("shop".into()))
             .unwrap()
     );
     assert_eq!(
@@ -566,6 +567,16 @@ async fn menus_for_another_peers_players_bring_their_events_back() {
         PlayerAction::CloseMenu {
             owner: remote.clone(),
             id: Some("shop".into())
+        }
+    );
+    // The run of the plugin that showed it ends: its menus close on every
+    // peer, for the owner as the other peer names it.
+    a.end_menus("shop", 7);
+    assert_eq!(
+        next(&mut alice).await,
+        PlayerAction::EndMenus {
+            owner: remote.clone(),
+            run: 7
         }
     );
 
@@ -578,10 +589,11 @@ async fn menus_for_another_peers_players_bring_their_events_back() {
     else {
         unreachable!();
     };
-    for event in [
+    for mut event in [
         MenuEvent::click(&menu, 0, Click::Left, None),
         MenuEvent::close(&menu, CloseReason::Plugin),
     ] {
+        event.run = 7;
         let context = Context {
             id: alice.connection,
             name: "Alice".into(),
@@ -598,6 +610,8 @@ async fn menus_for_another_peers_players_bring_their_events_back() {
         *owner == Owner::Plugin("shop".into()) && context.name == "Alice"
     }));
     let click = events[0].1.menu.as_ref().unwrap();
+    // The run that showed the menu comes back with each event.
+    assert_eq!(click.run, 7);
     assert_eq!(
         (click.action.as_deref(), &click.payload, &click.state),
         (
@@ -945,6 +959,7 @@ fn player_actions_and_their_answers_cross_the_wire() {
         },
         PlayerAction::ClearDialog,
         PlayerAction::Menu(crate::menu::Shown {
+            run: 3,
             menu: Arc::new(
                 crate::menu::Menu::parse(&json!({
                     "id": "shop", "type": "hopper", "title": {"text": "Shop", "bold": true},

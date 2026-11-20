@@ -1222,6 +1222,9 @@ pub async fn handle(
                             PlayerAction::CloseMenu { owner, id } => {
                                 timeout(HANDSHAKE_TIMEOUT, session.close_menu(&owner, id.as_deref())).await??;
                             }
+                            PlayerAction::EndMenus { owner, run } => {
+                                timeout(HANDSHAKE_TIMEOUT, session.end_menus_of(&owner, run)).await??;
+                            }
                             PlayerAction::Transfer(target) => {
                                 if !session.can_switch() { continue; }
                                 let result = match network.switch_for(&mut session, &current_backend, &[target], event, "extension").await {

@@ -1859,13 +1859,15 @@ async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
     )
     .await;
     let host = runtime.plugins();
+    let run = host.active()[0].run();
     let event = |id: &str, close: bool| {
         let menu = crate::menu::Menu::parse(&serde_json::json!({"id": id})).unwrap();
-        let event = if close {
+        let mut event = if close {
             crate::menu::MenuEvent::close(&menu, crate::menu::CloseReason::Player)
         } else {
             crate::menu::MenuEvent::text(&menu)
         };
+        event.run = run;
         Context {
             menu: Some(event),
             ..Context::default()
@@ -1889,7 +1891,7 @@ async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
     host.menu("shop", event("late", false));
     release.send(()).unwrap();
     let mut received = Vec::new();
-    while received.len() < worker::QUEUE + 3 {
+    while received.last().is_none_or(|last| last != "close:three") {
         received.push(
             timeout(Duration::from_secs(5), events.recv())
                 .await
@@ -1897,13 +1899,15 @@ async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
                 .unwrap(),
         );
     }
+    // Rift's own events (`rift.events`) may have taken a place or two.
+    let clicks = received.len() - 3;
     assert!(
-        received[..worker::QUEUE]
-            .iter()
-            .all(|event| event == "text:click")
+        clicks <= worker::QUEUE && clicks + 4 >= worker::QUEUE,
+        "{clicks}"
     );
+    assert!(received[..clicks].iter().all(|event| event == "text:click"));
     assert_eq!(
-        received[worker::QUEUE..],
+        received[clicks..],
         ["close:one", "close:two", "close:three"]
     );
     assert!(
@@ -1918,4 +1922,133 @@ async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
         .unwrap();
     assert_eq!(after.as_deref(), Some("text:after"));
     runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_stops_closes_its_menus_and_no_later_run_gets_their_events() {
+    use crate::{extensions::PlayerAction, menu::Menu};
+    let root = directory();
+    let mocks = Mocks::default();
+    let (seen, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let kept: Arc<Mutex<Option<services::Services>>> = Arc::default();
+    {
+        let kept = kept.clone();
+        mocks.plan(
+            "shop",
+            Plan::new(move |event, services| {
+                let Event::Menu(context) = event else {
+                    return Ok(Reply::default_for(event.hook()));
+                };
+                let Some(menu) = &context.menu else {
+                    return Ok(Reply::default_for(event.hook()));
+                };
+                match menu.menu.as_str() {
+                    "show" => {
+                        *kept.lock().unwrap() = Some(services.clone());
+                        let shop = Menu::parse(&serde_json::json!({"id": "shop"})).unwrap();
+                        let shown = services.players().show_menu(&context.name, shop);
+                        let _ = seen.send(format!("shown {shown:?}"));
+                    }
+                    "crash" => return Err(CallError::Fatal("crash".into())),
+                    id => {
+                        let _ = seen.send(format!("{}:{id}", menu.kind.name()));
+                    }
+                }
+                Ok(Reply::default_for(event.hook()))
+            }),
+        );
+    }
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config("", vec![spec(&root, "shop", "", "{}")]),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    let host = runtime.plugins();
+    let owner = crate::dialog::Owner::Plugin("shop".into());
+    let event = |id: &str, run: u64, close: bool| {
+        let menu = Menu::parse(&serde_json::json!({"id": id})).unwrap();
+        let mut event = if close {
+            crate::menu::MenuEvent::close(&menu, crate::menu::CloseReason::Player)
+        } else {
+            crate::menu::MenuEvent::text(&menu)
+        };
+        event.run = run;
+        Context {
+            name: "Player1".into(),
+            menu: Some(event),
+            ..Context::default()
+        }
+    };
+    let mut seen = async || {
+        timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let mut action = async || {
+        timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    // The plugin's first run shows a menu, which carries that run.
+    let first = host.active()[0].run();
+    assert_ne!(first, 0);
+    host.menu("shop", event("show", first, false));
+    assert_eq!(seen().await, "shown Ok(true)");
+    let PlayerAction::Menu(shown) = action().await else {
+        panic!("expected the menu");
+    };
+    assert_eq!((&shown.owner, shown.run), (&owner, first));
+
+    // An operator restart ends the run: its menus close everywhere.
+    host.restart("shop", "test").unwrap().await;
+    assert_eq!(
+        action().await,
+        PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: first
+        }
+    );
+    eventually("the new instance", Duration::from_secs(5), || {
+        host.active()[0].status() == Status::Running
+    })
+    .await;
+    let second = host.active()[0].run();
+    assert!(second != 0 && second != first);
+    // The new instance gets none of the old menus' events, the close
+    // included, and the old run shows no more menus.
+    host.menu("shop", event("old", first, false));
+    host.menu("shop", event("old", first, true));
+    let old = kept.lock().unwrap().take().unwrap();
+    let shop = Menu::parse(&serde_json::json!({"id": "shop"})).unwrap();
+    assert_eq!(old.players().show_menu("Player1", shop), Ok(false));
+    host.menu("shop", event("fresh", second, false));
+    assert_eq!(seen().await, "text:fresh");
+
+    // A failure ends the run too.
+    host.menu("shop", event("show", second, false));
+    assert_eq!(seen().await, "shown Ok(true)");
+    let PlayerAction::Menu(shown) = action().await else {
+        panic!("expected the menu");
+    };
+    assert_eq!(shown.run, second);
+    host.menu("shop", event("crash", second, false));
+    assert_eq!(
+        action().await,
+        PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: second
+        }
+    );
+    // A run that showed no menu closes none when it ends.
+    runtime.plugins().shutdown().await;
+    assert!(actions.try_recv().is_err());
+    assert!(events.try_recv().is_err());
 }

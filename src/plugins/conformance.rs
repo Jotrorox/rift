@@ -1104,7 +1104,12 @@ pub(crate) async fn menus_reach_the_plugin_that_showed_them(fixture: &dyn Fixtur
     assert_eq!(anvil.menu.kind(), crate::menu::Kind::Anvil);
     assert!(anvil.menu.typing());
 
-    let deliver = async |event| {
+    // Events carry the run of the plugin that showed the menu.
+    assert_ne!(chest.run, 0);
+    assert_eq!(anvil.run, chest.run);
+    let run = chest.run;
+    let deliver = async |mut event: MenuEvent| {
+        event.run = run;
         player
             .menu(Delivery {
                 owner: owner.clone(),
@@ -1359,7 +1364,8 @@ async fn server_selector(
         assert_eq!(menu.slots()[slot].as_ref().unwrap().look.lore.len(), 1);
     }
     assert!(menu.slots()[22].as_ref().unwrap().action.close);
-    let deliver = async |event| {
+    let deliver = async |mut event: crate::menu::MenuEvent| {
+        event.run = shown.run;
         player
             .menu(Delivery {
                 owner: shown.owner.clone(),

@@ -366,8 +366,10 @@ impl Menus {
         (slots > 0).then_some(usize::from(slots))
     }
 
-    fn delivery(&self, owner: Owner, mut event: MenuEvent) -> Delivery {
+    /// The event for the run `run` of `owner`, which showed the menu.
+    fn delivery(&self, owner: Owner, run: u64, mut event: MenuEvent) -> Delivery {
         event.ticket = Ticket::new(&self.undelivered);
+        event.run = run;
         Delivery { owner, event }
     }
 
@@ -375,7 +377,7 @@ impl Menus {
     /// so its plugin learns that it did not reach the player.
     fn refuse(&mut self, shown: &Shown, reason: CloseReason) {
         let event = MenuEvent::close(&shown.menu, reason);
-        let delivery = self.delivery(shown.owner.clone(), event);
+        let delivery = self.delivery(shown.owner.clone(), shown.run, event);
         self.closed.push_back(delivery);
     }
 
@@ -399,7 +401,7 @@ impl Menus {
             self.rift_ended = Some(Instant::now());
         }
         let event = MenuEvent::close(&open.menu, reason);
-        let delivery = self.delivery(open.owner, event);
+        let delivery = self.delivery(open.owner, open.shown.run, event);
         self.closed.push_back(delivery);
         let leaving = matches!(reason, CloseReason::Switch | CloseReason::Disconnect);
         if !leaving
@@ -565,6 +567,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if let Some(open) = &self.menus.open
             && open.menu.id() == menu.id()
             && open.owner == shown.owner
+            && open.shown.run == shown.run
         {
             menu.keep_text(&open.menu);
             if !open.menu.diff(&menu).reopen {
@@ -623,9 +626,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if let Some(old) = self.menus.open.take() {
             // The same menu with another type or number of rows opens anew,
             // which is no ending either.
-            if old.menu.id() != open.menu.id() || old.owner != open.owner {
+            if old.menu.id() != open.menu.id()
+                || old.owner != open.owner
+                || old.shown.run != open.shown.run
+            {
                 let event = MenuEvent::close(&old.menu, CloseReason::Replaced);
-                let delivery = self.menus.delivery(old.owner, event);
+                let delivery = self.menus.delivery(old.owner, old.shown.run, event);
                 self.menus.closed.push_back(delivery);
             }
         } else if let Some(backend_container) = self.menus.backend_container.take()
@@ -672,6 +678,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         let shown = Shown {
             menu: Arc::new(menu.clone()),
             owner: update.owner,
+            run: open.shown.run,
             heads: Arc::new(heads),
         };
         self.client.flush_pending().await?;
@@ -801,6 +808,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.end_menu(CloseReason::Plugin, true)?;
         self.flush_injected().await
     }
+    /// Run `run` of `owner` ended: its menu closes on the client with the
+    /// `plugin` ending, whatever its `id`. The event reaches no later run.
+    pub async fn end_menus_of(&mut self, owner: &Owner, run: u64) -> io::Result<()> {
+        let matches = self
+            .menus
+            .open
+            .as_ref()
+            .is_some_and(|open| open.owner == *owner && open.shown.run == run);
+        if !matches {
+            return Ok(());
+        }
+        self.client.flush_pending().await?;
+        self.end_menu(CloseReason::Plugin, true)?;
+        self.flush_injected().await
+    }
+
     /// The menu events the session holds for its owner to deliver, oldest
     /// first: every ending of a menu. Clicks come as [`SessionEvent::Menu`].
     pub fn take_menu_events(&mut self) -> Vec<Delivery> {
@@ -896,7 +919,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             if undelivered < menu::MAX_PENDING_EVENTS {
                 let event = MenuEvent::text(&open.menu);
                 let owner = open.owner.clone();
-                return Ok(SessionEvent::Menu(self.menus.delivery(owner, event)));
+                let run = open.shown.run;
+                return Ok(SessionEvent::Menu(self.menus.delivery(owner, run, event)));
             }
         }
         Ok(SessionEvent::Packet)
@@ -1024,7 +1048,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         {
             let event = MenuEvent::text(&open.menu);
             let owner = open.owner.clone();
-            return Ok(SessionEvent::Menu(self.menus.delivery(owner, event)));
+            let run = open.shown.run;
+            return Ok(SessionEvent::Menu(self.menus.delivery(owner, run, event)));
         }
         Ok(SessionEvent::Packet)
     }
@@ -1056,6 +1081,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 if button.action.reports(kind) && undelivered < menu::MAX_PENDING_EVENTS {
                     report = Some((
                         open.owner.clone(),
+                        open.shown.run,
                         MenuEvent::click(&open.menu, slot, kind, key),
                     ));
                 }
@@ -1105,7 +1131,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             self.menus.request_inventory(version, backend)?;
         }
         let event = match report {
-            Some((owner, event)) => SessionEvent::Menu(self.menus.delivery(owner, event)),
+            Some((owner, run, event)) => SessionEvent::Menu(self.menus.delivery(owner, run, event)),
             None => SessionEvent::Packet,
         };
         if close {

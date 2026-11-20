@@ -941,17 +941,21 @@ impl Host {
     }
 
     /// Queue a menu event for the persistent plugin `name`, which showed the
-    /// menu. Dropped when no plugin of that name is active; a `close` event
-    /// is never dropped for a full queue (see [`Instance::notify_close`]).
+    /// menu, if the run of it that showed the menu still runs. Dropped
+    /// otherwise: a restarted or replaced plugin never receives events of
+    /// menus its predecessor showed, which Rift closed when that run ended.
+    /// A `close` event is never dropped for a full queue (see
+    /// [`Instance::notify_close`]).
     pub(crate) fn menu(&self, name: &str, input: Context) {
-        let close = input
-            .menu
-            .as_ref()
-            .is_some_and(|event| event.kind == crate::menu::EventKind::Close);
+        let Some(event) = input.menu.as_ref() else {
+            return;
+        };
+        let close = event.kind == crate::menu::EventKind::Close;
+        let run = event.run;
         if let Some(instance) = self
             .active()
             .iter()
-            .find(|instance| instance.name() == name)
+            .find(|instance| instance.name() == name && instance.run() == run && run != 0)
         {
             if close {
                 let queued = instance.notify_close(Event::Menu(input));

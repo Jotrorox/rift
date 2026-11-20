@@ -241,11 +241,39 @@ plugin, when it sees:
 | A respawn, or a new login from the backend | | `server` |
 | The start of a server switch | Sends `container_close` | `switch` |
 | A reconfiguration by the backend, which closes every screen | | `switch` |
+| The end of the run of the plugin that showed it (see below) | Sends `container_close` | `plugin`, received by nobody |
 | The end of the session | | `disconnect` |
 
 A menu that never reached the player still ends once: with `switch` when the
 action met the player between servers, and with `server` when its stacks
 could not be built for the client, which Rift logs as a warning.
+
+### Runs of a plugin
+
+Each start of a persistent plugin's engine, a restart after a failure
+included, is a new run with a number unique in the process. A menu carries
+the run that showed it (`Shown::run`), and so does each of its events, also
+across peers. Rift hands an event only to the active instance of that name
+whose current run is the event's; anything else is dropped. A new instance
+therefore never receives an event of a menu its predecessor showed.
+
+A run ends when Rift asks the plugin to stop (removal, a replacement on a
+reload, an operator restart, shutdown), when it fails, and when its engine
+could not start. From the moment Rift asks it to stop, the plugin's thread
+skips every queued event and calls `shutdown` last, so a stopping plugin
+cannot receive the `close` events of its menus; a failed engine is gone.
+When a run that showed a menu ends, Rift queues an action for every session
+of this peer that can show menus, and sends it to every other peer for
+theirs: close the menu of that plugin and run, whatever its `id`. The action
+waits for room in a full session queue instead of being dropped. A run that
+ended shows, changes and closes no more menus. A menu queued for a player of
+another peer just before its run ended can still arrive after the action
+there; its events then reach nobody.
+
+The configuration script has no runs: its callbacks start with a fresh Lua
+state each time, so its menus stay open across a reload.
+
+### Close events and full queues
 
 A `close` event is never dropped while its plugin runs. When the plugin's
 queue (1024 events) is full, the event waits behind it and is delivered once
@@ -298,8 +326,9 @@ the anvil's text and every limit of a definition. A peer of another build
 cannot make it index past a menu's slots; it refuses such a menu or patch,
 logs why, and the calling peer logs the refusal too. The owner is recorded as the calling
 peer and plugin, so the session's events go back over the `player` stream to
-the plugin that showed the menu. An event counts toward the player's 32
-undelivered events until it was handed to that peer.
+the plugin that showed the menu, with the run that showed it. An event
+counts toward the player's 32 undelivered events until it was handed to that
+peer.
 
 ## What stays true
 

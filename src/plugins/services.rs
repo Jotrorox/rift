@@ -90,6 +90,9 @@ struct Inner {
     /// A background worker: no hooks, timers, subscriptions or jobs of its
     /// own.
     worker: bool,
+    /// The engine's run these services belong to (see
+    /// [`crate::menu::Shown::run`]); its background workers share it.
+    run: u64,
 }
 
 impl Drop for Inner {
@@ -112,6 +115,7 @@ impl Services {
         queue: Queue,
         handle: tokio::runtime::Handle,
         shared: Arc<Shared>,
+        run: u64,
     ) -> Self {
         Self(Arc::new(Inner {
             spec,
@@ -124,6 +128,7 @@ impl Services {
             closed: Arc::default(),
             dropped: AtomicU64::new(0),
             worker: false,
+            run,
         }))
     }
 
@@ -142,6 +147,7 @@ impl Services {
             closed: self.0.closed.clone(),
             dropped: AtomicU64::new(0),
             worker: true,
+            run: self.0.run,
         }))
     }
 
@@ -488,12 +494,23 @@ impl PlayersApi<'_> {
         self.show_menu(target, menu)
     }
 
+    /// Whether this run of the engine is still the current one. A run that
+    /// ended (it was stopped, failed, or was abandoned) shows, changes and
+    /// closes no menus: Rift closed its menus when it ended.
+    fn current_run(&self) -> bool {
+        self.0.shared.run() == self.0.run
+    }
+
     /// Show an already validated menu on behalf of this plugin (see
-    /// [`PlayersApi::for_target`]).
+    /// [`PlayersApi::for_target`]). False once this run of the plugin ended.
     pub fn show_menu(&self, target: &str, menu: crate::menu::Menu) -> Result<bool, String> {
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
-        self.players()
-            .menu(target, Some(menu), owner, None)
+        let run = self.0.run;
+        self.0
+            .shared
+            .show_menu(run, || {
+                self.players().menu(target, Some(menu), owner, run, None)
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -517,6 +534,9 @@ impl PlayersApi<'_> {
         id: &str,
         patch: crate::menu::Patch,
     ) -> Result<bool, String> {
+        if !self.current_run() {
+            return Ok(false);
+        }
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
         self.players()
             .update_menu(target, id, patch, owner)
@@ -526,9 +546,12 @@ impl PlayersApi<'_> {
     /// `players.close-menu`: close this plugin's menu `id`, or with `None`
     /// whatever menu of Rift's is open.
     pub fn close_menu(&self, target: &str, id: Option<&str>) -> Result<bool, String> {
+        if !self.current_run() {
+            return Ok(false);
+        }
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
         self.players()
-            .menu(target, None, owner, id.map(str::to_owned))
+            .menu(target, None, owner, self.0.run, id.map(str::to_owned))
             .map_err(|error| error.to_string())
     }
 

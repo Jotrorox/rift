@@ -380,6 +380,68 @@ pub(crate) struct Shared {
     /// host queues no other observer event, so no menu event overtakes
     /// them. Bounded by the menus the plugin showed: one ending each.
     overflow: Mutex<VecDeque<Event>>,
+    /// The engine's current run, 0 while none runs: each start of the
+    /// engine, restarts included, is a new run. Menus carry the run that
+    /// showed them, and only that run receives their events.
+    run: AtomicU64,
+    /// Whether the current run showed a menu. Held while a menu is queued,
+    /// so a run that ends meanwhile closes it too: the menu is queued before
+    /// the end, or refused after it.
+    showed_menus: Mutex<bool>,
+    /// Where the menus of a run that ended are closed.
+    players: crate::extensions::Players,
+}
+
+/// Runs of every instance in this process, so that no two share one.
+static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
+
+impl Shared {
+    /// The engine's current run, 0 while none runs.
+    pub(crate) fn run(&self) -> u64 {
+        self.run.load(Ordering::Acquire)
+    }
+
+    /// Start a new run of the engine.
+    fn start_run(&self) -> u64 {
+        let _showed = self.showed_menus.lock().unwrap();
+        let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+        self.run.store(run, Ordering::Release);
+        run
+    }
+
+    /// Queue a menu for run `run` with `show`, unless that run ended: then
+    /// nothing is queued and the result is false.
+    pub(crate) fn show_menu(
+        &self,
+        run: u64,
+        show: impl FnOnce() -> std::io::Result<bool>,
+    ) -> std::io::Result<bool> {
+        let mut showed = self.showed_menus.lock().unwrap();
+        if self.run() != run {
+            return Ok(false);
+        }
+        *showed = true;
+        show()
+    }
+
+    /// The current run ended: it was stopped, failed, or was abandoned. It
+    /// can no longer receive events, so Rift closes the menus it showed, for
+    /// every player on every peer, and no later run gets their events. Its
+    /// `close` events that waited for the queue are dropped with it.
+    fn end_run(&self, plugin: &str) {
+        let mut showed = self.showed_menus.lock().unwrap();
+        let run = self.run.swap(0, Ordering::AcqRel);
+        if run != 0 {
+            self.overflow.lock().unwrap().clear();
+            // A run that showed no menu has none to close. A menu queued for
+            // a player of another peer travels on its own, so one queued just
+            // before the end can still arrive after it there; its events
+            // then reach nobody.
+            if std::mem::take(&mut *showed) {
+                self.players.end_menus(plugin, run);
+            }
+        }
+    }
 }
 
 /// What an awaited call produced.
@@ -556,6 +618,9 @@ impl Instance {
             abandon_at: OnceLock::new(),
             background: Background::default(),
             overflow: Mutex::default(),
+            run: AtomicU64::new(0),
+            showed_menus: Mutex::new(false),
+            players: base.players.clone(),
         });
         let spec = Arc::new(spec);
         let instance = Arc::new(Self {
@@ -594,6 +659,11 @@ impl Instance {
 
     pub fn status(&self) -> Status {
         *self.shared.status.borrow()
+    }
+
+    /// The engine's current run (see [`Shared::run`]), 0 while none runs.
+    pub(crate) fn run(&self) -> u64 {
+        self.shared.run()
     }
 
     pub fn report(&self) -> Report {
@@ -782,6 +852,7 @@ impl Instance {
     /// engine if it had not yet.
     pub(crate) fn abort(&self) {
         self.shared.closing.store(true, Ordering::Release);
+        self.shared.end_run(&self.spec.name);
         let _ = self.queue.try_send(Job::Shutdown);
     }
 
@@ -817,11 +888,15 @@ impl Instance {
 
     /// Ask the instance to run `shutdown` and wait up to its grace period.
     /// An instance that does not finish in time is told to stop and left to
-    /// its thread; it no longer receives events either way.
+    /// its thread; it no longer receives events either way. Its run ends at
+    /// once: from here on the thread skips every queued event and calls
+    /// `shutdown` last, so the menus it showed are closed now and their
+    /// `close` events reach nobody.
     pub(crate) async fn shutdown(&self) {
         let grace = self.spec.manifest.shutdown_grace();
         let _ = self.shared.abandon_at.set(Instant::now() + grace);
         self.shared.closing.store(true, Ordering::Release);
+        self.shared.end_run(&self.spec.name);
         // A full queue is fine: the thread checks `closing` after every job.
         let _ = self.queue.try_send(Job::Shutdown);
         if tokio::time::timeout(grace, self.exited()).await.is_err() {
@@ -975,12 +1050,14 @@ impl Worker {
         while !self.closing() {
             attempted = true;
             self.shared.status.send_replace(Status::Starting);
+            let run = self.shared.start_run();
             let services = Services::new(
                 self.spec.clone(),
                 self.base.clone(),
                 self.queue.clone(),
                 self.handle.clone(),
                 self.shared.clone(),
+                run,
             );
             let mut ran = false;
             let mut retry = true;
@@ -1029,6 +1106,8 @@ impl Worker {
                     retry = false;
                 }
             }
+            // The engine is gone, or never started.
+            self.shared.end_run(&self.spec.name);
             let restart = retry
                 && match self.spec.manifest.restart {
                     Restart::Never => false,
@@ -1047,6 +1126,7 @@ impl Worker {
             self.publish("restarting", None);
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
+        self.shared.end_run(&self.spec.name);
         self.registrar.release(self.id);
         if !attempted {
             // Aborted before it ever started: nothing to announce.

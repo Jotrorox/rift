@@ -125,6 +125,7 @@ fn shown(spec: serde_json::Value, owner: Owner) -> Shown {
     Shown {
         menu: Arc::new(Menu::parse(&spec).unwrap()),
         owner,
+        run: 0,
         heads: Arc::default(),
     }
 }
@@ -2203,6 +2204,51 @@ async fn fast_renames_build_the_result_at_most_every_interval_and_always_for_the
         assert_eq!(slot_of(protocol, &packets[0]).1, RESULT);
         assert!(contains(&packets[0], "Alex"), "{packets:?}");
         assert!(!session.menus.open.as_ref().unwrap().result_stale);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_menus_of_a_run_that_ended_close_and_a_later_run_s_menu_replaces_them() {
+    timeout(Duration::from_secs(5), async {
+        let protocol = 774;
+        let (mut session, mut client, _backend) = menu_session(protocol).await;
+        let mut first = shown(shop(), owner());
+        first.run = 5;
+        session.show_menu(first).await.unwrap();
+        drain(&mut client).await;
+        // Another run of the same plugin, or another plugin: not this menu.
+        session.end_menus_of(&owner(), 4).await.unwrap();
+        let other = Owner::Plugin("other".into());
+        session.end_menus_of(&other, 5).await.unwrap();
+        assert!(session.menu_open());
+        nothing(&mut client).await;
+        // A later run showing the same `id` opens it anew, no redraw: the
+        // old run's menu ends with `replaced`, carrying its own run.
+        let mut second = shown(shop(), owner());
+        second.run = 6;
+        session.show_menu(second).await.unwrap();
+        let packets = drain(&mut client).await;
+        assert_eq!(packets[0].id, id(protocol, CB, "open_screen"));
+        let ends = session.take_menu_events();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(
+            (ends[0].event.reason, ends[0].event.run),
+            (Some(CloseReason::Replaced), 5)
+        );
+        // The run that showed it ends: the client closes it.
+        session.end_menus_of(&owner(), 6).await.unwrap();
+        assert!(!session.menu_open());
+        assert_eq!(
+            next(&mut client).await,
+            packets::close(version(protocol), FIRST + 1).unwrap()
+        );
+        let ends = session.take_menu_events();
+        assert_eq!(
+            (ends[0].event.reason, ends[0].event.run),
+            (Some(CloseReason::Plugin), 6)
+        );
     })
     .await
     .unwrap();

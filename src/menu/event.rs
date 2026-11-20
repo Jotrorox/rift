@@ -88,6 +88,10 @@ pub struct MenuEvent {
     pub reason: Option<CloseReason>,
     /// The menu's `state`, as the plugin last set it.
     pub state: Option<Value>,
+    /// The run of the owner that showed the menu (see [`Shown::run`]): only
+    /// that run receives the event. Not shown to plugins.
+    #[serde(default)]
+    pub run: u64,
     /// Counts the event among the player's undelivered ones until the plugin
     /// receives it.
     #[serde(skip)]
@@ -107,6 +111,7 @@ impl MenuEvent {
             text: (menu.kind() == super::Kind::Anvil).then(|| menu.text().to_owned()),
             reason: None,
             state: menu.state().cloned(),
+            run: 0,
             ticket: Ticket::default(),
         }
     }
@@ -187,6 +192,12 @@ impl Eq for Ticket {}
 pub struct Shown {
     pub menu: Arc<Menu>,
     pub owner: Owner,
+    /// Which run of a persistent plugin showed the menu: each start of its
+    /// engine, restarts included, is a new run, and when a run ends Rift
+    /// closes its menus and delivers their events to no later one. 0 for
+    /// the configuration script, whose callbacks keep no state.
+    #[serde(default)]
+    pub run: u64,
     pub heads: Arc<BTreeMap<String, Textures>>,
 }
 
@@ -199,7 +210,10 @@ impl Shown {
 
 impl PartialEq for Shown {
     fn eq(&self, other: &Self) -> bool {
-        self.owner == other.owner && self.menu == other.menu && self.heads == other.heads
+        self.owner == other.owner
+            && self.run == other.run
+            && self.menu == other.menu
+            && self.heads == other.heads
     }
 }
 

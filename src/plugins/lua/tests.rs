@@ -600,7 +600,8 @@ assert(not ok and err:find("maps button ids to functions"), err)
     }
 
     use crate::menu::{Click, CloseReason, Delivery, MenuEvent};
-    let event = MenuEvent::click(&shown.menu, 13, Click::ShiftLeft, None);
+    let mut event = MenuEvent::click(&shown.menu, 13, Click::ShiftLeft, None);
+    event.run = shown.run;
     player
         .menu(Delivery {
             owner: owner.clone(),
@@ -608,7 +609,8 @@ assert(not ok and err:find("maps button ids to functions"), err)
         })
         .await
         .unwrap();
-    let event = MenuEvent::close(&shown.menu, CloseReason::Plugin);
+    let mut event = MenuEvent::close(&shown.menu, CloseReason::Plugin);
+    event.run = shown.run;
     player
         .menu(Delivery {
             owner: owner.clone(),
@@ -642,7 +644,15 @@ assert(not ok and err:find("maps button ids to functions"), err)
         })
         .await
         .unwrap();
+    // The plugin stops: the menus of its run close for every player.
     runtime.plugins().shutdown().await;
+    assert_eq!(
+        actions.try_recv().ok(),
+        Some(crate::extensions::PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: shown.run
+        })
+    );
     assert!(actions.try_recv().is_err());
 }
 
@@ -708,11 +718,12 @@ rift.menus.on("nick", {
             .unwrap()
             .unwrap()
     };
-    for event in [
+    for mut event in [
         MenuEvent::text(&typed("Al")),
         MenuEvent::click(&typed("Al"), ANVIL_RESULT, Click::Left, None),
         MenuEvent::click(&typed("Alex"), ANVIL_RESULT, Click::Left, None),
     ] {
+        event.run = shown.run;
         player
             .menu(Delivery {
                 owner: owner.clone(),

@@ -215,7 +215,8 @@ plugin's hooks, so call it while the entry script runs.
     for confirmation on those clients.
 - A player with 32 menu events their plugin has not received yet gets no
   more clicks or `text` events reported until the plugin catches up, as with
-  dialog clicks. `close` events are always delivered.
+  dialog clicks. `close` events are always delivered while the plugin
+  runs, even when its queue is full.
 
 ## State and payloads
 
@@ -363,9 +364,9 @@ rift.menus.on("nick", {
 
 ## How long a menu lives
 
-Every menu ends with exactly one `close` event, so a plugin that keeps
-something per open menu can always release it. A menu that could not be
-shown ends that way too.
+Every menu ends with exactly one `close` event while its plugin runs, so a
+plugin that keeps something per open menu can always release it. A menu
+that could not be shown ends that way too.
 
 | `reason` | The menu ended because |
 | --- | --- |
@@ -383,6 +384,16 @@ shown ends that way too.
   or dialog, so the player never has two screens.
 - A click that arrives while the player is switching servers is dropped,
   like a command.
+- **A plugin that stops** (it is removed, reloaded or restarted, it fails,
+  or Rift shuts down) receives no more events, so it gets no `close` event
+  for its menus: `shutdown` is its last call, and the place to release what
+  it keeps per menu. Rift closes every menu it has open, for every player
+  on every peer. The next instance starts with no menus and never receives
+  an event of a menu an earlier one showed. After a failure the menus close
+  before the plugin restarts.
+- Reloading `rift.lua` closes none of its menus: its callbacks keep no
+  state between events, so the next event of a menu it showed is handled
+  as before.
 
 ## What Rift accepts
 
