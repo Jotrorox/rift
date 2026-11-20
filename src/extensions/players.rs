@@ -224,6 +224,10 @@ pub struct Players {
     router: Arc<RwLock<Arc<dyn PlayerRouter>>>,
     /// What remote requests need from the running proxy.
     hooks: Arc<RwLock<Option<Arc<dyn SessionHooks>>>>,
+    /// Events of menus this peer showed to other peers' players that wait
+    /// for their plugin here, by player UUID. The player's own session
+    /// counts an event only until it crossed.
+    remote_menu_events: Arc<Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicUsize>>>>,
 }
 
 /// A player's tab list name: `format` with `{prefix}`, `{name}`, `{suffix}`,
@@ -685,6 +689,7 @@ impl Players {
             tab_format: Arc::default(),
             router: Arc::new(RwLock::new(Arc::new(LocalRouter))),
             hooks: Arc::default(),
+            remote_menu_events: Arc::default(),
         }
     }
 
@@ -1976,7 +1981,27 @@ impl Players {
                     None => WireResult::Error("this peer runs no extensions".into()),
                 }
             }
-            WireBody::MenuEvent { plugin, context } => {
+            WireBody::MenuEvent {
+                plugin,
+                mut context,
+            } => {
+                if let Some(event) = context.menu.as_mut() {
+                    let mut counts = self
+                        .remote_menu_events
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    // Players with no event waiting are forgotten.
+                    counts.retain(|_, count| Arc::strong_count(count) > 1);
+                    let count = counts.entry(context.uuid.clone()).or_default();
+                    // As in the player's session: an ending always goes.
+                    if event.kind != crate::menu::EventKind::Close
+                        && count.load(std::sync::atomic::Ordering::Relaxed)
+                            >= crate::menu::MAX_PENDING_EVENTS
+                    {
+                        return WireResult::Sent(false);
+                    }
+                    event.ticket = crate::menu::Ticket::new(count);
+                }
                 let owner = match plugin {
                     Some(plugin) => crate::dialog::Owner::Plugin(plugin),
                     None => crate::dialog::Owner::Script,

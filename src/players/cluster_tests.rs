@@ -1017,3 +1017,48 @@ fn player_actions_and_their_answers_cross_the_wire() {
         assert_eq!(serde_json::from_str::<WireResult>(&text).unwrap(), result);
     }
 }
+
+#[tokio::test]
+async fn events_of_a_menu_shown_from_another_peer_count_against_the_limit_there() {
+    use crate::menu::{Click, CloseReason, MAX_PENDING_EVENTS, Menu, MenuEvent};
+    let cluster = MemoryCluster::new();
+    let a = peer(&cluster, 1, 1);
+    let b = peer(&cluster, 2, 1);
+    let a_hooks = Arc::new(Hooks::default());
+    a.set_session_hooks(a_hooks.clone());
+    let alice = login(&b, 1, 1, "Alice", "lobby").await.unwrap();
+    cluster.pump();
+    let menu = Menu::parse(&json!({"id": "shop", "slots": [
+        {"slot": 0, "item": "diamond", "id": "buy"},
+    ]}))
+    .unwrap();
+    let route = |event| {
+        let context = Context {
+            id: alice.connection,
+            uuid: "01".repeat(16),
+            name: "Alice".into(),
+            menu: Some(event),
+            ..Context::default()
+        };
+        b.route_menu_event(1, 1, Some("shop".into()), context)
+    };
+    // A's plugin has not taken any of them yet: B's session counted each
+    // only until it crossed, so A counts them while they wait.
+    for _ in 0..MAX_PENDING_EVENTS + 8 {
+        route(MenuEvent::click(&menu, 0, Click::Left, None))
+            .await
+            .unwrap();
+    }
+    assert_eq!(a_hooks.menus.lock().unwrap().len(), MAX_PENDING_EVENTS);
+    // An ending always arrives.
+    route(MenuEvent::close(&menu, CloseReason::Player))
+        .await
+        .unwrap();
+    assert_eq!(a_hooks.menus.lock().unwrap().len(), MAX_PENDING_EVENTS + 1);
+    // Once the plugin has them, clicks arrive again.
+    a_hooks.menus.lock().unwrap().clear();
+    route(MenuEvent::click(&menu, 0, Click::Left, None))
+        .await
+        .unwrap();
+    assert_eq!(a_hooks.menus.lock().unwrap().len(), 1);
+}
