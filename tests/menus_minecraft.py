@@ -109,6 +109,7 @@ import re
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -800,19 +801,58 @@ TAPPED = {"window_click", "close_window", "transaction", "craft_recipe_request",
           "name_item", "select_trade", "set_beacon_effect", "set_creative_slot", "custom_payload"}
 
 
-class BackendTap:
+class TapRecords:
+    """What a backend received, decoded on demand."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.records = []        # (monotonic time, player, name, body or None, protocol)
+        self.errors = []
+        self.decoders = {}
+
+    def names(self, protocol, state):
+        if (protocol, state) not in self.decoders:
+            self.decoders[(protocol, state)] = protodef.Decoder(protodef.schema_for(protocol), state, "serverbound")
+        return self.decoders[(protocol, state)]
+
+    def received(self, player, names=None, since=0.0, until=None):
+        """[(time, name, value)] the backend got from `player`, decoded."""
+        names = {names} if isinstance(names, str) else names
+        with self.lock:
+            records = [r for r in self.records if r[1] == player and r[0] >= since
+                       and (until is None or r[0] <= until) and (names is None or r[2] in names)]
+        found = []
+        for when, _, name, body, protocol in records:
+            value = None
+            if body is not None:
+                decoder = self.names(protocol, "play")
+                try:
+                    value = self.decode(decoder, name, body)
+                except Exception as error:  # Kept, undecoded: still evidence.
+                    value = {"undecoded": str(error)}
+            found.append((when, name, value))
+        return found
+
+    @staticmethod
+    def decode(decoder, name, body):
+        packet_id = next(i for i, n in decoder.names.items() if n == name)
+        return decoder.packet(packet_id, body)[1]
+
+
+class BackendTap(TapRecords):
     """A loopback relay between Rift and a backend that records, per player,
     every serverbound play packet the backend receives: the evidence that a
     menu's packets never reach it. Bytes pass unchanged; it follows the
     handshake, compression and the login, configuration and play states.
-    The backend runs offline, so nothing is encrypted."""
+    The backend runs offline, so nothing is encrypted. It runs in a process
+    of its own (TapProcess), so its timestamps do not wait for the test
+    client's pure-Python encryption; `out` is the file it appends records
+    to, one JSON object per line."""
 
-    def __init__(self, target_port):
+    def __init__(self, target_port, out=None):
+        super().__init__()
         self.target = ("127.0.0.1", target_port)
-        self.lock = threading.Lock()
-        self.records = []        # (monotonic time, player, name, body or None)
-        self.errors = []
-        self.decoders = {}
+        self.out = open(out, "a", buffering=1) if out else None
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.sockets = []
@@ -830,7 +870,7 @@ class BackendTap:
         try:
             upstream = socket.create_connection(self.target, timeout=15)
         except OSError as error:
-            self.errors.append(f"tap could not reach the backend: {error}")
+            self.error(f"tap could not reach the backend: {error}")
             client.close()
             return
         upstream.settimeout(None)
@@ -858,8 +898,8 @@ class BackendTap:
                     try:
                         self.frame(frame, clientbound, session)
                     except Exception as error:  # Observation never breaks the stream.
-                        self.errors.append(f"tap lost sync ({'clientbound' if clientbound else 'serverbound'}): "
-                                           f"{type(error).__name__}: {error}")
+                        self.error(f"tap lost sync ({'clientbound' if clientbound else 'serverbound'}): "
+                                   f"{type(error).__name__}: {error}")
                         session["raw"] = True
                     out += raw
                     if clientbound and session["raw_clientbound"]:
@@ -886,16 +926,17 @@ class BackendTap:
                     except OSError:
                         pass
 
+    def error(self, text):
+        with self.lock:
+            self.errors.append(text)
+            if self.out:
+                self.out.write(json.dumps({"error": text}) + "\n")
+
     def payload(self, frame, session):
         if not session["compression"]:
             return frame
         size, offset = _read_varint(frame, 0)
         return frame[offset:] if size == 0 else zlib.decompress(frame[offset:])
-
-    def names(self, protocol, state):
-        if (protocol, state) not in self.decoders:
-            self.decoders[(protocol, state)] = protodef.Decoder(protodef.schema_for(protocol), state, "serverbound")
-        return self.decoders[(protocol, state)]
 
     def frame(self, frame, clientbound, session):
         if clientbound:
@@ -939,32 +980,14 @@ class BackendTap:
             return
         if name == "configuration_acknowledged":
             session["state"] = "configuration"
+        record = (time.monotonic(), session["player"], name, payload[offset:] if name in TAPPED else None,
+                  session["protocol"])
         with self.lock:
-            self.records.append((time.monotonic(), session["player"], name,
-                                 payload[offset:] if name in TAPPED else None, session["protocol"]))
-
-    def received(self, player, names=None, since=0.0, until=None):
-        """[(time, name, value)] the backend got from `player`, decoded."""
-        names = {names} if isinstance(names, str) else names
-        with self.lock:
-            records = [r for r in self.records if r[1] == player and r[0] >= since
-                       and (until is None or r[0] <= until) and (names is None or r[2] in names)]
-        found = []
-        for when, _, name, body, protocol in records:
-            value = None
-            if body is not None:
-                decoder = self.names(protocol, "play")
-                try:
-                    value = self.decode(decoder, name, body)
-                except Exception as error:  # Kept, undecoded: still evidence.
-                    value = {"undecoded": str(error)}
-            found.append((when, name, value))
-        return found
-
-    @staticmethod
-    def decode(decoder, name, body):
-        packet_id = next(i for i, n in decoder.names.items() if n == name)
-        return decoder.packet(packet_id, body)[1]
+            self.records.append(record)
+            if self.out:
+                self.out.write(json.dumps({"t": record[0], "player": record[1], "name": name,
+                                           "body": record[3].hex() if record[3] is not None else None,
+                                           "protocol": record[4]}) + "\n")
 
     def stop(self):
         try:
@@ -976,6 +999,64 @@ class BackendTap:
                 sock.close()
             except OSError:
                 pass
+
+
+class TapProcess(TapRecords):
+    """A BackendTap in a child process (this script with --tap), read back
+    from the file it appends to."""
+
+    def __init__(self, target_port, directory):
+        super().__init__()
+        self.file = Path(directory) / "backend-tap.jsonl"
+        self.file.write_text("")
+        self.read = 0
+        self.proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--tap", str(target_port),
+                                      str(self.file)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        line = self.proc.stdout.readline()
+        if not line.startswith("port "):
+            self.stop()
+            raise RuntimeError(f"the backend tap did not start: {line!r}")
+        self.port = int(line.split()[1])
+
+    def refresh(self):
+        with open(self.file, "rb") as source:
+            source.seek(self.read)
+            data = source.read()
+        complete = data[:data.rfind(b"\n") + 1]
+        self.read += len(complete)
+        with self.lock:
+            for line in complete.decode().splitlines():
+                entry = json.loads(line)
+                if "error" in entry:
+                    self.errors.append(entry["error"])
+                else:
+                    body = bytes.fromhex(entry["body"]) if entry["body"] is not None else None
+                    self.records.append((entry["t"], entry["player"], entry["name"], body, entry["protocol"]))
+
+    def received(self, player, names=None, since=0.0, until=None):
+        self.refresh()
+        return super().received(player, names, since, until)
+
+    def problems(self):
+        self.refresh()
+        return list(self.errors)
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.stdin.close()
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+
+def serve_tap(target_port, out):
+    """The child of TapProcess: relay until the parent closes stdin."""
+    tap = BackendTap(target_port, out)
+    print(f"port {tap.port}", flush=True)
+    sys.stdin.read()
+    tap.stop()
 
 
 # --- Rift ------------------------------------------------------------------------------
@@ -1767,8 +1848,8 @@ class Pair:
                 bad.append(line.strip())
         self.check("the server logged no warning about the player", not bad, " | ".join(bad[-5:]))
         # What the backend received over the whole pair.
-        tap = self.rift.tap
-        self.check("the tap between Rift and the backend followed every connection", not tap.errors, tap.errors[:3])
+        problems = self.rift.tap.problems()
+        self.check("the tap between Rift and the backend followed every connection", not problems, problems[:3])
         leaks = self.rift_container_leaks()
         self.check("the backend never received a packet naming one of Rift's containers", not leaks, leaks[:3])
         sent = self.requests_sent()
@@ -2890,7 +2971,7 @@ def run_server(key_name, protocols, args, session_server):
         if second is not None:
             second.start()
             env.log(f"second {second.name} ready on port {second.port}")
-        tap = BackendTap(server.port)
+        tap = TapProcess(server.port, workdir)
         rift = Rift(args.binary, workdir, args.mode, server, second, session_server.url, tap).start()
         for protocol in protocols:
             directory = args.out / f"{stamp}-{key_name}-client-{fixtures.RELEASE_OF[protocol]}"
@@ -3041,5 +3122,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--tap"]:
+        serve_tap(int(sys.argv[2]), sys.argv[3])
+        raise SystemExit(0)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     main()
