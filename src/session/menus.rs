@@ -397,9 +397,9 @@ impl Menus {
         if let Some(client) = client {
             client.inject(&packets::close(version, open.container)?)?;
         }
-        if reason != CloseReason::Player {
-            self.rift_ended = Some(Instant::now());
-        }
+        // A player who closed the menu themselves has seen every earlier
+        // close, so nothing sent before one can still be on its way.
+        self.rift_ended = (reason != CloseReason::Player).then(Instant::now);
         let event = MenuEvent::close(&open.menu, reason);
         let delivery = self.delivery(open.owner, open.shown.run, event);
         self.closed.push_back(delivery);

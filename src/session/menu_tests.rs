@@ -661,10 +661,14 @@ async fn creative_slots_are_dropped_while_a_menu_is_open_and_just_after_rift_clo
         send(&mut client, &creative).await;
         session.forward().await.unwrap();
         assert_eq!(next(&mut backend).await, creative);
-        // The player closed it themselves: no grace is needed.
+        // The player closed it themselves: no grace is needed, also right
+        // after Rift closed an earlier menu.
         drain(&mut client).await;
         show(&mut session, &mut client, shop(), owner()).await;
-        let close = packets::client_close(version(protocol), FIRST + 1).unwrap();
+        session.close_menu(&owner(), None).await.unwrap();
+        drain(&mut client).await;
+        show(&mut session, &mut client, shop(), owner()).await;
+        let close = packets::client_close(version(protocol), FIRST + 2).unwrap();
         send(&mut client, &close).await;
         assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
         assert!(!session.menu_open());
