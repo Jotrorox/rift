@@ -988,6 +988,7 @@ class Rift:
         self.binary, self.directory, self.mode = binary, Path(directory), mode
         self.main, self.second, self.session_url = main, second, session_url
         self.tap = tap  # Between Rift and the main backend.
+        self.generation = 1  # Of othertest's init.lua; each reload writes the next.
         self.log = self.directory / "rift.log"
         self.proc = self.port = self.web = None
         self.token = "menus-" + uuid.uuid4().hex
@@ -2128,12 +2129,14 @@ def step_creative(pair):
         got = pair.backend_got("set_creative_slot", since)
         pair.check(f"{label}: the creative-mode slot {'reaches' if passes else 'does not reach'} the backend",
                    bool(got) == passes, f"the backend received {len(got)}")
+        has = None
         if console:
             has = pair.item_in_slot(8, "stone")
             pair.check(f"{label}: the backend {'has' if passes else 'has no'} stone in the last hotbar slot",
                        has == passes, f"stone there: {has}")
-            if has:
-                pair.console(f"clear {name} {'minecraft:' if pair.backend >= 393 else ''}stone", 0.5)
+        if has or (got and not console):
+            # Later steps compare the inventory with the one given at the start.
+            pair.console(f"clear {name} {'minecraft:' if pair.backend >= 393 else ''}stone", 0.5)
 
     try:
         open_menu(pair, "chest")
@@ -2175,6 +2178,12 @@ def step_switch(pair):
     """A transfer to the second backend closes the menu with reason switch."""
     if pair.second is None:
         raise Skip("no second backend (--no-switch)")
+    if pair.software == "pumpkin" and pair.rift.mode == "plugin":
+        # Its Join Game enforces secure chat, and Rift switches an offline
+        # (unauthenticated) player only away from a world that does not
+        # (validate_join; enforce-secure-profile=false on vanilla). The
+        # transfer stays queued, so no menu would close.
+        raise Skip("Pumpkin enforces secure chat: Rift does not switch an offline player away from it")
     open_menu(pair, "chest")
     mark = pair.client.mark()
     pair.real_click("left", SWITCH)
@@ -2771,7 +2780,7 @@ def step_plugin_stop(pair):
         pair.check(f"{label}: the plugin runs again", False, f"HTTP {status} {body[-300:]}")
         return False
 
-    for how, generation in (("restart", "1"), ("reload", "2")):
+    for how in ("restart", "reload"):
         show_other(f"{how}: the other plugin's menu")
         mark = pair.client.mark()
         pair.real_click("left", 4)
@@ -2787,8 +2796,9 @@ def step_plugin_stop(pair):
             pair.check("restart: POST /api/plugins/othertest/restart is accepted", status == 202,
                        f"HTTP {status} {body[-300:]}")
         else:
+            rift.generation += 1
             folder = rift.directory / "plugins" / "othertest"
-            (folder / "init.lua").write_text(OTHER_LUA.replace("@GEN@", generation))
+            (folder / "init.lua").write_text(OTHER_LUA.replace("@GEN@", str(rift.generation)))
             status, body = rift.request("POST", "/api/reload", "{}")
             pair.check("reload: POST /api/reload with a changed plugin file is accepted", status in (200, 202),
                        f"HTTP {status} {body[-300:]}")
@@ -2818,7 +2828,7 @@ def step_plugin_stop(pair):
         while len(other_events(mark)) < 2 and time.monotonic() < deadline:
             time.sleep(0.1)
         events = other_events(mark)
-        wanted_gen = "1" if how == "restart" else generation
+        wanted_gen = str(rift.generation)
         pair.check(f"{how}: the new instance gets the click and the close of its own menu",
                    any("kind=click" in e for e in events) and any("kind=close" in e and "reason=player" in e
                                                                   for e in events)
