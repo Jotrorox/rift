@@ -6,6 +6,7 @@ mod compression;
 pub(crate) mod dialog;
 mod framing;
 mod legacy;
+pub(crate) mod menu;
 mod nbt;
 mod packets;
 mod state;
@@ -20,6 +21,7 @@ pub use boss_bar::{
 pub use dialog::supported as dialogs_supported;
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
+pub use menu::supported as menus_supported;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
 pub use packets::{PlayerIdentity, action_bar, action_bar_component, system_message, title};
 pub(crate) use packets::{

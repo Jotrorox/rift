@@ -940,6 +940,38 @@ impl Host {
         }
     }
 
+    /// Queue a menu event for the persistent plugin `name`, which showed the
+    /// menu, if the run of it that showed the menu still runs. Dropped
+    /// otherwise: a restarted or replaced plugin never receives events of
+    /// menus its predecessor showed, which Rift closed when that run ended.
+    /// A `close` event is never dropped for a full queue (see
+    /// [`Instance::notify_close`]).
+    pub(crate) fn menu(&self, name: &str, input: Context) {
+        let Some(event) = input.menu.as_ref() else {
+            return;
+        };
+        let close = event.kind == crate::menu::EventKind::Close;
+        let run = event.run;
+        if let Some(instance) = self
+            .active()
+            .iter()
+            .find(|instance| instance.name() == name && instance.run() == run && run != 0)
+        {
+            if close {
+                let queued = instance.notify_close(Event::Menu(input));
+                let outcome = if queued {
+                    monitor::Outcome::Queued
+                } else {
+                    monitor::Outcome::Dropped
+                };
+                self.monitor()
+                    .call(instance.name(), Hook::Menu, outcome, None);
+            } else {
+                notify(self.monitor(), instance, Event::Menu(input));
+            }
+        }
+    }
+
     /// Run a plugin command for the operator console: `line` is the command
     /// with its arguments, with or without a leading slash. Only commands
     /// registered with `console` run; their `message` answer is the output.

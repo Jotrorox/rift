@@ -20,7 +20,7 @@ TinyGo's Linux release; `brew install binaryen` on macOS).
 **Use TinyGo 0.42.0** (see [gotchas](#gotchas)):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.2.1
+go get github.com/Jotrorox/rift/sdk/go@v0.3.0
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o my_plugin.wasm .
 ```
 
@@ -72,7 +72,7 @@ func main() {}
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -98,6 +98,7 @@ Lua examples.
 | `suggest`, `status` | `rift.OnSuggest` returns `[]rift.Suggestion{{Text, Tooltip}}`; `rift.OnStatus` returns a `*rift.StatusOverride` whose `Motd`, `Version` and `Sample` are texts, or nil. |
 | `chat`, `kick` | `rift.OnChat(func(rift.ChatAttempt) rift.Decision)` and `rift.OnKick(func(rift.Context) rift.Decision)`; see [chat and kick](#chat-and-kick). |
 | `dialog` | `rift.ShowDialog`, `rift.ClearDialog`; clicks on the plugin's [dialogs](dialogs.md) reach `rift.OnDialog(func(rift.DialogResponse))`, which needs no hook in the registration. |
+| `menu`, `players.menu` | [Menus](menus.md): `rift.ShowMenu(target, rift.Menu{...})`, `rift.UpdateMenu(target, id, rift.MenuPatch{...})`, `rift.CloseMenu(target, id)` (`""` closes whatever menu is open) and the JSON text variants `rift.ShowMenuJSON`, `rift.UpdateMenuJSON`. `rift.Menu`, `rift.Button` and `rift.MenuPatch` are plain structs; unset fields stay out of the JSON, and `Glint`, `Details`, `Tooltip` and a patch's `Text` are pointers (`rift.Ptr`). Events reach `rift.OnMenu(func(rift.MenuEvent))`, which needs no hook in the registration: `event.Kind`, `event.Click` and `event.Reason` are typed constants with an `Other` case, and `event.PayloadString()`, `event.StateString()`, `event.DecodePayload(&v)` and `event.DecodeState(&v)` read the JSON. |
 | `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendActionBar`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.Kick`, `rift.Transfer`, `rift.Broadcast`, `rift.Lookup`, `rift.Search`, `rift.SetLanguage`; see [players, languages and groups](#players-languages-and-groups). |
 | `background` | `rift.Defer`, `rift.Resolve`, `rift.Run`, `rift.IsWorker` with `rift.OnWork`, `rift.OnWorkInit` and `rift.OnJobDone`; see [background work](#background-work). |
 | `store` | `rift.StoreGet`, `StoreSet`, `StoreDelete`, `StoreIncrement`, `StoreList`. |
@@ -105,7 +106,7 @@ Lua examples.
 | `bus` | `rift.Publish`, `Reply`, `Request`, `Subscribe`, `Unsubscribe`, `StreamPublish`. |
 | `servers` | `rift.ServerCreate`, `ServerRemove`, `ServerStart`, `ServerStop`, `TemplateDownload`, `Control`. |
 | `timers` | `rift.Every`, `After`, `CancelTimer`. |
-| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`, and `rift.API()`, the contract version the host implements (`0.2.1`). |
+| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`, and `rift.API()`, the contract version the host implements (`0.3.0`). |
 | `text` | `rift.RenderText`, `PlainText`, `ToLegacy`, `ToMini` (since 0.2.1); see [text](#text). |
 | `result<T, string>` | `(T, error)` with a `rift.HostError`. |
 | `option<T>` | Parameters: `""` for an optional string, `0` for an optional Unix time, the zero `rift.Text{}` for an optional text. Record fields: pointers (`rift.Ptr(v)` makes one) and zero texts. |
@@ -171,8 +172,7 @@ diamond := rift.Sprite("item/diamond").Shadow("#000000", 0.5).HoverItem("minecra
 - `rift.Escape(s)` escapes text for splicing into markup. An argument needs no
   escaping.
 - `rift.RenderText(text, language)`, `rift.PlainText`, `rift.ToLegacy` and
-  `rift.ToMini` (the contract's `text` interface, since 0.2.1: set
-  `min_api = "0.2.1"` in `plugin.toml`) ask Rift to convert text, with
+  `rift.ToMini` (the contract's `text` interface) ask Rift to convert text, with
   markup, legacy codes and the plugin's messages resolved in `language`
   (`"de"`; `""` for the default). Each returns `(string, error)`: compact
   JSON, the words, `§` codes or markup. Use them for text that leaves through

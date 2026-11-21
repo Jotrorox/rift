@@ -9,13 +9,19 @@
 //   subject `hello.ping` without a queue group (a failed subscription fails
 //   init) and returns this registration:
 //   - command `hello`, permission `hello.use`, suggest `players`;
+//   - command `servers`, open to every player, no suggestions;
 //   - hooks login, command, join, message, timer, so the host skips every
 //     other hook.
 // - login(ctx) returns deny("You are not welcome here.") when ctx.name equals
 //   the configured `deny` name exactly, otherwise continue.
-// - command(ctx) returns the message `greeting` with the argument `name` set
-//   to ctx.name, which Rift renders from messages.toml in the player's
-//   language ("Hello, <ctx.name>!" by default).
+// - command(ctx) for `hello` returns the message `greeting` with the argument
+//   `name` set to ctx.name, which Rift renders from messages.toml in the
+//   player's language ("Hello, <ctx.name>!" by default). For `servers` it
+//   shows the player the server selector (see SELECTOR below) with
+//   players.menu and returns continue. Host errors are ignored.
+// - menu(event): a click on a button with the action `join` transfers the
+//   player to the server named by the button's payload. Host errors are
+//   ignored; every other event is ignored.
 // - join(ctx) calls players.message(ctx.uuid, "Welcome, <ctx.name>!"), then
 //   store.increment("hello", "joins", 1). Host errors are ignored.
 // - message(msg): when msg.reply is set, publishes msg.payload unchanged to
@@ -27,6 +33,23 @@
 //
 // Build: `make` (see Makefile and sdk/c/README.md).
 #include "rift.h"
+
+// The server selector: a chest of three rows framed in gray glass, with a
+// button per server (action `join`, the server's name as payload) and one that
+// closes the menu. C has no menu builder: the menu is JSON text.
+#define SERVER_BUTTON(item_name, title, server)                               \
+  "{\"item\":\"" item_name "\",\"name\":{\"mini\":\"" title "\"},"        \
+  "\"lore\":[\"Click to join\"],\"id\":\"join\",\"payload\":\"" server "\"}"
+static const char SELECTOR[] =
+    "{\"id\":\"servers\",\"type\":\"chest\","
+    "\"title\":{\"mini\":\"<dark_gray>Choose a server\"},"
+    "\"layout\":[\"#########\",\"# S C M #\",\"####X####\"],"
+    "\"keys\":{"
+    "\"#\":{\"item\":\"gray_stained_glass_pane\",\"name\":\" \"},"
+    "\"S\":" SERVER_BUTTON("grass_block", "<green>Survival", "survival") ","
+    "\"C\":" SERVER_BUTTON("bricks", "<gold>Creative", "creative") ","
+    "\"M\":" SERVER_BUTTON("bow", "<red>Minigames", "minigames") ","
+    "\"X\":{\"item\":\"barrier\",\"name\":{\"mini\":\"<red>Close\"},\"close\":true}}}";
 
 static rift_string_t deny_name;
 static bool deny_set;
@@ -62,6 +85,7 @@ bool exports_rift_plugin_handler_init(rift_string_t *config_json, rift_registrat
 
   rift_registration_init(ret);
   rift_registration_add_command(ret, "hello", "hello.use", RIFT_PLUGIN_TYPES_SUGGEST_KIND_PLAYERS);
+  rift_registration_add_command(ret, "servers", NULL, RIFT_PLUGIN_TYPES_SUGGEST_KIND_NONE);
   rift_registration_add_hook(ret, RIFT_PLUGIN_TYPES_HOOK_LOGIN);
   rift_registration_add_hook(ret, RIFT_PLUGIN_TYPES_HOOK_COMMAND);
   rift_registration_add_hook(ret, RIFT_PLUGIN_TYPES_HOOK_JOIN);
@@ -80,6 +104,12 @@ void exports_rift_plugin_handler_login(rift_context_t *ctx, rift_decision_t *ret
 }
 
 void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_decision_t *ret) {
+  if (ctx->command.is_some && rift_string_eq(&ctx->command.val, "servers")) {
+    rift_show_menu(&ctx->uuid, SELECTOR);
+    rift_decision_continue(ret);
+    rift_context_free(ctx);
+    return;
+  }
   // The text lives in messages.toml, translated per player.
   char *name = rift_string_cstr(&ctx->name);
   rift_msg_t greeting = rift_msg("greeting");
@@ -89,6 +119,18 @@ void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_decision_t *r
   free(json);
   free(name);
   rift_context_free(ctx);
+}
+
+void exports_rift_plugin_handler_menu(rift_menu_event_t *event) {
+  rift_string_t server;
+  if (rift_menu_kind(event) == RIFT_MENU_KIND_CLICK && event->action.is_some &&
+      rift_string_eq(&event->action.val, "join") && rift_menu_payload_string(event, &server) == RIFT_JSON_OK) {
+    rift_string_t err = {NULL, 0};
+    bool moved;
+    if (!rift_plugin_players_transfer(&event->ctx.uuid, &server, &moved, &err)) rift_string_free(&err);
+    rift_string_free(&server);
+  }
+  rift_menu_event_free(event);
 }
 
 void exports_rift_plugin_handler_join(rift_context_t *ctx) {

@@ -89,8 +89,8 @@ A component may be written as markup (`"reason":{"mini":"<red>Banned"}`, see
 click events are spelled for each player's client, as described under
 [rich text](players-api.md#rich-text).
 
-Dialogs, tab lists and boss bars stay plugin-only, because their clicks and
-lifetimes belong to an owner.
+Dialogs, menus, tab lists and boss bars stay plugin-only, because their
+clicks and lifetimes belong to an owner.
 
 ## Network API
 

@@ -195,7 +195,7 @@ fn directory() -> PathBuf {
 
 fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
     let text =
-        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}");
+        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}");
     PluginSpec {
         name: name.into(),
         folder: root.join("plugins").join(name),
@@ -1549,7 +1549,10 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
     assert!(runtime.plugins().may_handle(Hook::Chat));
     let statuses = runtime.plugins().statuses();
     assert!(!statuses[0].hooks.contains(&"chat"), "{statuses:?}");
-    assert_eq!(statuses[1].hooks, ["timer", "dialog", "chat", "job_done"]);
+    assert_eq!(
+        statuses[1].hooks,
+        ["timer", "dialog", "chat", "job_done", "menu"]
+    );
     let player = session(&runtime, 1);
     assert!(player.handles_chat());
     assert_eq!(
@@ -1699,7 +1702,7 @@ fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
         let mut spec = spec(&root, "probe", "", "{}");
         spec.manifest = Manifest::parse(
             &format!(
-                "name = \"probe\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
+                "name = \"probe\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
             ),
             "probe",
         )
@@ -1791,7 +1794,10 @@ async fn kick_asks_the_script_then_plugins_that_handle_it() {
     // The script first, then the plugins.
     assert_eq!(statuses[0].hooks, ["kick"]);
     assert!(!statuses[1].hooks.contains(&"kick"), "{statuses:?}");
-    assert_eq!(statuses[2].hooks, ["timer", "dialog", "kick", "job_done"]);
+    assert_eq!(
+        statuses[2].hooks,
+        ["timer", "dialog", "kick", "job_done", "menu"]
+    );
     let player = session(&runtime, 1);
     // The script answers first; the plugin is not asked.
     assert_eq!(
@@ -1822,4 +1828,227 @@ async fn kick_asks_the_script_then_plugins_that_handle_it() {
         "{error}"
     );
     runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn menu_closes_wait_behind_a_full_queue_instead_of_being_dropped() {
+    let root = directory();
+    let mocks = Mocks::default();
+    let (seen, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(Mutex::new(held));
+    mocks.plan(
+        "shop",
+        Plan::new(move |event, _| {
+            if let Event::Menu(context) = event
+                && let Some(menu) = &context.menu
+            {
+                let _ = seen.send(format!("{}:{}", menu.kind.name(), menu.menu));
+                if menu.menu == "hold" {
+                    let _ = held.lock().unwrap().recv();
+                }
+            }
+            Ok(Reply::default_for(event.hook()))
+        }),
+    );
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config("", vec![spec(&root, "shop", "", "{}")]),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let host = runtime.plugins();
+    let run = host.active()[0].run();
+    let event = |id: &str, close: bool| {
+        let menu = crate::menu::Menu::parse(&serde_json::json!({"id": id})).unwrap();
+        let mut event = if close {
+            crate::menu::MenuEvent::close(&menu, crate::menu::CloseReason::Player)
+        } else {
+            crate::menu::MenuEvent::text(&menu)
+        };
+        event.run = run;
+        Context {
+            menu: Some(event),
+            ..Context::default()
+        }
+    };
+    // The plugin is busy, and its queue fills up.
+    host.menu("shop", event("hold", false));
+    let first = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap();
+    assert_eq!(first.as_deref(), Some("text:hold"));
+    for _ in 0..worker::QUEUE {
+        host.menu("shop", event("click", false));
+    }
+    host.menu("shop", event("dropped", false));
+    // The ends of three menus still arrive, in order, after what was queued,
+    // and nothing overtakes them.
+    for id in ["one", "two", "three"] {
+        host.menu("shop", event(id, true));
+    }
+    host.menu("shop", event("late", false));
+    release.send(()).unwrap();
+    let mut received = Vec::new();
+    while received.last().is_none_or(|last| last != "close:three") {
+        received.push(
+            timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // Rift's own events (`rift.events`) may have taken a place or two.
+    let clicks = received.len() - 3;
+    assert!(
+        clicks <= worker::QUEUE && clicks + 4 >= worker::QUEUE,
+        "{clicks}"
+    );
+    assert!(received[..clicks].iter().all(|event| event == "text:click"));
+    assert_eq!(
+        received[clicks..],
+        ["close:one", "close:two", "close:three"]
+    );
+    assert!(
+        timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err()
+    );
+    // Once they are delivered, events are queued again.
+    host.menu("shop", event("after", false));
+    let after = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap();
+    assert_eq!(after.as_deref(), Some("text:after"));
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_stops_closes_its_menus_and_no_later_run_gets_their_events() {
+    use crate::{extensions::PlayerAction, menu::Menu};
+    let root = directory();
+    let mocks = Mocks::default();
+    let (seen, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let kept: Arc<Mutex<Option<services::Services>>> = Arc::default();
+    {
+        let kept = kept.clone();
+        mocks.plan(
+            "shop",
+            Plan::new(move |event, services| {
+                let Event::Menu(context) = event else {
+                    return Ok(Reply::default_for(event.hook()));
+                };
+                let Some(menu) = &context.menu else {
+                    return Ok(Reply::default_for(event.hook()));
+                };
+                match menu.menu.as_str() {
+                    "show" => {
+                        *kept.lock().unwrap() = Some(services.clone());
+                        let shop = Menu::parse(&serde_json::json!({"id": "shop"})).unwrap();
+                        let shown = services.players().show_menu(&context.name, shop);
+                        let _ = seen.send(format!("shown {shown:?}"));
+                    }
+                    "crash" => return Err(CallError::Fatal("crash".into())),
+                    id => {
+                        let _ = seen.send(format!("{}:{id}", menu.kind.name()));
+                    }
+                }
+                Ok(Reply::default_for(event.hook()))
+            }),
+        );
+    }
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config("", vec![spec(&root, "shop", "", "{}")]),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    let host = runtime.plugins();
+    let owner = crate::dialog::Owner::Plugin("shop".into());
+    let event = |id: &str, run: u64, close: bool| {
+        let menu = Menu::parse(&serde_json::json!({"id": id})).unwrap();
+        let mut event = if close {
+            crate::menu::MenuEvent::close(&menu, crate::menu::CloseReason::Player)
+        } else {
+            crate::menu::MenuEvent::text(&menu)
+        };
+        event.run = run;
+        Context {
+            name: "Player1".into(),
+            menu: Some(event),
+            ..Context::default()
+        }
+    };
+    let mut seen = async || {
+        timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let mut action = async || {
+        timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    // The plugin's first run shows a menu, which carries that run.
+    let first = host.active()[0].run();
+    assert_ne!(first, 0);
+    host.menu("shop", event("show", first, false));
+    assert_eq!(seen().await, "shown Ok(true)");
+    let PlayerAction::Menu(shown) = action().await else {
+        panic!("expected the menu");
+    };
+    assert_eq!((&shown.owner, shown.run), (&owner, first));
+
+    // An operator restart ends the run: its menus close everywhere.
+    host.restart("shop", "test").unwrap().await;
+    assert_eq!(
+        action().await,
+        PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: first
+        }
+    );
+    eventually("the new instance", Duration::from_secs(5), || {
+        host.active()[0].status() == Status::Running
+    })
+    .await;
+    let second = host.active()[0].run();
+    assert!(second != 0 && second != first);
+    // The new instance gets none of the old menus' events, the close
+    // included, and the old run shows no more menus.
+    host.menu("shop", event("old", first, false));
+    host.menu("shop", event("old", first, true));
+    let old = kept.lock().unwrap().take().unwrap();
+    let shop = Menu::parse(&serde_json::json!({"id": "shop"})).unwrap();
+    assert_eq!(old.players().show_menu("Player1", shop), Ok(false));
+    host.menu("shop", event("fresh", second, false));
+    assert_eq!(seen().await, "text:fresh");
+
+    // A failure ends the run too.
+    host.menu("shop", event("show", second, false));
+    assert_eq!(seen().await, "shown Ok(true)");
+    let PlayerAction::Menu(shown) = action().await else {
+        panic!("expected the menu");
+    };
+    assert_eq!(shown.run, second);
+    host.menu("shop", event("crash", second, false));
+    assert_eq!(
+        action().await,
+        PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: second
+        }
+    );
+    // A run that showed no menu closes none when it ends.
+    runtime.plugins().shutdown().await;
+    assert!(actions.try_recv().is_err());
+    assert!(events.try_recv().is_err());
 }

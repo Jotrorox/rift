@@ -31,7 +31,7 @@ impl Fixture for LuaFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
             ),
         )
         .unwrap();
@@ -76,7 +76,7 @@ fn folder(extra: &str, files: &[(&str, &str)]) -> PathBuf {
     }
     std::fs::write(
         plugin.join("plugin.toml"),
-        format!("name = \"t\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
+        format!("name = \"t\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}"),
     )
     .unwrap();
     root
@@ -524,6 +524,295 @@ end)
     assert!(actions.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn plugins_show_menus_and_receive_their_events() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, {
+        id = "servers",
+        title = { mini = "<dark_gray>Choose a server" },
+        layout = { "=========", "= S C M =", "====X====" },
+        keys = {
+            ["="] = { item = "gray_stained_glass_pane", name = " " },
+            S = { item = "grass_block", id = "join", payload = { server = "survival" } },
+            C = { item = "bricks", id = "join", payload = { server = "creative" } },
+            M = { item = "bow", id = "join", payload = { server = "minigames" } },
+            X = { item = "barrier", close = true },
+        },
+        state = { opened = 1 },
+    }))
+    assert(rift.players.menu(ctx.uuid, '{"id":"json","type":"dispenser"}'))
+    local ok, err = pcall(rift.players.menu, ctx.uuid, { id = "servers", keys = 1 })
+    assert(not ok and err:find("keys must be an object"), err)
+    ok, err = pcall(rift.players.menu, ctx.uuid, { id = "nick", type = "anvil", typing = 1 })
+    assert(not ok and err:find("typing must be a boolean"), err)
+    assert(rift.players.close_menu(ctx.uuid, "servers"))
+    assert(rift.players.close_menu(ctx.uuid))
+end)
+rift.menus.on("servers", {
+    click = {
+        join = function(ctx)
+            rift.players.message(ctx.uuid, ctx.payload.server .. " " .. ctx.slot .. " " .. ctx.click)
+        end,
+    },
+    close = function(ctx)
+        rift.players.message(ctx.uuid, "closed " .. ctx.reason .. " " .. ctx.state.opened)
+    end,
+})
+rift.on("menu", function(ctx)
+    rift.players.message(ctx.uuid, "seen " .. ctx.menu .. " " .. ctx.kind)
+end)
+local ok, err = pcall(rift.menus.on, "x", { press = function() end })
+assert(not ok and err:find("unknown handler press"), err)
+ok, err = pcall(rift.menus.on, "x", { click = { buy = 1 } })
+assert(not ok and err:find("maps button ids to functions"), err)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 340, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    assert_eq!(shown.owner, owner);
+    assert_eq!(shown.menu.id(), "servers");
+    assert!(shown.menu.title().is_some());
+    let Some(crate::extensions::PlayerAction::Menu(json)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    assert_eq!(json.menu.kind(), crate::menu::Kind::Dispenser);
+    for id in [Some("servers".to_owned()), None] {
+        assert_eq!(
+            actions.try_recv().ok(),
+            Some(crate::extensions::PlayerAction::CloseMenu {
+                owner: owner.clone(),
+                id
+            })
+        );
+    }
+
+    use crate::menu::{Click, CloseReason, Delivery, MenuEvent};
+    let mut event = MenuEvent::click(&shown.menu, 13, Click::ShiftLeft, None);
+    event.run = shown.run;
+    player
+        .menu(Delivery {
+            owner: owner.clone(),
+            event,
+        })
+        .await
+        .unwrap();
+    let mut event = MenuEvent::close(&shown.menu, CloseReason::Plugin);
+    event.run = shown.run;
+    player
+        .menu(Delivery {
+            owner: owner.clone(),
+            event,
+        })
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for _ in 0..4 {
+        let message = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        messages.push(message);
+    }
+    let message = crate::extensions::PlayerAction::Message;
+    assert_eq!(
+        messages,
+        [
+            message("creative 13 shift_left".into()),
+            message("seen servers click".into()),
+            message("closed plugin 1".into()),
+            message("seen servers close".into()),
+        ]
+    );
+    // An event for a plugin that is not configured is dropped.
+    player
+        .menu(Delivery {
+            owner: crate::dialog::Owner::Plugin("gone".into()),
+            event: MenuEvent::close(&shown.menu, CloseReason::Player),
+        })
+        .await
+        .unwrap();
+    // The plugin stops: the menus of its run close for every player.
+    runtime.plugins().shutdown().await;
+    assert_eq!(
+        actions.try_recv().ok(),
+        Some(crate::extensions::PlayerAction::EndMenus {
+            owner: owner.clone(),
+            run: shown.run
+        })
+    );
+    assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn plugins_read_the_text_of_an_anvil_prompt() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+local function valid_nick(text)
+    return #text >= 3 and #text <= 16 and text:match("^%a+$") ~= nil
+end
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, {
+        id = "nick",
+        type = "anvil",
+        title = "Choose a nickname",
+        text = "Steve",
+        typing = true,
+    }))
+end)
+rift.menus.on("nick", {
+    click = {
+        submit = function(ctx)
+            if not valid_nick(ctx.text) then
+                rift.players.update_menu(ctx.uuid, "nick", {
+                    title = "Letters only, 3 to 16",
+                })
+                return
+            end
+            rift.players.message(ctx.uuid, "nick " .. ctx.text)
+            rift.players.close_menu(ctx.uuid, "nick")
+        end,
+    },
+    text = function(ctx) rift.players.message(ctx.uuid, "typing " .. ctx.text) end,
+})
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 777, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected the prompt");
+    };
+    assert_eq!(shown.owner, owner);
+    assert_eq!(shown.menu.kind(), crate::menu::Kind::Anvil);
+    assert_eq!(shown.menu.text(), "Steve");
+
+    use crate::menu::{ANVIL_RESULT, Click, Delivery, MenuEvent};
+    let typed = |text: &str| {
+        let mut menu = (*shown.menu).clone();
+        menu.typed(text.into());
+        menu
+    };
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(5), actions.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    for mut event in [
+        MenuEvent::text(&typed("Al")),
+        MenuEvent::click(&typed("Al"), ANVIL_RESULT, Click::Left, None),
+        MenuEvent::click(&typed("Alex"), ANVIL_RESULT, Click::Left, None),
+    ] {
+        event.run = shown.run;
+        player
+            .menu(Delivery {
+                owner: owner.clone(),
+                event,
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::Message("typing Al".into())
+    );
+    let crate::extensions::PlayerAction::UpdateMenu(update) = next().await else {
+        panic!("expected a new title");
+    };
+    assert_eq!((&update.owner, update.id.as_str()), (&owner, "nick"));
+    let mut retitled = typed("Al");
+    retitled.apply(&update.patch).unwrap();
+    assert!(format!("{:?}", retitled.title()).contains("Letters only"));
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::Message("nick Alex".into())
+    );
+    assert_eq!(
+        next().await,
+        crate::extensions::PlayerAction::CloseMenu {
+            owner: owner.clone(),
+            id: Some("nick".into())
+        }
+    );
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn plugins_change_their_open_menus_with_update_menu() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    assert(rift.players.menu(ctx.uuid, { id = "clock", rows = 1, layout = { "....T...." },
+        keys = { ["."] = { item = "glass_pane" }, T = { item = "clock", name = "10" } } }))
+    assert(rift.players.update_menu(ctx.uuid, "clock", {
+        slots = { { slot = 4, item = "clock", name = "9" } },
+        keys = { ["."] = { item = "black_stained_glass_pane" } },
+        title = { mini = "<red>Hurry" },
+        state = { left = 9 },
+    }))
+    assert(rift.players.update_menu(ctx.uuid, "clock", '{"state":{"left":8}}'))
+    local ok, err = pcall(rift.players.update_menu, ctx.uuid, "clock", { slots = 1 })
+    assert(not ok and err:find("slots"), err)
+    assert(not rift.players.update_menu("Nobody", "clock", { state = 1 }))
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 774, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let owner = crate::dialog::Owner::Plugin("t".into());
+    let Some(crate::extensions::PlayerAction::Menu(shown)) = actions.try_recv().ok() else {
+        panic!("expected a menu");
+    };
+    let mut menu = (*shown.menu).clone();
+    for left in [9, 8] {
+        let Some(crate::extensions::PlayerAction::UpdateMenu(update)) = actions.try_recv().ok()
+        else {
+            panic!("expected an update");
+        };
+        assert_eq!((&update.owner, update.id.as_str()), (&owner, "clock"));
+        menu.apply(&update.patch).unwrap();
+        assert_eq!(menu.state(), Some(&serde_json::json!({"left": left})));
+    }
+    assert!(menu.title().is_some());
+    assert_eq!(
+        menu.button(0).unwrap().look.item,
+        "black_stained_glass_pane"
+    );
+    assert_ne!(
+        menu.button(4).unwrap().look.name,
+        shown.menu.button(4).unwrap().look.name
+    );
+    assert!(actions.try_recv().is_err());
+    runtime.plugins().shutdown().await;
+}
+
 /// A player table carries the client's `locale` once the session published
 /// it; before that it is nil.
 #[tokio::test]
@@ -717,7 +1006,7 @@ async fn aliases_the_console_the_directory_and_background_work_reach_lua() {
             (
                 "init.lua",
                 r#"
-assert(rift.meta.api == "0.2.1")
+assert(rift.meta.api == "0.3.0")
 assert(not rift.background.is_worker())
 assert(not pcall(rift.on, "work", function() end), "work belongs in the worker script")
 rift.command("whois", {

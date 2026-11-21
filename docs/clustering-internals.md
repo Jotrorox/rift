@@ -448,8 +448,9 @@ changes of their own: `rift.players.*` and `rift.network.*`,
 players API, BungeeCord `Message`, `MessageRaw`, `KickPlayer`, `Connect`,
 `ConnectOther`, `Forward` and `ForwardToPlayer`, and `rift admin transfer`.
 Broadcasts go to every peer, and each delivers to its own players. Dialog
-clicks arrive on the player's peer and are handled there, so a dialog opened
-from another peer routes its callback back over the `player` stream.
+clicks and menu events arrive on the player's peer and are handled there, so
+a dialog or [menu](menus-internals.md#menus-in-a-cluster) opened from another
+peer routes its callback back over the `player` stream.
 
 Events that belong to a session (login, chat, commands, transfer decisions,
 disconnect) are raised on the peer that holds the session. Every peer loads

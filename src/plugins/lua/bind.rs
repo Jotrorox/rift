@@ -39,6 +39,7 @@ const EVENTS: &[(&str, Option<Hook>)] = &[
     ("timer", Some(Hook::Timer)),
     ("event", Some(Hook::Event)),
     ("dialog", Some(Hook::Dialog)),
+    ("menu", Some(Hook::Menu)),
     ("chat", Some(Hook::Chat)),
     ("kick", Some(Hook::Kick)),
     ("job_done", Some(Hook::Job)),
@@ -380,11 +381,14 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
-    // The exact `rift:plugin` version, such as "0.2.1".
+    // The exact `rift:plugin` version, such as "0.3.0".
     meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 
     registration(lua, &rift, state)?;
+    lua.load(include_str!("../../lua/menus.lua"))
+        .set_name("=rift menus")
+        .call::<()>(rift.clone())?;
     helpers(lua, &rift, state)?;
     crate::text::lua::install(lua, &rift, Some(spec.name.as_str()))?;
     rift.raw_set("players", players(lua, state)?)?;
@@ -1005,6 +1009,43 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         function(lua, state, move |_, target: String| {
             services.players().clear_dialog(&target).map_err(runtime)
         })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "menu",
+        function(lua, state, move |_, (target, spec): (String, Value)| {
+            let players = services.players();
+            let menu = players.for_target(&target, || crate::extensions::players::menu(spec))?;
+            players.show_menu(&target, menu).map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "update_menu",
+        function(
+            lua,
+            state,
+            move |_, (target, id, spec): (String, String, Value)| {
+                let players = services.players();
+                let patch =
+                    players.for_target(&target, || crate::extensions::players::menu_patch(spec))?;
+                players.update_menu(&target, &id, patch).map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "close_menu",
+        function(
+            lua,
+            state,
+            move |_, (target, id): (String, Option<String>)| {
+                services
+                    .players()
+                    .close_menu(&target, id.as_deref())
+                    .map_err(runtime)
+            },
+        )?,
     )?;
     let services = state.services.clone();
     api.raw_set(

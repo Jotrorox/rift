@@ -64,7 +64,7 @@ impl Guest {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
+                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
                 self.name
             ),
         )
@@ -273,19 +273,31 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     let plugin = instance(&runtime);
     assert_eq!(plugin.status(), Status::Running, "{}", guest.name);
 
-    // init: the registration.
+    // init: the registration. Examples whose SDK has menus also register
+    // `servers`, which opens the server selector.
+    let mut commands = vec![CommandSpec {
+        name: "hello".into(),
+        aliases: Vec::new(),
+        permission: "hello.use".into(),
+        suggest: SuggestKind::Players,
+        console: false,
+    }];
+    let menus = plugin.registration().unwrap().commands.len() > 1;
+    if menus {
+        commands.push(CommandSpec {
+            name: "servers".into(),
+            aliases: Vec::new(),
+            permission: String::new(),
+            suggest: SuggestKind::None,
+            console: false,
+        });
+    }
     assert_eq!(
         *plugin.registration().unwrap(),
         Registration {
             chat: false,
             kick: false,
-            commands: vec![CommandSpec {
-                name: "hello".into(),
-                aliases: Vec::new(),
-                permission: "hello.use".into(),
-                suggest: SuggestKind::Players,
-                console: false,
-            }],
+            commands,
             hooks: vec![
                 Hook::Login,
                 Hook::Command,
@@ -329,7 +341,12 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
         Action::Message("You do not have permission to use this command.".into())
     );
     grant(&runtime, 2, "hello.use");
-    assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
+    let visible: &[_] = if menus {
+        &[("hello".to_owned(), true), ("servers".to_owned(), false)]
+    } else {
+        &[("hello".to_owned(), true)]
+    };
+    assert_eq!(player.visible_commands(), visible);
     let words = |action: Action| match action {
         Action::Message(text) => text.to_string(),
         other => panic!("{}: {other:?}", guest.name),
@@ -477,7 +494,7 @@ fn install_conformance(wasm: PathBuf, folder: &Path, name: &str, extra: &str) {
     std::fs::write(
         folder.join("plugin.toml"),
         format!(
-            "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+            "name = \"{name}\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
         ),
     )
     .unwrap();
@@ -750,6 +767,66 @@ async fn invalid_artifacts_fail_with_a_reason() {
     );
     runtime.plugins().shutdown().await;
     assert!(super::precompile(&config.plugins[0]).is_err());
+}
+
+/// A component that imports `rift:plugin/log` at `version`, and nothing
+/// else.
+fn component_importing_log(version: &str) -> Vec<u8> {
+    let name = format!("rift:plugin/log@{version}");
+    let mut import = vec![1, 0, name.len() as u8];
+    import.extend_from_slice(name.as_bytes());
+    // An instance of the empty instance type 0.
+    import.extend_from_slice(&[5, 0]);
+    let mut wasm = b"\0asm\x0d\x00\x01\x00".to_vec();
+    // A type section with one empty instance type.
+    wasm.extend_from_slice(&[7, 3, 1, 0x42, 0]);
+    wasm.extend_from_slice(&[10, import.len() as u8]);
+    wasm.extend_from_slice(&import);
+    wasm
+}
+
+#[tokio::test]
+async fn components_built_against_an_older_contract_are_refused_with_a_pointer() {
+    for (version, pointer) in [
+        ("0.2.1", "\"Moving from 0.2\""),
+        ("0.2.0", "\"Moving from 0.2\""),
+        ("0.1.5", "\"Moving from 0.1\" and \"Moving from 0.2\""),
+    ] {
+        let root = directory();
+        let guest = Guest {
+            name: "old".into(),
+            wasm: root.join("old.wasm"),
+        };
+        std::fs::write(&guest.wasm, component_importing_log(version)).unwrap();
+        let config = configure(&root, &guest, "[failure]\nrestart = \"never\"\n", "{}");
+        let error = super::precompile(&config.plugins[0]).unwrap_err();
+        let track = &version[..3];
+        assert!(
+            error.contains(&format!("built against rift:plugin {track}"))
+                && error.contains("implements 0.3.0")
+                && error.contains("against the 0.3 SDK")
+                && error.contains(pointer),
+            "{error}"
+        );
+        let runtime =
+            Extensions::with_engines(&config, Broker::default(), None, Engines::builtin()).unwrap();
+        let error = runtime.plugins().start().await.unwrap_err().to_string();
+        assert!(error.contains(pointer), "{error}");
+        runtime.plugins().shutdown().await;
+    }
+    // A component of this track that lacks imports is told what it lacks.
+    let root = directory();
+    let guest = Guest {
+        name: "partial".into(),
+        wasm: root.join("partial.wasm"),
+    };
+    std::fs::write(&guest.wasm, component_importing_log("0.3.0")).unwrap();
+    let config = configure(&root, &guest, "", "{}");
+    let error = super::precompile(&config.plugins[0]).unwrap_err();
+    assert!(
+        error.contains("does not fit this Rift's rift:plugin 0.3.0 host"),
+        "{error}"
+    );
 }
 
 /// `rift check --strict` accepts a component with and without a `chat`
@@ -1177,7 +1254,7 @@ async fn components_convert_text_with_their_own_messages() {
         name: "t".into(),
         wasm: probe.wasm,
     };
-    let manifest = "min_api = \"0.2.1\"\n[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n";
+    let manifest = "min_api = \"0.3.0\"\n[background]\nworkers = 1\n[deadlines]\ncommand = 5000\n";
     // A template from the configuration that does not render fails `init`.
     let root = directory();
     let config = configure(
@@ -1286,5 +1363,78 @@ async fn a_deferred_answer_past_the_deadline_times_out() {
         alex.command("whois nobody").await.unwrap(),
         Action::Message("unknown".into())
     );
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn components_show_patch_and_close_menus() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    let owner = crate::dialog::Owner::Plugin(guest.name.clone());
+    // A client from 1.12 on gets the menu, the patch and the close.
+    let (_handle, mut actions) = runtime
+        .players()
+        .register(41, &[41; 16], "Menu", 340, "lobby");
+    let Action::Deny(text) = session(&runtime, 41, "Menu")
+        .decision("login")
+        .await
+        .unwrap()
+    else {
+        panic!("expected the probe's report");
+    };
+    let text = text.to_string();
+    assert!(
+        text.starts_with(
+            "shown=Ok(true) updated=Ok(true) closed=Ok(true) offline=Ok(false),Ok(false),Ok(false) "
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("item=menu.slots[1].item: unknown item \"no_such_item\""),
+        "{text}"
+    );
+    assert!(text.contains("patch=patch.slots must be a list"), "{text}");
+    let Ok(PlayerAction::Menu(shown)) = actions.try_recv() else {
+        panic!("expected the menu");
+    };
+    assert_eq!(shown.owner, owner);
+    assert_eq!(shown.menu.kind(), crate::menu::Kind::Hopper);
+    assert_eq!(shown.menu.state(), Some(&serde_json::json!("st")));
+    let button = shown.menu.slots()[0].as_ref().unwrap();
+    assert_eq!(button.action.id.as_deref(), Some("s"));
+    assert_eq!(button.action.payload, Some(serde_json::json!({"a": 1})));
+    let Ok(PlayerAction::UpdateMenu(update)) = actions.try_recv() else {
+        panic!("expected the patch");
+    };
+    assert_eq!((&update.owner, update.id.as_str()), (&owner, "probe"));
+    assert_eq!(
+        actions.try_recv().ok(),
+        Some(PlayerAction::CloseMenu {
+            owner: owner.clone(),
+            id: Some("probe".into())
+        })
+    );
+    assert!(actions.try_recv().is_err());
+
+    // A 1.11 client has no menus: the calls return false.
+    let (_old, mut old_actions) = runtime
+        .players()
+        .register(42, &[42; 16], "Menu", 316, "lobby");
+    let Action::Deny(text) = session(&runtime, 42, "Menu")
+        .decision("login")
+        .await
+        .unwrap()
+    else {
+        panic!("expected the probe's report");
+    };
+    assert!(
+        text.to_string()
+            .starts_with("shown=Ok(false) updated=Ok(false) closed=Ok(false) "),
+        "{text}"
+    );
+    assert!(old_actions.try_recv().is_err());
+    assert_eq!(instance(&runtime).status(), Status::Running);
     runtime.plugins().shutdown().await;
 }

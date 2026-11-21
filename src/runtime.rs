@@ -991,786 +991,822 @@ pub async fn handle(
         let mut boss_bars_synced = None;
         let mut tab_tick = tokio::time::interval(Duration::from_millis(500));
         tab_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            let live_snapshot = snapshot.latest();
-            let network = Network {
-                snapshot: &live_snapshot,
-                addresses: &live_snapshot.addresses,
-                metrics: &metrics,
-            };
-            if session.chat_chain_broken() && session.can_switch() {
-                // A chat hook dropped a signed packet. Before the backend
-                // sees the player's next one, it gets a login without their
-                // signing material.
-                match network
-                    .reattach(&mut session, &current_backend, event)
-                    .await
-                {
-                    Ok(target) => {
-                        current_address =
-                            live_snapshot.config.backends[&target].address().to_owned();
-                        current_backend = target;
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+        // Leaves with an error only where the session ends with one.
+        let ended: io::Result<()> = async {
+            loop {
+                deliver_menu_events(&snapshot, &metrics, &mut session, &current_backend, event).await;
+                let live_snapshot = snapshot.latest();
+                let network = Network {
+                    snapshot: &live_snapshot,
+                    addresses: &live_snapshot.addresses,
+                    metrics: &metrics,
+                };
+                if session.chat_chain_broken() && session.can_switch() {
+                    // A chat hook dropped a signed packet. Before the backend
+                    // sees the player's next one, it gets a login without their
+                    // signing material.
+                    match network
+                        .reattach(&mut session, &current_backend, event)
+                        .await
+                    {
+                        Ok(target) => {
+                            current_address =
+                                live_snapshot.config.backends[&target].address().to_owned();
+                            current_backend = target;
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                            continue;
+                        }
+                        Err(error) => {
+                            let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                                rift::text::reason(&error)
+                            } else {
+                                catalog::notice(Notice::ConnectionLostNoFallback)
+                            };
+                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                            return Err(error);
+                        }
+                    }
+                }
+                event.stage = if transfer_reply.is_some() {
+                    "transfer"
+                } else {
+                    match session
+                        .client
+                        .state
+                        .phase(rift::protocol::Direction::Clientbound)
+                    {
+                        rift::protocol::State::Login => "login",
+                        rift::protocol::State::Configuration => "configuration",
+                        _ => "play",
+                    }
+                };
+                event.failure = "io_error";
+                event.backend = Some(current_backend.clone());
+                event.backend_address = Some(current_address.clone());
+                // Reaching configuration's finish acknowledgement alone is not enough:
+                // a network player must receive the new world's Join Game as well.
+                let playing = !client_closed
+                    && session.client.state.settled(rift::protocol::State::Play)
+                    && (!network_enabled || session.can_switch())
+                    && !session.switch_in_progress();
+                let extension_enabled = session.extension.is_some();
+                let tab_enabled = playing
+                    && session.tab_list_ready()
+                    && (live_snapshot.config.tab_list.is_some()
+                        || tab_override.is_some()
+                        || session.tab_list_modified());
+                let boss_bars_pending = playing
+                    && session.tab_list_ready()
+                    && boss_bars_synced != Some((session.boss_bar_revision(), boss_bars_revision));
+                let forward = async {
+                    if playing {
+                        session.forward().await
+                    } else {
+                        match timeout_at(phase_deadline, session.forward()).await {
+                            Ok(result) => result,
+                            Err(_) if network_configured && !login_complete => {
+                                Ok(SessionEvent::BackendFailed)
+                            }
+                            Err(error) => Err(error.into()),
+                        }
+                    }
+                };
+                let result = tokio::select! {
+                    result = forward => result,
+                    _ = queue_tick.tick(), if playing && extension_enabled && transfer_reply.is_none() => {
+                        // The cancelled forward poll may already have observed a
+                        // backend configuration transition, just as for admin input.
+                        if !session.client.state.settled(rift::protocol::State::Play) {
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                        if !session.can_switch() { continue; }
+                        let queued = session.extension.as_ref().unwrap().queued_target();
+                        match queued {
+                            Ok(Some(target)) => {
+                                match network.switch_for(&mut session, &current_backend, &[target], event, "queue").await {
+                                    Ok(target) => {
+                                        current_address = live_snapshot.config.backends[&target].address().to_owned();
+                                        current_backend = target;
+                                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                    }
+                                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                                    Err(error) => {
+                                        session.extension.as_ref().unwrap().leave_queue();
+                                        if session.switch_in_progress() || session.backend().is_none() { return Err(error); }
+                                        timeout(HANDSHAKE_TIMEOUT, session.send_text(&catalog::notice_with(Notice::QueueTransferFailed, &rift::text::Args::new().component("reason", rift::text::reason(&error).for_client(Profile::UNKNOWN).into_owned())))).await??;
+                                    }
+                                }
+                            }
+                            Ok(None) => {},
+                            Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_text(&rift::text::reason(&error))).await??; }
+                        }
                         continue;
                     }
+                    _ = tab_tick.tick(), if (tab_enabled || boss_bars_pending) && transfer_reply.is_none() => {
+                        // The cancelled forward poll may already have observed a
+                        // backend configuration transition; sync after the next join.
+                        if !session.tab_list_ready() {
+                            if !session.client.state.settled(rift::protocol::State::Play) {
+                                phase_deadline = Deadline::now() + Duration::from_secs(30);
+                            }
+                            continue;
+                        }
+                        // A reconfiguration discarded the client's boss bars.
+                        let boss_key = (session.boss_bar_revision(), boss_bars_revision);
+                        if boss_bars_synced != Some(boss_key) {
+                            timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
+                            boss_bars_synced = Some(boss_key);
+                        }
+                        if !tab_enabled {
+                            continue;
+                        }
+                        // Rebuild the tab list only after something it shows has changed.
+                        let tab_key = (
+                            live_snapshot.players.generation(),
+                            live_snapshot.generation,
+                            session.tab_list_revision(),
+                            tab_override_revision,
+                        );
+                        if tab_synced == Some(tab_key) {
+                            continue;
+                        }
+                        let authority = live_snapshot.extensions.permissions();
+                        let own = session.identity().and_then(|identity| identity.uuid).unwrap_or_default();
+                        let holds = |node: &str| {
+                            authority.check_active(rift_permissions::Uuid::from_bytes(own), node)
+                                == rift_permissions::Tristate::True
+                        };
+                        let view = rift::tab_list::view(
+                            &live_snapshot.players,
+                            rift::players::Viewer::Player { uuid: own, holds: &holds },
+                            live_snapshot.config.tab_list.as_ref(),
+                            tab_override.as_ref(),
+                            session.player_name().unwrap_or_default(),
+                            &current_backend,
+                            |server: &str| live_snapshot.config.instances.get(server).map(|instance| instance.group.as_str()),
+                        );
+                        timeout(HANDSHAKE_TIMEOUT, session.sync_tab_list(&view)).await??;
+                        tab_synced = Some(tab_key);
+                        continue;
+                    }
+                    action = async { actions.as_mut().expect("registered player").recv().await },
+                        if playing && actions.is_some() && transfer_reply.is_none() => {
+                        let Some(action) = action else { actions = None; continue; };
+                        use rift::extensions::PlayerAction;
+                        // The cancelled forward poll may already have observed a backend
+                        // configuration transition. Drop the action rather than the session.
+                        if !session.client.state.settled(rift::protocol::State::Play) {
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                            // Tab lists and boss bars are state and apply after the next join.
+                            // Dialogs are dropped: configuration closes every screen.
+                            // A menu's plugin learns that it was not shown.
+                            if let PlayerAction::Menu(shown) = &action { session.menu_undeliverable(shown); }
+                            if !matches!(action, PlayerAction::Kick(_) | PlayerAction::Handoff { .. } | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
+                        }
+                        match action {
+                            PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
+                            PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar_text(&text)).await??,
+                            PlayerAction::Title { title, subtitle, times } => {
+                                // A client that cannot show titles keeps its session.
+                                match timeout(HANDSHAKE_TIMEOUT, session.send_title(title.as_ref(), subtitle.as_ref(), times)).await? {
+                                    Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+                                    result => result?,
+                                }
+                            }
+                            PlayerAction::Kick(reason) => {
+                                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                                break;
+                            }
+                            // A cluster peer that drains sends its players to another peer.
+                            PlayerAction::Handoff { host, port, fallback } => {
+                                let sent = matches!(timeout(HANDSHAKE_TIMEOUT, session.transfer_client(&host, port)).await, Ok(Ok(true)));
+                                if !sent {
+                                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&fallback)).await;
+                                }
+                                break;
+                            }
+                            // Forwarded plugin messages are addressed to a server, not to
+                            // the player. Drop one that would reach a different backend.
+                            PlayerAction::Forward { server, data } => {
+                                if server == current_backend && session.bungeecord_ready() {
+                                    timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&data)).await??;
+                                }
+                            }
+                            PlayerAction::TabList(custom) => {
+                                tab_override = custom;
+                                tab_override_revision += 1;
+                            }
+                            PlayerAction::BossBar { name, bar } => {
+                                match bar {
+                                    Some(bar) => { boss_bars.insert(name, bar); }
+                                    None => { boss_bars.remove(&name); }
+                                }
+                                boss_bars_revision += 1;
+                                if session.tab_list_ready() {
+                                    timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
+                                    boss_bars_synced = Some((session.boss_bar_revision(), boss_bars_revision));
+                                }
+                            }
+                            PlayerAction::Dialog { dialog, owner } => {
+                                timeout(HANDSHAKE_TIMEOUT, session.show_dialog(dialog, owner)).await??;
+                            }
+                            PlayerAction::ClearDialog => {
+                                timeout(HANDSHAKE_TIMEOUT, session.clear_dialog()).await??;
+                            }
+                            PlayerAction::Menu(shown) => {
+                                timeout(HANDSHAKE_TIMEOUT, session.show_menu(shown)).await??;
+                            }
+                            PlayerAction::UpdateMenu(update) => {
+                                timeout(HANDSHAKE_TIMEOUT, session.update_menu(update)).await??;
+                            }
+                            PlayerAction::CloseMenu { owner, id } => {
+                                timeout(HANDSHAKE_TIMEOUT, session.close_menu(&owner, id.as_deref())).await??;
+                            }
+                            PlayerAction::EndMenus { owner, run } => {
+                                timeout(HANDSHAKE_TIMEOUT, session.end_menus_of(&owner, run)).await??;
+                            }
+                            PlayerAction::Transfer(target) => {
+                                if !session.can_switch() { continue; }
+                                let result = match network.switch_for(&mut session, &current_backend, &[target], event, "extension").await {
+                                    Ok(target) => Ok(Some(target)),
+                                    // Denials and unavailable targets leave the player where they are.
+                                    Err(_) if !session.switch_in_progress() && session.backend().is_some() && session.can_switch() => Ok(None),
+                                    Err(error) => Err(error),
+                                };
+                                if let Some(target) = settle_switch(&network, &mut session, &current_backend, result, event).await? {
+                                    current_address = live_snapshot.config.backends[&target].address().to_owned();
+                                    current_backend = target;
+                                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    request = async { transfers.as_mut().expect("registered player").recv().await },
+                        if playing && transfers.is_some() && transfer_reply.is_none() => {
+                        let Some(request) = request else { transfers = None; continue; };
+                        // The cancelled forward poll may already have queued the
+                        // backend's Start Configuration behind client backpressure.
+                        if !session.client.state.settled(rift::protocol::State::Play) {
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                        if request.reply.is_closed() { continue; }
+                        let target = &request.backend;
+                        if !session.can_switch() || current_backend == *target {
+                            let _ = request.reply.send(Err("transfer requires a joined Minecraft 1.8.9–26.3 player and a different backend".into()));
+                            continue;
+                        }
+                        let name = session.player_name().unwrap_or_default();
+                        let uuid = crate::network::expected_uuid(&session);
+                        if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name, &snapshot.subject(uuid)))
+                            || !request.snapshot.admits(target, name, uuid)
+                            || control.draining(&request.snapshot.config, target)
+                            || !request.snapshot.reachable(target)
+                        {
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
+                            continue;
+                        }
+                        if let Some(extension) = &mut session.extension
+                            && let Err(error) = extension.before_transfer(target, request.reply.reason()).await {
+                                metrics.transfer_failures.inc();
+                                let _ = request.reply.send(Err(error.to_string()));
+                                continue;
+                            }
+                        let target_network = Network {
+                            snapshot: &request.snapshot,
+                            addresses: &request.snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        let lease = match target_network.prepare_transfer(&mut session, &current_backend, target, event).await {
+                            Ok(lease) => lease,
+                            Err(error) => {
+                                metrics.transfer_failures.inc();
+                                if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                                let _ = request.reply.send(Err(format!("target transfer preparation failed: {error}")));
+                                if error.kind() == io::ErrorKind::PermissionDenied || !session.can_switch() {
+                                    return Err(error);
+                                }
+                                if session.backend().is_none() {
+                                    let candidates = network.recovery_candidates(&current_backend);
+                                    let recovered = network.switch(&mut session, &current_backend, &candidates, event).await?;
+                                    current_address = live_snapshot.config.backends[&recovered].address().to_owned();
+                                    current_backend = recovered;
+                                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                    metrics.fallbacks.inc();
+                                }
+                                continue;
+                            }
+                        };
+                        if request.reply.is_closed() {
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            continue;
+                        }
+                        let deadline = Deadline::now() + Duration::from_secs(30);
+                        let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
+                        let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
+                            Ok(upstream) => upstream,
+                            Err(error) => {
+                                metrics.transfer_failures.inc();
+                                metrics.backend_failures.inc();
+                                if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                                request.snapshot.health.record(target, false);
+                                event.backend = Some(target.clone());
+                                event.backend_address = Some(request.snapshot.config.backends[target].address().to_owned());
+                                (event.stage, event.failure) = match error.stage {
+                                    rift::routing::ConnectStage::Dns => ("dns", "dns_error"),
+                                    rift::routing::ConnectStage::Connect => ("connect", "connect_error"),
+                                };
+                                event.emit("backend_attempt_failed", &error.error, Some(error.error.kind()));
+                                let _ = request.reply.send(Err(format!("target connection failed: {}; player remains on the original backend", error.error)));
+                                continue;
+                            }
+                        };
+                        if control.draining(&request.snapshot.config, target) {
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err("target backend started draining; player remains on the original backend".into()));
+                            continue;
+                        }
+                        request.snapshot.health.record(target, true);
+                        if let Err(error) = upstream.set_nodelay(true) {
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err(format!("target socket setup failed; player remains on the original backend: {error}")));
+                            continue;
+                        }
+                        event.stage = "transfer";
+                        event.failure = "transfer_failed";
+                        let protocol = match session.version() {
+                            Ok(client) => rift::backend_version::protocol(&request.snapshot.config, target, client, target_network.addresses).await,
+                            Err(_) => Ok(None),
+                        };
+                        let protocol = match protocol {
+                            Ok(protocol) => protocol,
+                            Err(error) => {
+                                if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                                metrics.transfer_failures.inc();
+                                let _ = request.reply.send(Err(format!("target backend does not take the player's Minecraft version; player remains on the original backend: {error}")));
+                                continue;
+                            }
+                        };
+                        target_network.push_permissions(&session, target);
+                        let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
+                        match result {
+                            Ok(Ok(())) => {
+                                event.hold_managed_backend(target, lease);
+                                current_backend = target.clone();
+                                current_address = request.snapshot.config.backends[target].address().to_owned();
+                                transfer_reply = Some(request.reply);
+                                phase_deadline = deadline;
+                                continue;
+                            }
+                            result => {
+                                let error = match result { Ok(Err(error)) => error, Err(error) => error.into(), _ => unreachable!() };
+                                if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                                metrics.transfer_failures.inc();
+                                if !session.switch_in_progress() && session.can_switch() {
+                                    let _ = request.reply.send(Err(format!("transfer failed: {error}")));
+                                    if session.backend().is_some() { continue; }
+                                    if error.kind() != io::ErrorKind::PermissionDenied {
+                                        // The old backend failed during preflight. Let
+                                        // the ordinary recovery path choose an allowed hub.
+                                        Ok(SessionEvent::BackendFailed)
+                                    } else {
+                                        return Err(error);
+                                    }
+                                } else {
+                                    let _ = request.reply.send(Err(format!("transfer failed; session closed: {error}")));
+                                    // Transition writes may be partial; close directly.
+                                    return Err(error);
+                                }
+                            }
+                        }
+                    }
+                };
+                match result {
+                    Ok(SessionEvent::Packet) => {
+                        if !login_complete && session.identity().is_some() {
+                            login_complete = true;
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                        if registration.is_none()
+                            && let Some(identity) = session.identity()
+                            && let Some(uuid) = identity.uuid
+                        {
+                            // The rule goes in with the record, so no tab list or
+                            // count ever shows a hidden player, not even briefly.
+                            let visible_to = snapshot
+                                .extensions
+                                .players()
+                                .visibility(&uuid, &current_backend);
+                            // Only a capped cluster asks whether the player may
+                            // pass the cap.
+                            let bypass_cap = snapshot.players.max_players().is_some() && {
+                                use rift::config::AccessSubject;
+                                snapshot
+                                    .subject(Some(Uuid::from_bytes(uuid)))
+                                    .holds(rift::players::MAX_PLAYERS_BYPASS)
+                            };
+                            // Ready at once on a single Rift; a cluster waits
+                            // for the claim's commit.
+                            let registered = if let Some(reservation) = name_reservation.take() {
+                                reservation
+                                    .claim_player(uuid, &current_backend, visible_to, bypass_cap)
+                                    .await
+                            } else {
+                                snapshot
+                                    .players
+                                    .claim_player(
+                                        uuid,
+                                        &identity.name,
+                                        &current_backend,
+                                        visible_to,
+                                        event.id(),
+                                        bypass_cap,
+                                    )
+                                    .await
+                            };
+                            match registered {
+                                Ok(guard) => {
+                                    // Skins for other players' network tab lists.
+                                    if let Some(profile) = session.authenticated_profile() {
+                                        guard.set_properties(&profile.properties);
+                                    }
+                                    // For other peers' BungeeCord `IPOther`.
+                                    guard.set_address(peer);
+                                    registration = Some(guard);
+                                }
+                                Err(error) => {
+                                    // A full or cut-off network says so; anything
+                                    // else is told as it always was.
+                                    let reason = match error.kind() {
+                                        io::ErrorKind::QuotaExceeded
+                                        | io::ErrorKind::NotConnected
+                                        | io::ErrorKind::TimedOut => rift::text::reason(&error),
+                                        _ => catalog::notice(Notice::LoginAlreadyConnected),
+                                    };
+                                    let _ =
+                                        timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
+                                            .await;
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        let ready = session.client.state.settled(rift::protocol::State::Play)
+                            && (!network_enabled || session.can_switch())
+                            && !session.switch_in_progress();
+                        if ready {
+                            event.retain_managed_backend(&current_backend);
+                            if let Some(player) = &mut player {
+                                if registered_backend != current_backend {
+                                    player.move_backend(current_backend.clone());
+                                    control.moved(event.id(), &current_backend);
+                                    metrics.transfers.inc();
+                                }
+                            } else {
+                                player = Some(Player::new_on_backend(
+                                    metrics.clone(),
+                                    current_backend.clone(),
+                                ));
+                                metrics.observe_login(event.elapsed());
+                                let (guard, receiver) = control.register(
+                                    event.id(),
+                                    current_backend.clone(),
+                                    session.handshake.protocol,
+                                    session.player_name().unwrap_or_default().to_owned(),
+                                    peer,
+                                );
+                                admin_registration = Some(guard);
+                                transfers = Some(receiver);
+                                if let Some(identity) = session.identity()
+                                    && let Some(uuid) = identity.uuid
+                                {
+                                    let profile = rift::extensions::Profile {
+                                        ip: peer.ip().to_canonical().to_string(),
+                                        properties: session
+                                            .authenticated_profile()
+                                            .map(|profile| {
+                                                profile
+                                                    .properties
+                                                    .iter()
+                                                    .map(|property| {
+                                                        rift::plugins::api::ProfileProperty {
+                                                            name: property.name.clone(),
+                                                            value: property.value.clone(),
+                                                            signature: property.signature.clone(),
+                                                        }
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                    };
+                                    let (handle, receiver) =
+                                        snapshot.extensions.players().register_with(
+                                            event.id(),
+                                            &uuid,
+                                            &identity.name,
+                                            session.handshake.protocol,
+                                            &current_backend,
+                                            profile,
+                                        );
+                                    // 1.20.2+ clients said it during configuration.
+                                    handle.set_locale(session.locale());
+                                    published_locale = session.locale().map(str::to_owned);
+                                    let language = handle.language();
+                                    rift::text::catalog::set_language(language.as_deref());
+                                    if let Some(extension) = &mut session.extension {
+                                        extension.context.language = language;
+                                    }
+                                    directory = Some(handle);
+                                    actions = Some(receiver);
+                                    // Joining set the proxy contexts to `server` alone.
+                                    session.sync_permission_contexts();
+                                }
+                            }
+                            if registered_backend != current_backend {
+                                // The directory first: it resolves the rule for the
+                                // new server onto the roster record before the
+                                // roster moves the player there.
+                                if let Some(directory) = &directory {
+                                    directory.set_server(&current_backend);
+                                    // The switch reset them after the new Join Game.
+                                    session.sync_permission_contexts();
+                                }
+                                if let Some(registration) = &registration {
+                                    registration.set_server(&current_backend);
+                                }
+                                registered_backend.clone_from(&current_backend);
+                                if let Some(extension) = &mut session.extension {
+                                    extension.ready(&current_backend).await;
+                                }
+                            }
+                            if let Some(reply) = transfer_reply.take() {
+                                let _ = reply.send(Ok(serde_json::json!({
+                                    "connection_id": event.id(), "backend": current_backend,
+                                })));
+                            }
+                            if let Some(notice) = kick_notice.take() {
+                                timeout(HANDSHAKE_TIMEOUT, session.send_text(&notice)).await??;
+                            }
+                        }
+                        if playing && !ready {
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                        // Client Information arrives after Join Game on older
+                        // clients and again whenever the language setting changes.
+                        let languages = snapshot.extensions.players().language_generation();
+                        if let Some(directory) = &directory
+                            && (session.locale() != published_locale.as_deref()
+                                || languages != language_generation)
+                        {
+                            directory.set_locale(session.locale());
+                            published_locale = session.locale().map(str::to_owned);
+                            language_generation = languages;
+                            // A plugin's choice first, else the client's locale.
+                            let language = directory.language();
+                            rift::text::catalog::set_language(language.as_deref());
+                            if let Some(extension) = &mut session.extension {
+                                extension.context.language = language;
+                            }
+                        }
+                    }
+                    Ok(SessionEvent::BungeeCord(request)) => {
+                        let live_snapshot = snapshot.latest();
+                        if let Some(identity) = session.identity()
+                            && let Ok(Some(payload)) = crate::bungee_runtime::handle(
+                                &live_snapshot,
+                                &current_backend,
+                                &identity,
+                                peer,
+                                request,
+                            )
+                        {
+                            timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&payload)).await??;
+                        }
+                    }
+                    Ok(SessionEvent::Suggestions(request)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        let servers = network.joinable(&session, &current_backend);
+                        timeout(
+                            HANDSHAKE_TIMEOUT,
+                            session.answer_suggestions(&request, || servers),
+                        )
+                        .await??;
+                    }
+                    Ok(SessionEvent::ProxyCommand(command))
+                        if permission_command(&session, &command).is_some() =>
+                    {
+                        let live_snapshot = snapshot.latest();
+                        let args = permission_command(&session, &command).unwrap_or_default();
+                        let output = match session.identity().and_then(|identity| identity.uuid) {
+                            Some(uuid) => {
+                                let sender = rift::permissions::command::Sender::Player(
+                                    rift_permissions::Uuid::from_bytes(uuid),
+                                );
+                                rift::permissions::command::execute(
+                                    &live_snapshot.perms.env(),
+                                    &sender,
+                                    &args,
+                                )
+                                .await
+                            }
+                            None => continue,
+                        };
+                        timeout(
+                            HANDSHAKE_TIMEOUT,
+                            session.send_system_component(&output.component()),
+                        )
+                        .await??;
+                    }
+                    Ok(SessionEvent::ProxyCommand(command)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        let result = match timeout(
+                            live_snapshot.config.limits.connect_timeout
+                                + HANDSHAKE_TIMEOUT
+                                + live_snapshot
+                                    .config
+                                    .managed_servers
+                                    .values()
+                                    .map(|server| server.start_timeout)
+                                    .sum::<Duration>(),
+                            network.command(&mut session, &current_backend, &command, event),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(error.into()),
+                        };
+                        if let Some(target) =
+                            settle_switch(&network, &mut session, &current_backend, result, event)
+                                .await?
+                        {
+                            current_address =
+                                live_snapshot.config.backends[&target].address().to_owned();
+                            current_backend = target;
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                    }
+                    Ok(SessionEvent::Dialog(click)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        network
+                            .dialog(&session, &current_backend, event, click)
+                            .await;
+                    }
+                    Ok(SessionEvent::Menu(delivery)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        network
+                            .menu(&session, &current_backend, event, delivery)
+                            .await;
+                    }
+                    Ok(SessionEvent::Chat(chat)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        network.chat(&mut session, chat).await?;
+                    }
+                    Ok(SessionEvent::Disconnected) => break,
+                    Ok(SessionEvent::BackendKicked(reason)) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        let Some((target, notice)) = network
+                            .kicked(&mut session, &current_backend, &reason, event)
+                            .await?
+                        else {
+                            break;
+                        };
+                        metrics.fallbacks.inc();
+                        current_address = live_snapshot.config.backends[&target].address().to_owned();
+                        current_backend = target;
+                        kick_notice = Some(notice);
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    Ok(SessionEvent::ClientClosed) => {
+                        client_closed = true;
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed) => {
+                        let live_snapshot = snapshot.latest();
+                        let network = Network {
+                            snapshot: &live_snapshot,
+                            addresses: &live_snapshot.addresses,
+                            metrics: &metrics,
+                        };
+                        if client_closed {
+                            break;
+                        }
+                        if network_configured && !login_complete && session.reset_initial_backend() {
+                            if let Some(extension) = &session.extension {
+                                extension.release(&current_backend);
+                            }
+                            let next = candidates
+                                .iter()
+                                .position(|name| name == &current_backend)
+                                .unwrap()
+                                + 1;
+                            if next < candidates.len()
+                                && let Ok(target) = network
+                                    .connect_initial(
+                                        &mut session,
+                                        &candidates[next..],
+                                        &mut deadline,
+                                        event,
+                                    )
+                                    .await
+                            {
+                                metrics.fallbacks.inc();
+                                current_address =
+                                    live_snapshot.config.backends[&target].address().to_owned();
+                                current_backend = target;
+                                phase_deadline = entry_deadline(&current_backend, deadline);
+                                continue;
+                            }
+                        }
+                        let candidates = network.recovery_candidates(&current_backend);
+                        if network_enabled && session.can_switch() && !candidates.is_empty() {
+                            match network
+                                .switch(&mut session, &current_backend, &candidates, event)
+                                .await
+                            {
+                                Ok(target) => {
+                                    metrics.fallbacks.inc();
+                                    current_address =
+                                        live_snapshot.config.backends[&target].address().to_owned();
+                                    current_backend = target;
+                                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                                        rift::text::reason(&error)
+                                    } else {
+                                        catalog::notice(Notice::ConnectionLostNoFallback)
+                                    };
+                                    let _ =
+                                        timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
+                                            .await;
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        timeout(
+                            HANDSHAKE_TIMEOUT,
+                            session.disconnect_text(&catalog::notice(Notice::ConnectionLost)),
+                        )
+                        .await??;
+                        break;
+                    }
                     Err(error) => {
-                        let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                        if let Some(reply) = transfer_reply.take() {
+                            metrics.transfer_failures.inc();
+                            let _ =
+                                reply.send(Err(format!("transfer failed; session closed: {error}")));
+                        }
+                        let reason = if error.kind() == io::ErrorKind::Unsupported {
                             rift::text::reason(&error)
                         } else {
-                            catalog::notice(Notice::ConnectionLostNoFallback)
+                            catalog::notice(Notice::ConnectionFailed)
                         };
                         let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                         return Err(error);
                     }
                 }
             }
-            event.stage = if transfer_reply.is_some() {
-                "transfer"
-            } else {
-                match session
-                    .client
-                    .state
-                    .phase(rift::protocol::Direction::Clientbound)
-                {
-                    rift::protocol::State::Login => "login",
-                    rift::protocol::State::Configuration => "configuration",
-                    _ => "play",
-                }
-            };
-            event.failure = "io_error";
-            event.backend = Some(current_backend.clone());
-            event.backend_address = Some(current_address.clone());
-            // Reaching configuration's finish acknowledgement alone is not enough:
-            // a network player must receive the new world's Join Game as well.
-            let playing = !client_closed
-                && session.client.state.settled(rift::protocol::State::Play)
-                && (!network_enabled || session.can_switch())
-                && !session.switch_in_progress();
-            let extension_enabled = session.extension.is_some();
-            let tab_enabled = playing
-                && session.tab_list_ready()
-                && (live_snapshot.config.tab_list.is_some()
-                    || tab_override.is_some()
-                    || session.tab_list_modified());
-            let boss_bars_pending = playing
-                && session.tab_list_ready()
-                && boss_bars_synced != Some((session.boss_bar_revision(), boss_bars_revision));
-            let forward = async {
-                if playing {
-                    session.forward().await
-                } else {
-                    match timeout_at(phase_deadline, session.forward()).await {
-                        Ok(result) => result,
-                        Err(_) if network_configured && !login_complete => {
-                            Ok(SessionEvent::BackendFailed)
-                        }
-                        Err(error) => Err(error.into()),
-                    }
-                }
-            };
-            let result = tokio::select! {
-                result = forward => result,
-                _ = queue_tick.tick(), if playing && extension_enabled && transfer_reply.is_none() => {
-                    // The cancelled forward poll may already have observed a
-                    // backend configuration transition, just as for admin input.
-                    if !session.client.state.settled(rift::protocol::State::Play) {
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                    }
-                    if !session.can_switch() { continue; }
-                    let queued = session.extension.as_ref().unwrap().queued_target();
-                    match queued {
-                        Ok(Some(target)) => {
-                            match network.switch_for(&mut session, &current_backend, &[target], event, "queue").await {
-                                Ok(target) => {
-                                    current_address = live_snapshot.config.backends[&target].address().to_owned();
-                                    current_backend = target;
-                                    phase_deadline = Deadline::now() + Duration::from_secs(30);
-                                }
-                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
-                                Err(error) => {
-                                    session.extension.as_ref().unwrap().leave_queue();
-                                    if session.switch_in_progress() || session.backend().is_none() { return Err(error); }
-                                    timeout(HANDSHAKE_TIMEOUT, session.send_text(&catalog::notice_with(Notice::QueueTransferFailed, &rift::text::Args::new().component("reason", rift::text::reason(&error).for_client(Profile::UNKNOWN).into_owned())))).await??;
-                                }
-                            }
-                        }
-                        Ok(None) => {},
-                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_text(&rift::text::reason(&error))).await??; }
-                    }
-                    continue;
-                }
-                _ = tab_tick.tick(), if (tab_enabled || boss_bars_pending) && transfer_reply.is_none() => {
-                    // The cancelled forward poll may already have observed a
-                    // backend configuration transition; sync after the next join.
-                    if !session.tab_list_ready() {
-                        if !session.client.state.settled(rift::protocol::State::Play) {
-                            phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        }
-                        continue;
-                    }
-                    // A reconfiguration discarded the client's boss bars.
-                    let boss_key = (session.boss_bar_revision(), boss_bars_revision);
-                    if boss_bars_synced != Some(boss_key) {
-                        timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
-                        boss_bars_synced = Some(boss_key);
-                    }
-                    if !tab_enabled {
-                        continue;
-                    }
-                    // Rebuild the tab list only after something it shows has changed.
-                    let tab_key = (
-                        live_snapshot.players.generation(),
-                        live_snapshot.generation,
-                        session.tab_list_revision(),
-                        tab_override_revision,
-                    );
-                    if tab_synced == Some(tab_key) {
-                        continue;
-                    }
-                    let authority = live_snapshot.extensions.permissions();
-                    let own = session.identity().and_then(|identity| identity.uuid).unwrap_or_default();
-                    let holds = |node: &str| {
-                        authority.check_active(rift_permissions::Uuid::from_bytes(own), node)
-                            == rift_permissions::Tristate::True
-                    };
-                    let view = rift::tab_list::view(
-                        &live_snapshot.players,
-                        rift::players::Viewer::Player { uuid: own, holds: &holds },
-                        live_snapshot.config.tab_list.as_ref(),
-                        tab_override.as_ref(),
-                        session.player_name().unwrap_or_default(),
-                        &current_backend,
-                        |server: &str| live_snapshot.config.instances.get(server).map(|instance| instance.group.as_str()),
-                    );
-                    timeout(HANDSHAKE_TIMEOUT, session.sync_tab_list(&view)).await??;
-                    tab_synced = Some(tab_key);
-                    continue;
-                }
-                action = async { actions.as_mut().expect("registered player").recv().await },
-                    if playing && actions.is_some() && transfer_reply.is_none() => {
-                    let Some(action) = action else { actions = None; continue; };
-                    use rift::extensions::PlayerAction;
-                    // The cancelled forward poll may already have observed a backend
-                    // configuration transition. Drop the action rather than the session.
-                    if !session.client.state.settled(rift::protocol::State::Play) {
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        // Tab lists and boss bars are state and apply after the next join.
-                        // Dialogs are dropped: configuration closes every screen.
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::Handoff { .. } | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
-                    }
-                    match action {
-                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
-                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar_text(&text)).await??,
-                        PlayerAction::Title { title, subtitle, times } => {
-                            // A client that cannot show titles keeps its session.
-                            match timeout(HANDSHAKE_TIMEOUT, session.send_title(title.as_ref(), subtitle.as_ref(), times)).await? {
-                                Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
-                                result => result?,
-                            }
-                        }
-                        PlayerAction::Kick(reason) => {
-                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
-                            break;
-                        }
-                        // A cluster peer that drains sends its players to another peer.
-                        PlayerAction::Handoff { host, port, fallback } => {
-                            let sent = matches!(timeout(HANDSHAKE_TIMEOUT, session.transfer_client(&host, port)).await, Ok(Ok(true)));
-                            if !sent {
-                                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&fallback)).await;
-                            }
-                            break;
-                        }
-                        // Forwarded plugin messages are addressed to a server, not to
-                        // the player. Drop one that would reach a different backend.
-                        PlayerAction::Forward { server, data } => {
-                            if server == current_backend && session.bungeecord_ready() {
-                                timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&data)).await??;
-                            }
-                        }
-                        PlayerAction::TabList(custom) => {
-                            tab_override = custom;
-                            tab_override_revision += 1;
-                        }
-                        PlayerAction::BossBar { name, bar } => {
-                            match bar {
-                                Some(bar) => { boss_bars.insert(name, bar); }
-                                None => { boss_bars.remove(&name); }
-                            }
-                            boss_bars_revision += 1;
-                            if session.tab_list_ready() {
-                                timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
-                                boss_bars_synced = Some((session.boss_bar_revision(), boss_bars_revision));
-                            }
-                        }
-                        PlayerAction::Dialog { dialog, owner } => {
-                            timeout(HANDSHAKE_TIMEOUT, session.show_dialog(dialog, owner)).await??;
-                        }
-                        PlayerAction::ClearDialog => {
-                            timeout(HANDSHAKE_TIMEOUT, session.clear_dialog()).await??;
-                        }
-                        PlayerAction::Transfer(target) => {
-                            if !session.can_switch() { continue; }
-                            let result = match network.switch_for(&mut session, &current_backend, &[target], event, "extension").await {
-                                Ok(target) => Ok(Some(target)),
-                                // Denials and unavailable targets leave the player where they are.
-                                Err(_) if !session.switch_in_progress() && session.backend().is_some() && session.can_switch() => Ok(None),
-                                Err(error) => Err(error),
-                            };
-                            if let Some(target) = settle_switch(&network, &mut session, &current_backend, result, event).await? {
-                                current_address = live_snapshot.config.backends[&target].address().to_owned();
-                                current_backend = target;
-                                phase_deadline = Deadline::now() + Duration::from_secs(30);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                request = async { transfers.as_mut().expect("registered player").recv().await },
-                    if playing && transfers.is_some() && transfer_reply.is_none() => {
-                    let Some(request) = request else { transfers = None; continue; };
-                    // The cancelled forward poll may already have queued the
-                    // backend's Start Configuration behind client backpressure.
-                    if !session.client.state.settled(rift::protocol::State::Play) {
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                    }
-                    if request.reply.is_closed() { continue; }
-                    let target = &request.backend;
-                    if !session.can_switch() || current_backend == *target {
-                        let _ = request.reply.send(Err("transfer requires a joined Minecraft 1.8.9–26.3 player and a different backend".into()));
-                        continue;
-                    }
-                    let name = session.player_name().unwrap_or_default();
-                    let uuid = crate::network::expected_uuid(&session);
-                    if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name, &snapshot.subject(uuid)))
-                        || !request.snapshot.admits(target, name, uuid)
-                        || control.draining(&request.snapshot.config, target)
-                        || !request.snapshot.reachable(target)
-                    {
-                        metrics.transfer_failures.inc();
-                        let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
-                        continue;
-                    }
-                    if let Some(extension) = &mut session.extension
-                        && let Err(error) = extension.before_transfer(target, request.reply.reason()).await {
-                            metrics.transfer_failures.inc();
-                            let _ = request.reply.send(Err(error.to_string()));
-                            continue;
-                        }
-                    let target_network = Network {
-                        snapshot: &request.snapshot,
-                        addresses: &request.snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    let lease = match target_network.prepare_transfer(&mut session, &current_backend, target, event).await {
-                        Ok(lease) => lease,
-                        Err(error) => {
-                            metrics.transfer_failures.inc();
-                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                            let _ = request.reply.send(Err(format!("target transfer preparation failed: {error}")));
-                            if error.kind() == io::ErrorKind::PermissionDenied || !session.can_switch() {
-                                return Err(error);
-                            }
-                            if session.backend().is_none() {
-                                let candidates = network.recovery_candidates(&current_backend);
-                                let recovered = network.switch(&mut session, &current_backend, &candidates, event).await?;
-                                current_address = live_snapshot.config.backends[&recovered].address().to_owned();
-                                current_backend = recovered;
-                                phase_deadline = Deadline::now() + Duration::from_secs(30);
-                                metrics.fallbacks.inc();
-                            }
-                            continue;
-                        }
-                    };
-                    if request.reply.is_closed() {
-                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                        continue;
-                    }
-                    let deadline = Deadline::now() + Duration::from_secs(30);
-                    let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
-                    let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
-                        Ok(upstream) => upstream,
-                        Err(error) => {
-                            metrics.transfer_failures.inc();
-                            metrics.backend_failures.inc();
-                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                            request.snapshot.health.record(target, false);
-                            event.backend = Some(target.clone());
-                            event.backend_address = Some(request.snapshot.config.backends[target].address().to_owned());
-                            (event.stage, event.failure) = match error.stage {
-                                rift::routing::ConnectStage::Dns => ("dns", "dns_error"),
-                                rift::routing::ConnectStage::Connect => ("connect", "connect_error"),
-                            };
-                            event.emit("backend_attempt_failed", &error.error, Some(error.error.kind()));
-                            let _ = request.reply.send(Err(format!("target connection failed: {}; player remains on the original backend", error.error)));
-                            continue;
-                        }
-                    };
-                    if control.draining(&request.snapshot.config, target) {
-                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                        metrics.transfer_failures.inc();
-                        let _ = request.reply.send(Err("target backend started draining; player remains on the original backend".into()));
-                        continue;
-                    }
-                    request.snapshot.health.record(target, true);
-                    if let Err(error) = upstream.set_nodelay(true) {
-                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                        metrics.transfer_failures.inc();
-                        let _ = request.reply.send(Err(format!("target socket setup failed; player remains on the original backend: {error}")));
-                        continue;
-                    }
-                    event.stage = "transfer";
-                    event.failure = "transfer_failed";
-                    let protocol = match session.version() {
-                        Ok(client) => rift::backend_version::protocol(&request.snapshot.config, target, client, target_network.addresses).await,
-                        Err(_) => Ok(None),
-                    };
-                    let protocol = match protocol {
-                        Ok(protocol) => protocol,
-                        Err(error) => {
-                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                            metrics.transfer_failures.inc();
-                            let _ = request.reply.send(Err(format!("target backend does not take the player's Minecraft version; player remains on the original backend: {error}")));
-                            continue;
-                        }
-                    };
-                    target_network.push_permissions(&session, target);
-                    let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
-                    match result {
-                        Ok(Ok(())) => {
-                            event.hold_managed_backend(target, lease);
-                            current_backend = target.clone();
-                            current_address = request.snapshot.config.backends[target].address().to_owned();
-                            transfer_reply = Some(request.reply);
-                            phase_deadline = deadline;
-                            continue;
-                        }
-                        result => {
-                            let error = match result { Ok(Err(error)) => error, Err(error) => error.into(), _ => unreachable!() };
-                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
-                            metrics.transfer_failures.inc();
-                            if !session.switch_in_progress() && session.can_switch() {
-                                let _ = request.reply.send(Err(format!("transfer failed: {error}")));
-                                if session.backend().is_some() { continue; }
-                                if error.kind() != io::ErrorKind::PermissionDenied {
-                                    // The old backend failed during preflight. Let
-                                    // the ordinary recovery path choose an allowed hub.
-                                    Ok(SessionEvent::BackendFailed)
-                                } else {
-                                    return Err(error);
-                                }
-                            } else {
-                                let _ = request.reply.send(Err(format!("transfer failed; session closed: {error}")));
-                                // Transition writes may be partial; close directly.
-                                return Err(error);
-                            }
-                        }
-                    }
-                }
-            };
-            match result {
-                Ok(SessionEvent::Packet) => {
-                    if !login_complete && session.identity().is_some() {
-                        login_complete = true;
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                    }
-                    if registration.is_none()
-                        && let Some(identity) = session.identity()
-                        && let Some(uuid) = identity.uuid
-                    {
-                        // The rule goes in with the record, so no tab list or
-                        // count ever shows a hidden player, not even briefly.
-                        let visible_to = snapshot
-                            .extensions
-                            .players()
-                            .visibility(&uuid, &current_backend);
-                        // Only a capped cluster asks whether the player may
-                        // pass the cap.
-                        let bypass_cap = snapshot.players.max_players().is_some() && {
-                            use rift::config::AccessSubject;
-                            snapshot
-                                .subject(Some(Uuid::from_bytes(uuid)))
-                                .holds(rift::players::MAX_PLAYERS_BYPASS)
-                        };
-                        // Ready at once on a single Rift; a cluster waits
-                        // for the claim's commit.
-                        let registered = if let Some(reservation) = name_reservation.take() {
-                            reservation
-                                .claim_player(uuid, &current_backend, visible_to, bypass_cap)
-                                .await
-                        } else {
-                            snapshot
-                                .players
-                                .claim_player(
-                                    uuid,
-                                    &identity.name,
-                                    &current_backend,
-                                    visible_to,
-                                    event.id(),
-                                    bypass_cap,
-                                )
-                                .await
-                        };
-                        match registered {
-                            Ok(guard) => {
-                                // Skins for other players' network tab lists.
-                                if let Some(profile) = session.authenticated_profile() {
-                                    guard.set_properties(&profile.properties);
-                                }
-                                // For other peers' BungeeCord `IPOther`.
-                                guard.set_address(peer);
-                                registration = Some(guard);
-                            }
-                            Err(error) => {
-                                // A full or cut-off network says so; anything
-                                // else is told as it always was.
-                                let reason = match error.kind() {
-                                    io::ErrorKind::QuotaExceeded
-                                    | io::ErrorKind::NotConnected
-                                    | io::ErrorKind::TimedOut => rift::text::reason(&error),
-                                    _ => catalog::notice(Notice::LoginAlreadyConnected),
-                                };
-                                let _ =
-                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
-                                        .await;
-                                return Err(error);
-                            }
-                        }
-                    }
-                    let ready = session.client.state.settled(rift::protocol::State::Play)
-                        && (!network_enabled || session.can_switch())
-                        && !session.switch_in_progress();
-                    if ready {
-                        event.retain_managed_backend(&current_backend);
-                        if let Some(player) = &mut player {
-                            if registered_backend != current_backend {
-                                player.move_backend(current_backend.clone());
-                                control.moved(event.id(), &current_backend);
-                                metrics.transfers.inc();
-                            }
-                        } else {
-                            player = Some(Player::new_on_backend(
-                                metrics.clone(),
-                                current_backend.clone(),
-                            ));
-                            metrics.observe_login(event.elapsed());
-                            let (guard, receiver) = control.register(
-                                event.id(),
-                                current_backend.clone(),
-                                session.handshake.protocol,
-                                session.player_name().unwrap_or_default().to_owned(),
-                                peer,
-                            );
-                            admin_registration = Some(guard);
-                            transfers = Some(receiver);
-                            if let Some(identity) = session.identity()
-                                && let Some(uuid) = identity.uuid
-                            {
-                                let profile = rift::extensions::Profile {
-                                    ip: peer.ip().to_canonical().to_string(),
-                                    properties: session
-                                        .authenticated_profile()
-                                        .map(|profile| {
-                                            profile
-                                                .properties
-                                                .iter()
-                                                .map(|property| {
-                                                    rift::plugins::api::ProfileProperty {
-                                                        name: property.name.clone(),
-                                                        value: property.value.clone(),
-                                                        signature: property.signature.clone(),
-                                                    }
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                };
-                                let (handle, receiver) =
-                                    snapshot.extensions.players().register_with(
-                                        event.id(),
-                                        &uuid,
-                                        &identity.name,
-                                        session.handshake.protocol,
-                                        &current_backend,
-                                        profile,
-                                    );
-                                // 1.20.2+ clients said it during configuration.
-                                handle.set_locale(session.locale());
-                                published_locale = session.locale().map(str::to_owned);
-                                let language = handle.language();
-                                rift::text::catalog::set_language(language.as_deref());
-                                if let Some(extension) = &mut session.extension {
-                                    extension.context.language = language;
-                                }
-                                directory = Some(handle);
-                                actions = Some(receiver);
-                                // Joining set the proxy contexts to `server` alone.
-                                session.sync_permission_contexts();
-                            }
-                        }
-                        if registered_backend != current_backend {
-                            // The directory first: it resolves the rule for the
-                            // new server onto the roster record before the
-                            // roster moves the player there.
-                            if let Some(directory) = &directory {
-                                directory.set_server(&current_backend);
-                                // The switch reset them after the new Join Game.
-                                session.sync_permission_contexts();
-                            }
-                            if let Some(registration) = &registration {
-                                registration.set_server(&current_backend);
-                            }
-                            registered_backend.clone_from(&current_backend);
-                            if let Some(extension) = &mut session.extension {
-                                extension.ready(&current_backend).await;
-                            }
-                        }
-                        if let Some(reply) = transfer_reply.take() {
-                            let _ = reply.send(Ok(serde_json::json!({
-                                "connection_id": event.id(), "backend": current_backend,
-                            })));
-                        }
-                        if let Some(notice) = kick_notice.take() {
-                            timeout(HANDSHAKE_TIMEOUT, session.send_text(&notice)).await??;
-                        }
-                    }
-                    if playing && !ready {
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                    }
-                    // Client Information arrives after Join Game on older
-                    // clients and again whenever the language setting changes.
-                    let languages = snapshot.extensions.players().language_generation();
-                    if let Some(directory) = &directory
-                        && (session.locale() != published_locale.as_deref()
-                            || languages != language_generation)
-                    {
-                        directory.set_locale(session.locale());
-                        published_locale = session.locale().map(str::to_owned);
-                        language_generation = languages;
-                        // A plugin's choice first, else the client's locale.
-                        let language = directory.language();
-                        rift::text::catalog::set_language(language.as_deref());
-                        if let Some(extension) = &mut session.extension {
-                            extension.context.language = language;
-                        }
-                    }
-                }
-                Ok(SessionEvent::BungeeCord(request)) => {
-                    let live_snapshot = snapshot.latest();
-                    if let Some(identity) = session.identity()
-                        && let Ok(Some(payload)) = crate::bungee_runtime::handle(
-                            &live_snapshot,
-                            &current_backend,
-                            &identity,
-                            peer,
-                            request,
-                        )
-                    {
-                        timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&payload)).await??;
-                    }
-                }
-                Ok(SessionEvent::Suggestions(request)) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    let servers = network.joinable(&session, &current_backend);
-                    timeout(
-                        HANDSHAKE_TIMEOUT,
-                        session.answer_suggestions(&request, || servers),
-                    )
-                    .await??;
-                }
-                Ok(SessionEvent::ProxyCommand(command))
-                    if permission_command(&session, &command).is_some() =>
-                {
-                    let live_snapshot = snapshot.latest();
-                    let args = permission_command(&session, &command).unwrap_or_default();
-                    let output = match session.identity().and_then(|identity| identity.uuid) {
-                        Some(uuid) => {
-                            let sender = rift::permissions::command::Sender::Player(
-                                rift_permissions::Uuid::from_bytes(uuid),
-                            );
-                            rift::permissions::command::execute(
-                                &live_snapshot.perms.env(),
-                                &sender,
-                                &args,
-                            )
-                            .await
-                        }
-                        None => continue,
-                    };
-                    timeout(
-                        HANDSHAKE_TIMEOUT,
-                        session.send_system_component(&output.component()),
-                    )
-                    .await??;
-                }
-                Ok(SessionEvent::ProxyCommand(command)) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    let result = match timeout(
-                        live_snapshot.config.limits.connect_timeout
-                            + HANDSHAKE_TIMEOUT
-                            + live_snapshot
-                                .config
-                                .managed_servers
-                                .values()
-                                .map(|server| server.start_timeout)
-                                .sum::<Duration>(),
-                        network.command(&mut session, &current_backend, &command, event),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => Err(error.into()),
-                    };
-                    if let Some(target) =
-                        settle_switch(&network, &mut session, &current_backend, result, event)
-                            .await?
-                    {
-                        current_address =
-                            live_snapshot.config.backends[&target].address().to_owned();
-                        current_backend = target;
-                        phase_deadline = Deadline::now() + Duration::from_secs(30);
-                    }
-                }
-                Ok(SessionEvent::Dialog(click)) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    network
-                        .dialog(&session, &current_backend, event, click)
-                        .await;
-                }
-                Ok(SessionEvent::Chat(chat)) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    network.chat(&mut session, chat).await?;
-                }
-                Ok(SessionEvent::Disconnected) => break,
-                Ok(SessionEvent::BackendKicked(reason)) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    let Some((target, notice)) = network
-                        .kicked(&mut session, &current_backend, &reason, event)
-                        .await?
-                    else {
-                        break;
-                    };
-                    metrics.fallbacks.inc();
-                    current_address = live_snapshot.config.backends[&target].address().to_owned();
-                    current_backend = target;
-                    kick_notice = Some(notice);
-                    phase_deadline = Deadline::now() + Duration::from_secs(30);
-                }
-                Ok(SessionEvent::ClientClosed) => {
-                    client_closed = true;
-                    phase_deadline = Deadline::now() + Duration::from_secs(30);
-                }
-                Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed) => {
-                    let live_snapshot = snapshot.latest();
-                    let network = Network {
-                        snapshot: &live_snapshot,
-                        addresses: &live_snapshot.addresses,
-                        metrics: &metrics,
-                    };
-                    if client_closed {
-                        break;
-                    }
-                    if network_configured && !login_complete && session.reset_initial_backend() {
-                        if let Some(extension) = &session.extension {
-                            extension.release(&current_backend);
-                        }
-                        let next = candidates
-                            .iter()
-                            .position(|name| name == &current_backend)
-                            .unwrap()
-                            + 1;
-                        if next < candidates.len()
-                            && let Ok(target) = network
-                                .connect_initial(
-                                    &mut session,
-                                    &candidates[next..],
-                                    &mut deadline,
-                                    event,
-                                )
-                                .await
-                        {
-                            metrics.fallbacks.inc();
-                            current_address =
-                                live_snapshot.config.backends[&target].address().to_owned();
-                            current_backend = target;
-                            phase_deadline = entry_deadline(&current_backend, deadline);
-                            continue;
-                        }
-                    }
-                    let candidates = network.recovery_candidates(&current_backend);
-                    if network_enabled && session.can_switch() && !candidates.is_empty() {
-                        match network
-                            .switch(&mut session, &current_backend, &candidates, event)
-                            .await
-                        {
-                            Ok(target) => {
-                                metrics.fallbacks.inc();
-                                current_address =
-                                    live_snapshot.config.backends[&target].address().to_owned();
-                                current_backend = target;
-                                phase_deadline = Deadline::now() + Duration::from_secs(30);
-                                continue;
-                            }
-                            Err(error) => {
-                                let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                                    rift::text::reason(&error)
-                                } else {
-                                    catalog::notice(Notice::ConnectionLostNoFallback)
-                                };
-                                let _ =
-                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
-                                        .await;
-                                return Err(error);
-                            }
-                        }
-                    }
-                    timeout(
-                        HANDSHAKE_TIMEOUT,
-                        session.disconnect_text(&catalog::notice(Notice::ConnectionLost)),
-                    )
-                    .await??;
-                    break;
-                }
-                Err(error) => {
-                    if let Some(reply) = transfer_reply.take() {
-                        metrics.transfer_failures.inc();
-                        let _ =
-                            reply.send(Err(format!("transfer failed; session closed: {error}")));
-                    }
-                    let reason = if error.kind() == io::ErrorKind::Unsupported {
-                        rift::text::reason(&error)
-                    } else {
-                        catalog::notice(Notice::ConnectionFailed)
-                    };
-                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
-                    return Err(error);
-                }
-            }
+            Ok(())
         }
+        .await;
+        // Every menu shown ends with one close event, the last with the
+        // session.
+        session.end_menus();
+        deliver_menu_events(&snapshot, &metrics, &mut session, &current_backend, event).await;
+        ended?;
         drop(admin_registration);
         drop(directory);
         if let Some(reply) = transfer_reply {
@@ -1780,6 +1816,31 @@ pub async fn handle(
         drop(registration);
     }
     Ok((session.client.io.sent, session.client.io.received))
+}
+
+/// Deliver the ends of menus `session` holds to whoever showed the menus.
+async fn deliver_menu_events<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    snapshot: &Arc<Snapshot>,
+    metrics: &Metrics,
+    session: &mut Session<C, TcpStream>,
+    current_backend: &str,
+    event: &Connection,
+) {
+    let events = session.take_menu_events();
+    if events.is_empty() {
+        return;
+    }
+    let live_snapshot = snapshot.latest();
+    let network = Network {
+        snapshot: &live_snapshot,
+        addresses: &live_snapshot.addresses,
+        metrics,
+    };
+    for delivery in events {
+        network
+            .menu(session, current_backend, event, delivery)
+            .await;
+    }
 }
 
 /// Settle a player-initiated switch. If the old backend was lost while a target

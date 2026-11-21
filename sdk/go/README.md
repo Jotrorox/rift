@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.1` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.3.0` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -38,13 +38,13 @@ tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -n
 `--wit-package` also accepts a packaged WIT (`wasm-tools component wit
 --wasm -o rift-plugin.wasm wit`). Check the result with
 `wasm-tools component wit plugin.wasm`: it must export
-`rift:plugin/handler@0.2.x` and import the `rift:plugin/*` interfaces you use.
+`rift:plugin/handler@0.3.x` and import the `rift:plugin/*` interfaces you use.
 
 Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.2.1
+go get github.com/Jotrorox/rift/sdk/go@v0.3.0
 ```
 
 ## Writing a plugin
@@ -78,7 +78,7 @@ The host delivers only the hooks in `Registration.Hooks`. An empty list
 delivers every hook except `chat` and `kick`, which a plugin gets only by
 listing `rift.HookChat` and `rift.HookKick`. Leave `Hooks` nil and the SDK
 fills in exactly the hooks you set a handler for, chat and kick included; set
-it explicitly to send a fixed list, as hello-go does. `OnDialog` and
+it explicitly to send a fixed list, as hello-go does. `OnDialog`, `OnMenu` and
 `OnJobDone` need no entry.
 
 Hooks without a handler use the defaults: `init` returns an empty
@@ -126,6 +126,47 @@ The zero `rift.Text{}` means "none" where text is optional: a title's
 subtitle, a suggestion's tooltip, a tab list footer, the fields of
 `rift.StatusOverride`. See [Go plugins](../../docs/plugins-go.md#text) and
 [Text and markup](../../docs/text.md).
+
+### Menus
+
+Inventory menus (chest, hopper, dispenser and anvil screens, Minecraft 1.12
+and newer) are plain structs. `rift.ShowMenu(target, rift.Menu{...})` shows or
+redraws one, `rift.UpdateMenu(target, id, rift.MenuPatch{...})` changes a part
+and `rift.CloseMenu(target, id)` closes it (`""` closes whatever Rift menu is
+open). `rift.ShowMenuJSON` and `rift.UpdateMenuJSON` take JSON text instead.
+The structs write the JSON that [`docs/menus.md`](../../docs/menus.md)
+describes, without `encoding/json`; fields you leave out stay out, so the
+host's defaults apply. A choice whose zero value means something is a pointer:
+`Glint`, `Details` and `Tooltip` of a `rift.Button`, `Text` of a
+`rift.MenuPatch` (`rift.Ptr(false)` makes one). `PayloadJSON` and `StateJSON`
+are JSON text; `rift.JSONString("survival")` writes a string.
+
+```go
+rift.ShowMenu(ctx.UUID, rift.Menu{
+	ID:     "servers",
+	Layout: []string{"#########", "# S C M #", "####X####"},
+	Keys: map[rune]rift.Button{
+		'#': {Item: "gray_stained_glass_pane", Name: rift.Plain(" ")},
+		'S': {Item: "grass_block", ID: "join", PayloadJSON: rift.JSONString("survival")},
+		'X': {Item: "barrier", Close: true},
+	},
+})
+
+rift.OnMenu(func(event rift.MenuEvent) {
+	if event.Kind == rift.MenuKindClick && event.Action == "join" {
+		if server, ok := event.PayloadString(); ok {
+			rift.Transfer(event.Ctx.UUID, server)
+		}
+	}
+})
+```
+
+`rift.MenuEvent.Kind`, `.Click` and `.Reason` are typed constants
+(`rift.MenuKindClick`, `rift.ClickShiftLeft`, `rift.CloseReasonPlayer`, ...)
+with an `Other` case for a value a newer Rift adds, so nothing compares
+strings. `PayloadString` and `StateString` read a string value with a small
+parser; `DecodePayload` and `DecodeState` use `encoding/json` for anything
+else, with the size cost of `DecodeConfig`.
 
 ### Background work
 

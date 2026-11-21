@@ -708,7 +708,7 @@ jobs:
     # The only build with `test-session-server`. Release, nightly and every
     # other job build the default features, which leave it out.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
@@ -724,6 +724,48 @@ jobs:
         run: 'cargo test --locked --features test-session-server --lib -- auth:: session:: --test-threads=1'
       - name: Log a bot in through a local session server
         run: cargo test --locked --features test-session-server --test session_server
+      # The session_server test built target/debug/rift with the feature:
+      # the one build that can show menus from rift.lua to an online client.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Read server download identity
+        id: fixture
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('tests/servers.json') as source:
+              fixture = json.load(source)['vanilla']
+          for field in ('filename', 'algorithm', 'checksum'):
+              print(f'{field}={fixture[field]}')
+          PY
+      - name: Restore verified server download (saved by the Minecraft job)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/minecraft/downloads/${{ steps.fixture.outputs.filename }}
+          key: v2-servers-${{ runner.os }}-${{ runner.arch }}-vanilla-${{ steps.fixture.outputs.algorithm }}-${{ steps.fixture.outputs.checksum }}
+      - name: Show inventory menus from rift.lua to an online client
+        run: >-
+          python tests/menus_minecraft.py --accept-eula --mode script
+          --binary target/debug/rift --pair vanilla --no-switch
+          --out target/minecraft/runs/menus --json target/minecraft/runs/menus/results.json
+      - name: Preserve menu test results and logs
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: menus-script-mode
+          path: |
+            target/minecraft/runs/menus/**/*.json
+            target/minecraft/runs/menus/**/*.jsonl
+            target/minecraft/runs/menus/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
 
   postgres:
     name: PostgreSQL backend
@@ -860,7 +902,8 @@ jobs:
     name: Minecraft (${{ matrix.server }}, compression ${{ matrix.compression }})
     needs: build-linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The menu test adds about five minutes to the compression-enabled half.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -880,11 +923,12 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      # Pumpkin itself needs no Java; the menu test's 26.3 client schema
+      # comes from the data generators of vanilla 26.x, which need Java 25.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        if: matrix.server != 'pumpkin'
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: ${{ matrix.server == 'pumpkin' && '25' || '21' }}
       - name: Read server download identity
         id: fixture
         env:
@@ -912,6 +956,16 @@ jobs:
           --server ${{ matrix.server }}
           --compression ${{ matrix.compression }}
           --report target/minecraft/report.json
+      - name: Test inventory menus through Rift
+        # Menus do not depend on compression: once per server. Plugin mode,
+        # because the release build has no local session server for rift.lua.
+        if: matrix.compression == 'enabled'
+        env:
+          SERVER: ${{ matrix.server }}
+        run: >-
+          python tests/menus_minecraft.py --accept-eula
+          --binary target/release/rift --pair "$SERVER" --no-switch
+          --out target/minecraft/runs/menus --json target/minecraft/runs/menus/results.json
       - name: Verify managed Paper cold start and idle shutdown
         if: matrix.server == 'paper' && matrix.compression == 'enabled'
         run: >-
@@ -940,6 +994,8 @@ jobs:
           path: |
             target/minecraft/report.json
             target/minecraft/runs/*/result.json
+            target/minecraft/runs/menus/**/*.json
+            target/minecraft/runs/menus/**/*.jsonl
             target/minecraft/runs/**/*.log
             target/minecraft/runs/**/resources.jsonl
             target/minecraft/runs/**/rift.lua
@@ -1050,6 +1106,16 @@ jobs:
         run: >-
           python tests/network_minecraft.py --accept-eula
           --binary target/release/rift --server ${{ matrix.server }}
+      - name: Test inventory menus on a 1.12.2 server and a translated 1.12.2 client
+        # The minecraft job covers current servers; these two cover the
+        # oldest menu protocol, natively and through translation.
+        if: matrix.server == 'vanilla-1.12.2' || matrix.server == 'vanilla-26.3'
+        env:
+          PAIR: ${{ matrix.server == 'vanilla-26.3' && 'vanilla-26.3:1.12.2' || matrix.server }}
+        run: >-
+          python tests/menus_minecraft.py --accept-eula
+          --binary target/release/rift --pair "$PAIR" --no-switch
+          --out target/minecraft/runs/menus --json target/minecraft/runs/menus/results.json
       - name: Save verified server download
         if: >-
           steps.server-cache.outputs.cache-hit != 'true' &&
@@ -1067,6 +1133,8 @@ jobs:
           name: compatibility-${{ matrix.server }}
           path: |
             target/minecraft/runs/**/*.log
+            target/minecraft/runs/menus/**/*.json
+            target/minecraft/runs/menus/**/*.jsonl
             target/minecraft/runs/**/network.lua
             target/minecraft/runs/**/crash-reports/**
           if-no-files-found: warn

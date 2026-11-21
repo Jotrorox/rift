@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "rift:plugin/handler@0.2.1".
+// Exports represents the caller-defined exports from "rift:plugin/handler@0.3.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//
@@ -129,6 +129,15 @@ var Exports struct {
 	//
 	//	dialog: func(response: dialog-response)
 	Dialog func(response DialogResponse)
+
+	// Menu represents the caller-defined, exported function "menu".
+	//
+	// A player clicked, typed in or left a menu this plugin showed with
+	// `players.menu`. Every menu that was shown ends with exactly one
+	// `close`.
+	//
+	//	menu: func(event: menu-event)
+	Menu func(event MenuEvent)
 
 	// JobDone represents the caller-defined, exported function "job-done".
 	//

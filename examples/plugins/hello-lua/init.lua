@@ -20,6 +20,41 @@ rift.command("hello", {
     end,
 })
 
+-- The server selector: a chest of three rows framed in gray glass, with a
+-- button per server (action `join`, the server's name as payload) and one
+-- that closes the menu.
+local function server(item, name, target)
+    return { item = item, name = { mini = name }, lore = { "Click to join" }, id = "join", payload = target }
+end
+
+local selector = {
+    id = "servers",
+    title = { mini = "<dark_gray>Choose a server" },
+    layout = { "#########", "# S C M #", "####X####" },
+    keys = {
+        ["#"] = { item = "gray_stained_glass_pane", name = " " },
+        S = server("grass_block", "<green>Survival", "survival"),
+        C = server("bricks", "<gold>Creative", "creative"),
+        M = server("bow", "<red>Minigames", "minigames"),
+        X = { item = "barrier", name = { mini = "<red>Close" }, close = true },
+    },
+}
+
+rift.command("servers", {
+    permission = "", -- every player
+    run = function(ctx)
+        rift.try(rift.players.menu, ctx.uuid, selector)
+    end,
+})
+
+rift.menus.on("servers", {
+    click = {
+        join = function(ctx)
+            rift.try(rift.players.transfer, ctx.uuid, ctx.payload)
+        end,
+    },
+})
+
 rift.on("join", function(ctx)
     -- Host errors are ignored.
     rift.try(rift.players.message, ctx.uuid, "Welcome, " .. ctx.name .. "!")

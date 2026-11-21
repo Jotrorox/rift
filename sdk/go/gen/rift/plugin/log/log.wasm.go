@@ -2,8 +2,8 @@
 
 package log
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.1".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.3.0".
 
-//go:wasmimport rift:plugin/log@0.2.1 log
+//go:wasmimport rift:plugin/log@0.3.0 log
 //go:noescape
 func wasmimport_Log(level0 uint32, message0 *uint8, message1 uint32)

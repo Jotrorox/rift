@@ -121,6 +121,12 @@ RIFT_WEAK void exports_rift_plugin_handler_dialog(exports_rift_plugin_handler_di
   rift_dialog_response_free(response);
 }
 
+// Menu events need no registration; a plugin that shows no menus never
+// receives one.
+RIFT_WEAK void exports_rift_plugin_handler_menu(exports_rift_plugin_handler_menu_event_t *event) {
+  rift_plugin_types_menu_event_free(event);
+}
+
 // Job results need no registration; a plugin that starts no jobs never
 // receives one.
 RIFT_WEAK void exports_rift_plugin_handler_job_done(uint64_t handle,

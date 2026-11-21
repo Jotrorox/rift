@@ -47,6 +47,10 @@ pub const PROTOCOLS: &[(i32, &str)] = &[
     (777, "26.3"),
 ];
 
+/// The newest protocol: the one whose terms stacks Rift writes itself use
+/// (see [`crate::codec::item::newest`]).
+pub const NEWEST: i32 = PROTOCOLS[PROTOCOLS.len() - 1].0;
+
 /// The position of `protocol` in [`PROTOCOLS`].
 pub fn index(protocol: i32) -> Option<usize> {
     PROTOCOLS
@@ -101,5 +105,6 @@ mod tests {
         assert_eq!(index(777), Some(PROTOCOLS.len() - 1));
         assert_eq!(index(47), None);
         assert_eq!(release(774), "1.21.11");
+        assert_eq!(NEWEST, 777);
     }
 }

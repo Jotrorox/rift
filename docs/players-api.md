@@ -56,6 +56,9 @@ cross-server chat or an HTTP endpoint can kick a player.
 | `rift.players.boss_bar(player, name, options)` | Boolean: a boss bar was queued | Omit `options` to remove the bar called `name` |
 | `rift.players.dialog(player, dialog)` | Boolean: a [dialog](dialogs.md) was queued | False for players older than 1.21.6 |
 | `rift.players.clear_dialog(player)` | Boolean: closing Rift's dialog was queued | |
+| `rift.players.menu(player, menu)` | Boolean: an [inventory menu](menus.md) was queued | False for players older than 1.12. Showing the `id` of the open menu again redraws it |
+| `rift.players.update_menu(player, id, patch)` | Boolean: a change to the menu `id` was queued | Does nothing if the player no longer has that menu open |
+| `rift.players.close_menu(player, id)` | Boolean: closing the menu was queued | Without `id`, closes whatever Rift menu is open |
 | `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason was queued | |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued | |
 | `rift.players.broadcast(text, server)` | Number of players a chat message was queued for | `server` is optional |
@@ -105,7 +108,8 @@ actions; it never waits for the client.
   usable world, so they wait while a transfer is in progress.
 - An action other than a kick, tab list or boss bar that meets a
   backend-initiated reconfiguration is dropped (a dialog too: configuration
-  closes every screen). Tab lists and boss bars apply after the next join.
+  closes every screen; a menu's plugin gets its `close` event with reason
+  `switch`). Tab lists and boss bars apply after the next join.
 - Undelivered actions are lost on disconnect.
 - Each callback can make at most 256 action calls; a broadcast counts once.
 
@@ -201,6 +205,16 @@ whose `custom` or `dynamic/custom` action has an `id` without a namespace calls
 the `dialog` callback with `ctx.action` (that `id`), `ctx.values` (the player's
 inputs) and `ctx.payload` (the action's `payload` or `additions`, which Rift
 keeps instead of sending them to the client).
+
+## Menus
+
+[Inventory menus](menus.md) are chest, hopper, dispenser and anvil screens
+whose slots hold buttons (Minecraft 1.12 and newer). Clicks, anvil text and
+the end of the menu call the `menu` callback with `ctx.menu` (the menu's
+`id`), `ctx.kind` (`click`, `text` or `close`), the clicked button's
+`ctx.action` and `ctx.payload`, `ctx.text` in an anvil, `ctx.reason` for a
+close and the menu's `ctx.state`. `rift.menus.on(id, handlers)` sorts them by
+kind and button.
 
 ## Rich text
 

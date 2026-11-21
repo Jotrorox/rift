@@ -1,6 +1,6 @@
 # Rift C plugin SDK
 
-Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.2.1`
+Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.3.0`
 contract in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 | File | What it is |
@@ -40,7 +40,7 @@ debug info (`-Wl,--strip-debug`) unless you need it: wasi-libc ships with
 DWARF, which more than triples the size of a small plugin.
 
 Check the result with `wasm-tools component wit plugin.wasm`: it must export
-`rift:plugin/handler@0.2.x` and import the `rift:plugin/*` interfaces you use.
+`rift:plugin/handler@0.3.x` and import the `rift:plugin/*` interfaces you use.
 
 Toolchains that only produce core WebAssembly modules (wasi-sdk before 22, or
 `--target=wasm32-wasip1`) need the manual path: build a `wasm32-wasip1`
@@ -81,8 +81,9 @@ declarations, for example `rift_plugin_players_message`,
 `bool` and fill a `ret` and an `err` out-parameter; `option<T>` parameters are
 pointers where `NULL` means `none`. `rift.h` wraps the common ones and logs
 their errors: `rift_message`, `rift_action_bar`, `rift_title`, `rift_kick`,
-`rift_broadcast`, `rift_show_dialog`, `rift_player_lookup`,
-`rift_player_search`, `rift_set_language` and `rift_add_group`.
+`rift_broadcast`, `rift_show_dialog`, `rift_show_menu`, `rift_update_menu`,
+`rift_close_menu`, `rift_player_lookup`, `rift_player_search`,
+`rift_set_language` and `rift_add_group`.
 
 Everything a player reads is a `rift_text_t`: `rift_text_plain("...")` or
 `rift_text_json(json)`, both borrowed views for host calls and for the
@@ -99,6 +100,42 @@ names them (`RIFT_PLUGIN_TYPES_HOOK_CHAT`, `RIFT_PLUGIN_TYPES_HOOK_KICK`). A
 plugin that lists `chat` is asked about every message of every player; with
 signed chat, the first deny costs that player their chat signing. See
 [docs/plugins-c.md](../../docs/plugins-c.md#chat-and-kick).
+
+### Menus
+
+Inventory menus (chest, hopper, dispenser and anvil screens, Minecraft 1.12
+and newer) are JSON text in the format of
+[`docs/menus.md`](../../docs/menus.md): C has no builder. `rift_show_menu(&target,
+json)` shows or redraws one, `rift_update_menu(&target, id, patch_json)`
+changes a part and `rift_close_menu(&target, id)` closes it (`NULL` closes
+whatever Rift menu is open). They log the host's error and return whether the
+call was queued, like `rift_show_dialog`.
+
+Everything a player does arrives at `exports_rift_plugin_handler_menu(
+rift_menu_event_t *event)`, which needs no registration; the weak default
+ignores events. The event is yours: free it with `rift_menu_event_free`.
+`rift_menu_kind(event)`, `rift_menu_click(event)` and
+`rift_menu_close_reason(event)` return enums (`RIFT_MENU_KIND_CLICK`,
+`RIFT_CLICK_SHIFT_LEFT`, `RIFT_CLOSE_PLAYER`, ...) with an `_OTHER` case for a
+value a newer Rift adds, so nothing compares strings.
+`rift_menu_payload_string(event, &out)` and `rift_menu_state_string` read a
+payload or state that is a JSON string (free `out` with `rift_string_free`)
+and return a `rift_json_result_t`; the other fields are the generated options
+(`event->action.is_some`, `event->slot.val`).
+
+```c
+void exports_rift_plugin_handler_menu(rift_menu_event_t *event) {
+  rift_string_t server;
+  if (rift_menu_kind(event) == RIFT_MENU_KIND_CLICK && event->action.is_some &&
+      rift_string_eq(&event->action.val, "join") && rift_menu_payload_string(event, &server) == RIFT_JSON_OK) {
+    rift_string_t err = {NULL, 0};
+    bool moved;
+    if (!rift_plugin_players_transfer(&event->ctx.uuid, &server, &moved, &err)) rift_string_free(&err);
+    rift_string_free(&server);
+  }
+  rift_menu_event_free(event);
+}
+```
 
 ### Background work
 

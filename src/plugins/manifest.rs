@@ -158,7 +158,7 @@ pub struct Manifest {
     pub version: String,
     pub api: String,
     /// The lowest `rift:plugin` version the plugin runs on, such as
-    /// `0.2.1`, when it needs more than the first release of its track.
+    /// `0.3.1`, when it needs more than the first release of its track.
     pub min_api: Option<String>,
     pub mode: Mode,
     /// `None` only for `mode = "script"`.
@@ -281,6 +281,16 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Where the guide explains the move from the older `rift:plugin` track
+/// `track` (`0.1` or `0.2`) to this one.
+pub fn moving_from(track: &str) -> &'static str {
+    if track == "0.1" {
+        "docs/plugins.md, \"Moving from 0.1\" and \"Moving from 0.2\""
+    } else {
+        "docs/plugins.md, \"Moving from 0.2\""
+    }
+}
+
 fn policy(value: Option<String>, field: &str) -> Result<Option<Policy>, String> {
     match value.as_deref() {
         None => Ok(None),
@@ -341,10 +351,14 @@ impl Manifest {
             );
         }
         if raw.api != API_VERSION {
-            let hint = if raw.api == "0.1" {
-                "; rift:plugin 0.2 replaced 0.1 (see docs/plugins.md, \"Moving from 0.1\"): update the plugin, rebuild a WebAssembly component against the 0.2 SDK and set api = \"0.2\""
+            let hint = if ["0.1", "0.2"].contains(&raw.api.as_str()) {
+                format!(
+                    "; rift:plugin {API_VERSION} replaced {} (see {}): set api = \"{API_VERSION}\" and rebuild a WebAssembly component against the {API_VERSION} SDK",
+                    raw.api,
+                    moving_from(&raw.api)
+                )
             } else {
-                ""
+                String::new()
             };
             return Err(format!(
                 "api {:?} is not supported; this Rift implements rift:plugin {API_VERSION}{hint}",
@@ -736,7 +750,7 @@ fn capabilities(raw: RawCapabilities) -> Result<Capabilities, String> {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
+    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.3\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
 
     #[test]
     fn the_cluster_declaration_is_optional_and_strict() {
@@ -752,7 +766,7 @@ mod tests {
         }
         // Script-mode plugins declare it the same way.
         let script = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\ncluster = true\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nmode = \"script\"\ncluster = true\n",
             "a",
         )
         .unwrap();
@@ -813,7 +827,7 @@ mod tests {
             "filesystem=data network=yes env=all memory_limit_mb=256"
         );
         let lua = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
             "a",
         )
         .unwrap();
@@ -844,7 +858,7 @@ mod tests {
         .unwrap();
         assert_eq!(unlimited.wasm, Some(WasmOptions { memory_limit_mb: 0 }));
         let unlimited = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n[lua]\nmemory_limit_mb = 0\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n[lua]\nmemory_limit_mb = 0\n",
             "a",
         )
         .unwrap();
@@ -864,7 +878,7 @@ mod tests {
                 r#"
 name = "relaxoban"
 version = "0.3.1"
-api = "0.2"
+api = "0.3"
 mode = "persistent"
 engine = "lua"
 entry = "src/main.lua"
@@ -905,7 +919,7 @@ jit = false
             )
         );
         let script = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nmode = \"script\"\n",
             "a",
         )
         .unwrap();
@@ -915,7 +929,7 @@ jit = false
 
     #[test]
     fn invalid_manifests_are_rejected() {
-        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\n";
+        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\n";
         for (extra, folder) in [
             ("engine = \"lua\"\ntypo = 1\n", "a"),
             ("engine = \"lua\"\n", "b"),
@@ -973,10 +987,10 @@ jit = false
             assert!(Manifest::parse(&text, folder).is_err(), "{text}");
         }
         for text in [
-            "version = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1 2\"\napi = \"0.2\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
-            "name = \"a/b\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "version = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1 2\"\napi = \"0.3\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.4\"\nengine = \"lua\"\n",
+            "name = \"a/b\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
             "name = [\n",
         ] {
             assert!(Manifest::parse(text, "a").is_err(), "{text}");
@@ -988,33 +1002,62 @@ jit = false
     #[test]
     fn min_api_names_a_version_of_the_track_this_rift_has() {
         let with = |line: &str| Manifest::parse(&format!("{MINIMAL}{line}\n"), "relaxoban");
+        // Menus came with 0.3.0, so a plugin that shows them needs no min_api.
         assert_eq!(
-            with("min_api = \"0.2.0\"").unwrap().min_api.as_deref(),
-            Some("0.2.0")
-        );
-        // 0.2.1 added the `text` interface; a plugin that calls it says so.
-        assert_eq!(
-            with("min_api = \"0.2.1\"").unwrap().min_api.as_deref(),
-            Some("0.2.1")
+            with("min_api = \"0.3.0\"").unwrap().min_api.as_deref(),
+            Some("0.3.0")
         );
         assert_eq!(Manifest::parse(MINIMAL, "relaxoban").unwrap().min_api, None);
-        let newer = with("min_api = \"0.2.2\"").unwrap_err();
+        let newer = with("min_api = \"0.3.1\"").unwrap_err();
         assert!(
-            newer.contains("needs rift:plugin 0.2.2") && newer.contains("implements 0.2.1"),
+            newer.contains("needs rift:plugin 0.3.1") && newer.contains("implements 0.3.0"),
             "{newer}"
         );
-        let newer = with("min_api = \"0.2.99\"").unwrap_err();
+        let newer = with("min_api = \"0.3.99\"").unwrap_err();
         assert!(
-            newer.contains("needs rift:plugin 0.2.99") && newer.contains("Update Rift"),
+            newer.contains("needs rift:plugin 0.3.99") && newer.contains("Update Rift"),
             "{newer}"
         );
-        for invalid in ["0.2", "0.3.0", "0.1.5", "0.2.x", "0.2.0.1", "v0.2.0", ""] {
+        // min_api starts again on the new track.
+        for invalid in [
+            "0.3", "0.2.1", "0.2.0", "0.4.0", "0.1.5", "0.3.x", "0.3.0.1", "v0.3.0", "",
+        ] {
             let error = with(&format!("min_api = \"{invalid}\"")).unwrap_err();
             assert!(error.starts_with("min_api must be"), "{invalid}: {error}");
+            assert!(error.contains("rift:plugin 0.3 version"), "{error}");
         }
-        // A plugin for the track this Rift replaced is told what to do.
-        let old = Manifest::parse(&MINIMAL.replace("0.2", "0.1"), "relaxoban").unwrap_err();
-        assert!(old.contains("Moving from 0.1"), "{old}");
+    }
+
+    #[test]
+    fn manifests_of_the_tracks_this_rift_replaced_are_refused_with_a_pointer() {
+        let track = |api: &str| MINIMAL.replace("api = \"0.3\"", &format!("api = \"{api}\""));
+        let old = Manifest::parse(&track("0.2"), "relaxoban").unwrap_err();
+        assert!(
+            old.contains("api \"0.2\" is not supported")
+                && old.contains("Moving from 0.2")
+                && old.contains("set api = \"0.3\""),
+            "{old}"
+        );
+        let older = Manifest::parse(&track("0.1"), "relaxoban").unwrap_err();
+        assert!(
+            older.contains("Moving from 0.1") && older.contains("Moving from 0.2"),
+            "{older}"
+        );
+        let unknown = Manifest::parse(&track("0.4"), "relaxoban").unwrap_err();
+        assert!(
+            unknown.contains("implements rift:plugin 0.3") && !unknown.contains("Moving"),
+            "{unknown}"
+        );
+        // Every engine moves: a Lua plugin's 0.2 manifest is refused too.
+        let lua = "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n";
+        assert!(
+            Manifest::parse(lua, "a")
+                .unwrap_err()
+                .contains("Moving from 0.2")
+        );
+        let script = "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n";
+        assert!(Manifest::parse(script, "a").is_err());
+        assert!(Manifest::parse(&track("0.3"), "relaxoban").is_ok());
     }
 
     #[test]
@@ -1039,7 +1082,7 @@ jit = false
         }
         let lua = |extra: &str| {
             Manifest::parse(
-                &format!("name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
+                &format!("name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n{extra}"),
                 "a",
             )
         };
@@ -1059,7 +1102,7 @@ jit = false
         // A script-mode folder has no instance to give workers to.
         assert!(
             Manifest::parse(
-                "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n[background]\n",
+                "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nmode = \"script\"\n[background]\n",
                 "a"
             )
             .is_err()

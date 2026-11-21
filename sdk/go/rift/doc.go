@@ -1,7 +1,7 @@
 // Package rift is the Go SDK for Rift WebAssembly plugins.
 //
 // It wraps the bindings that wit-bindgen-go generates for the
-// rift:plugin@0.2.1 contract (see the gen directory) with plain Go types,
+// rift:plugin@0.3.0 contract (see the gen directory) with plain Go types,
 // registers a default for every hook, and exposes setters for the hooks a
 // plugin implements:
 //
@@ -36,6 +36,10 @@
 // Text method of the builders Mini, Legacy and Component. A plain string is
 // never read as markup (see docs/text.md). The zero Text means "none" where
 // text is optional.
+//
+// Menus: ShowMenu opens an inventory menu from the plain structs Menu, Button
+// and MenuPatch (see docs/menus.md); clicks, typing and the end of the menu
+// reach the OnMenu handler as a MenuEvent with typed Kind, Click and Reason.
 //
 // Background work: a plugin runs one call at a time, so a hook that needs a
 // slow lookup calls Defer and Run and returns. A background worker, a

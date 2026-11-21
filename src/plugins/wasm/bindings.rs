@@ -1,4 +1,4 @@
-//! Host bindings for `rift:plugin@0.2.1`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.3.0`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
@@ -345,6 +345,41 @@ pub(super) fn dialog_response(mut context: api::Context) -> types::DialogRespons
     }
 }
 
+/// A menu event: `context.menu` holds it. A context without one becomes a
+/// `close` with no reason, which no session sends.
+pub(super) fn menu_event(mut context: api::Context) -> types::MenuEvent {
+    let event = context.menu.take();
+    let ctx = self::context(context);
+    let Some(event) = event else {
+        return types::MenuEvent {
+            ctx,
+            menu: String::new(),
+            kind: crate::menu::EventKind::Close.name().to_owned(),
+            action: None,
+            slot: None,
+            click: None,
+            key: None,
+            text: None,
+            reason: None,
+            payload_json: None,
+            state_json: None,
+        };
+    };
+    types::MenuEvent {
+        ctx,
+        menu: event.menu,
+        kind: event.kind.name().to_owned(),
+        action: event.action,
+        slot: event.slot,
+        click: event.click.map(|click| click.name().to_owned()),
+        key: event.key.map(u32::from),
+        text: event.text,
+        reason: event.reason.map(|reason| reason.name().to_owned()),
+        payload_json: event.payload.map(|payload| payload.to_string()),
+        state_json: event.state.map(|state| state.to_string()),
+    }
+}
+
 /// A chat message or backend command: `context.chat` holds it.
 pub(super) fn chat_attempt(mut context: api::Context) -> types::ChatAttempt {
     let chat = context.chat.take().unwrap_or(api::ChatInput {
@@ -434,6 +469,25 @@ impl players::Host for State {
 
     fn clear_dialog(&mut self, target: String) -> Result<bool, String> {
         self.services.players().clear_dialog(&target)
+    }
+
+    fn menu(&mut self, target: String, menu_json: String) -> Result<bool, String> {
+        self.services.players().menu(&target, &menu_json)
+    }
+
+    fn update_menu(
+        &mut self,
+        target: String,
+        menu: String,
+        patch_json: String,
+    ) -> Result<bool, String> {
+        self.services
+            .players()
+            .update_menu_json(&target, &menu, &patch_json)
+    }
+
+    fn close_menu(&mut self, target: String, menu: Option<String>) -> Result<bool, String> {
+        self.services.players().close_menu(&target, menu.as_deref())
     }
 
     fn kick(&mut self, target: String, reason: types::Text) -> Result<bool, String> {
@@ -746,7 +800,8 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog` and `job_done` have no WIT case: they need no listing.
+        // `dialog`, `job_done` and `menu` have no WIT case: they need no
+        // listing.
         assert_eq!(names, api::Hook::ALL[..14]);
         assert_eq!(hook(types::Hook::Chat), api::Hook::Chat);
         assert_eq!(hook(types::Hook::Kick), api::Hook::Kick);
@@ -812,6 +867,63 @@ mod tests {
             request.context_json,
             r#"{"operator":{"groups":null,"name":"viewer","permissions":["read"]}}"#
         );
+    }
+
+    #[test]
+    fn menu_events_carry_every_field() {
+        let menu = crate::menu::Menu::parse_json(
+            r#"{"id":"nick","type":"anvil","text":"Al","state":{"page":2},
+                "slots":[{"slot":2,"item":"paper","id":"submit","payload":{"n":1},"clicks":"all"}]}"#,
+        )
+        .unwrap();
+        let context = |event| api::Context {
+            id: 4,
+            uuid: "ab".repeat(16),
+            server: Some("lobby".into()),
+            menu: Some(event),
+            ..Default::default()
+        };
+        let click = menu_event(context(crate::menu::MenuEvent::click(
+            &menu,
+            2,
+            crate::menu::Click::NumberKey,
+            Some(3),
+        )));
+        assert_eq!(click.ctx.connection_id, 4);
+        assert_eq!(click.ctx.server.as_deref(), Some("lobby"));
+        assert_eq!(
+            (click.menu.as_str(), click.kind.as_str()),
+            ("nick", "click")
+        );
+        assert_eq!(click.action.as_deref(), Some("submit"));
+        assert_eq!(click.slot, Some(2));
+        assert_eq!(click.click.as_deref(), Some("number_key"));
+        assert_eq!(click.key, Some(3));
+        assert_eq!(click.text.as_deref(), Some("Al"));
+        assert_eq!(click.reason, None);
+        assert_eq!(click.payload_json.as_deref(), Some(r#"{"n":1}"#));
+        assert_eq!(click.state_json.as_deref(), Some(r#"{"page":2}"#));
+
+        let text = menu_event(context(crate::menu::MenuEvent::text(&menu)));
+        assert_eq!(text.kind, "text");
+        assert_eq!((text.action, text.slot, text.click), (None, None, None));
+
+        let close = menu_event(context(crate::menu::MenuEvent::close(
+            &menu,
+            crate::menu::CloseReason::Switch,
+        )));
+        assert_eq!(close.kind, "close");
+        assert_eq!(close.reason.as_deref(), Some("switch"));
+        assert_eq!(close.payload_json, None);
+        assert_eq!(close.state_json.as_deref(), Some(r#"{"page":2}"#));
+
+        // A chest has no text field, and a menu without state sends none.
+        let chest = crate::menu::Menu::parse_json(r#"{"id":"c"}"#).unwrap();
+        let close = menu_event(context(crate::menu::MenuEvent::close(
+            &chest,
+            crate::menu::CloseReason::Player,
+        )));
+        assert_eq!((close.text, close.state_json), (None, None));
     }
 
     #[test]

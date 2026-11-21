@@ -128,9 +128,37 @@ and are listed under **SDKs**.
   `rift.text.plain`, `to_legacy` and `to_mini`. See
   [the host API](docs/plugins.md#host-api) and
   [`rift.text`](docs/text.md#rifttext-in-lua).
+- Inventory menus: plugins show chest (1 to 6 rows), hopper, dispenser and
+  anvil screens whose slots hold item buttons, on every client from 1.12 to
+  26.3 and whatever software the backend runs, without a backend plugin.
+  `rift.players.menu(player, menu)` takes a layout of characters and the
+  button each stands for, or buttons by slot number, with any item, name,
+  lore, count, glint, custom model data, item model, head texture and color.
+  Clicks come back to the plugin that showed the menu as a `menu` event with
+  the button's `id`, the slot, the click kind and the button's `payload`;
+  `rift.menus.on(id, handlers)` sorts them by button. Rift keeps `payload`
+  and the menu's `state` instead of sending them to the client, undoes every
+  click on the client and never lets a menu move a real item; when a click
+  disturbs the player's inventory rows it asks the backend to send the
+  inventory again. Showing the same menu again redraws only what changed,
+  `update_menu` changes part of it, a click on an action the player had not
+  seen yet is dropped (1.17.1 and newer clients), and every menu ends with
+  exactly one `close` event that says why. An anvil is a one-line text prompt
+  on every version, with live `text` events on request. Menus work for
+  `rift.lua`, persistent Lua plugins and WebAssembly plugins, and for players
+  on other peers of a cluster. See [inventory menus](docs/menus.md).
 
 ### Changed
 
+- **Breaking for plugins:** the plugin contract is `rift:plugin@0.3.0`, which
+  adds [inventory menus](docs/menus.md) for WebAssembly plugins:
+  `players.menu`, `update-menu` and `close-menu`, and the `menu` hook in
+  `handler` with its `menu-event`. A new hook is a breaking change, so Rift
+  now loads only `api = "0.3"` plugins, for every engine, and refuses a 0.2
+  manifest with a pointer to the guide. The move needs no change in a
+  plugin's source: persistent Lua plugins set `api = "0.3"`, WebAssembly
+  plugins also rebuild against a 0.3.0 SDK. See
+  [Moving from 0.2](docs/plugins.md#moving-from-02).
 - A markup argument now wins over a theme style of the same name. Before, the
   theme style was applied and the argument never shown, so a plugin's
   `<info>` argument vanished on a network whose theme has an `info` style.
@@ -215,6 +243,20 @@ and are listed under **SDKs**.
 
 ### SDKs
 
+- Rust `rift-plugin` 0.3.0 implements `rift:plugin@0.3.0`. Its `menu` module
+  builds menus, patches and buttons (`Menu::chest(id)`, `hopper`,
+  `dispenser`, `anvil`, `Button::new(item)`, `MenuPatch`) for
+  `players::show_menu`, `players::update_menu` and `players::close_menu`, and
+  `Plugin::menu` receives a `MenuEvent` whose `kind()` is a typed
+  `MenuKind`, with `payload::<T>()` and `state::<T>()` to decode the JSON.
+- Go `github.com/Jotrorox/rift/sdk/go` v0.3.0 and the C SDK implement
+  `rift:plugin@0.3.0`. Go builds menus from plain structs (`rift.Menu`,
+  `rift.Button`, `rift.MenuPatch`) for `rift.ShowMenu`, `rift.UpdateMenu` and
+  `rift.CloseMenu`, and `rift.OnMenu` receives a `rift.MenuEvent` with typed
+  `Kind`, `Click` and `Reason`. C takes menus as JSON text
+  (`rift_show_menu`, `rift_update_menu`, `rift_close_menu`), and
+  `rift_menu_kind`, `rift_menu_click` and `rift_menu_close_reason` sort an
+  event into enums. See [Go](docs/plugins-go.md) and [C](docs/plugins-c.md).
 - Rust `rift-plugin` 0.2.1, Go `github.com/Jotrorox/rift/sdk/go` v0.2.1 and
   the C SDK implement `rift:plugin@0.2.1`. They build messages
   (`text::message`, `rift.Msg`, `rift_msg`), style arguments and escaped

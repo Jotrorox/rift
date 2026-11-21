@@ -123,11 +123,15 @@ pub fn serve(cluster: &Cluster, players: &Players) {
     let players = players.clone();
     cluster
         .links()
-        .on_request(StreamKind::Player, move |_peer, body| {
+        .on_request(StreamKind::Player, move |peer, body| {
             let players = players.clone();
             async move {
-                let request: WireRequest = serde_json::from_slice(&body)
-                    .map_err(|error| format!("player request: {error}"))?;
+                // Refused as a whole, such as a menu that breaks a rule of
+                // this build: the sending peer learns why as well.
+                let request: WireRequest = serde_json::from_slice(&body).map_err(|error| {
+                    log_warn!("player request from peer {peer} refused: {error}");
+                    format!("player request: {error}")
+                })?;
                 let result = players.handle_remote(request).await;
                 serde_json::to_vec(&result)
                     .map(Bytes::from)

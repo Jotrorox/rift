@@ -918,11 +918,24 @@ fn template_variables(template: &str, inputs: &[(String, Kind)]) -> Result<(), S
 /// A dialog table built in Lua as JSON. Tables with only the keys 1..n are
 /// lists; an empty table is an empty object, which list fields also accept.
 pub(crate) fn from_lua(value: mlua::Value) -> Result<Value, String> {
-    fn convert(value: mlua::Value, depth: usize, count: &mut usize) -> Result<Value, String> {
+    lua_json(value, "dialog", MAX_LUA_VALUES)
+}
+
+/// A Lua table as JSON for the definition `what` (a dialog, a menu), with
+/// at most `max_values` values: string keys make objects, dense integer
+/// keys from 1 make arrays, an empty table is `{}`.
+pub(crate) fn lua_json(value: mlua::Value, what: &str, max_values: usize) -> Result<Value, String> {
+    fn convert(
+        value: mlua::Value,
+        depth: usize,
+        count: &mut usize,
+        what: &str,
+        max_values: usize,
+    ) -> Result<Value, String> {
         *count += 1;
-        if depth > MAX_LUA_DEPTH || *count > MAX_LUA_VALUES {
+        if depth > MAX_LUA_DEPTH || *count > max_values {
             return Err(format!(
-                "dialog exceeds {MAX_LUA_VALUES} values or {MAX_LUA_DEPTH} levels"
+                "{what} exceeds {max_values} values or {MAX_LUA_DEPTH} levels"
             ));
         }
         Ok(match value {
@@ -938,7 +951,7 @@ pub(crate) fn from_lua(value: mlua::Value) -> Result<Value, String> {
             }
             mlua::Value::String(text) => Value::String(
                 text.to_str()
-                    .map_err(|_| "dialog strings must be UTF-8".to_owned())?
+                    .map_err(|_| format!("{what} strings must be UTF-8"))?
                     .to_owned(),
             ),
             mlua::Value::Table(table) => {
@@ -946,19 +959,23 @@ pub(crate) fn from_lua(value: mlua::Value) -> Result<Value, String> {
                 let mut array = std::collections::BTreeMap::new();
                 for pair in table.pairs::<mlua::Value, mlua::Value>() {
                     let (key, value) = pair.map_err(|error| error.to_string())?;
-                    let value = convert(value, depth + 1, count)?;
+                    let value = convert(value, depth + 1, count, what, max_values)?;
                     match key {
                         mlua::Value::String(key) => {
                             let key = key
                                 .to_str()
-                                .map_err(|_| "dialog keys must be UTF-8".to_owned())?
+                                .map_err(|_| format!("{what} keys must be UTF-8"))?
                                 .to_owned();
                             object.insert(key, value);
                         }
                         mlua::Value::Integer(index) if index >= 1 => {
                             array.insert(index, value);
                         }
-                        _ => return Err("dialog table keys must be strings or list indices".into()),
+                        _ => {
+                            return Err(format!(
+                                "{what} table keys must be strings or list indices"
+                            ));
+                        }
                     }
                 }
                 match (object.is_empty(), array.is_empty()) {
@@ -967,17 +984,16 @@ pub(crate) fn from_lua(value: mlua::Value) -> Result<Value, String> {
                         Value::Array(array.into_values().collect())
                     }
                     _ => {
-                        return Err(
-                            "dialog tables must be either a dense list or have only string keys"
-                                .into(),
-                        );
+                        return Err(format!(
+                            "{what} tables must be either a dense list or have only string keys"
+                        ));
                     }
                 }
             }
-            other => return Err(format!("unsupported {} in dialog", other.type_name())),
+            other => return Err(format!("unsupported {} in {what}", other.type_name())),
         })
     }
-    convert(value, 0, &mut 0)
+    convert(value, 0, &mut 0, what, max_values)
 }
 
 #[cfg(test)]

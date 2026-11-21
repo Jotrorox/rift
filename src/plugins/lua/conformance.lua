@@ -76,7 +76,47 @@ rift.on("join", function(ctx)
         local kick = show(pcall(players.kick, ctx.uuid, rich))
         report("rich " .. message .. " " .. action_bar .. " " .. broadcast .. " " .. kick)
     end
+    if config.menu then
+        local chest = rift.players.menu(ctx.uuid, {
+            id = "pick",
+            rows = 1,
+            title = "Pick",
+            slots = {
+                { slot = 0, item = "diamond", name = "Buy", id = "buy", payload = "gold", clicks = "all" },
+            },
+            state = 1,
+        })
+        local anvil = rift.players.menu(ctx.uuid, '{"id":"nick","type":"anvil","text":"Steve","typing":true}')
+        local ok, err = pcall(rift.players.menu, ctx.uuid, { id = "bad", keys = 1 })
+        local invalid = not ok and string.find(err, "keys must be an object", 1, true) ~= nil
+        report("menu shown " .. tostring(chest) .. " " .. tostring(anvil) .. " " .. tostring(invalid))
+    end
 end)
+
+-- With `menu`, every menu event reports its fields, and the guest patches
+-- and closes its menus in answer.
+if config.menu then
+    local function field(value)
+        if value == nil then
+            return "-"
+        end
+        return tostring(value)
+    end
+    rift.on("menu", function(ctx)
+        report(table.concat({
+            "menu", ctx.menu, ctx.kind, field(ctx.action), field(ctx.slot), field(ctx.click),
+            field(ctx.key), field(ctx.text), field(ctx.reason), field(ctx.payload), field(ctx.state),
+        }, " "))
+        if ctx.kind == "click" and ctx.action == "buy" then
+            local updated = rift.players.update_menu(ctx.uuid, "pick", { title = "Bought", state = 2 })
+            report("update " .. tostring(updated))
+        elseif ctx.kind == "text" then
+            report("close " .. tostring(rift.players.close_menu(ctx.uuid, "nick")))
+        elseif ctx.kind == "close" and ctx.menu == "pick" then
+            report("close any " .. tostring(rift.players.close_menu(ctx.uuid)))
+        end
+    end)
+end
 
 rift.on("route", function(connection)
     behave("route")

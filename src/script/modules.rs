@@ -102,6 +102,9 @@ pub(super) fn install(
         .load(include_str!("../lua/api.lua"))
         .set_name("=rift API")
         .call(runtime)?;
+    lua.load(include_str!("../lua/menus.lua"))
+        .set_name("=rift menus")
+        .call::<()>(api.clone())?;
     let cache = lua.create_table()?;
     cache.raw_set("rift", api.clone())?;
     cache.raw_set("rift.config", api.raw_get::<Table>("config")?)?;

@@ -31,7 +31,7 @@ my-network/
 # plugins/hello-lua/plugin.toml
 name = "hello-lua"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "lua"
 
 [capabilities]
@@ -112,7 +112,7 @@ result wins; observers all run and must return nil.
 
 | Event | Handler receives |
 | --- | --- |
-| `route`, `http`, `status`, `login`, `initial_server`, `before_transfer`, `join`, `after_transfer`, `disconnect`, `dialog` | The same input as in `rift.lua`, with the same results |
+| `route`, `http`, `status`, `login`, `initial_server`, `before_transfer`, `join`, `after_transfer`, `disconnect`, `dialog`, `menu` | The same input as in `rift.lua`, with the same results. `rift.menus.on(id, handlers)` registers a `menu` handler for one [menu](menus.md#events) |
 | `chat` | Every [chat](plugin-events.md#chat) message and backend command: `ctx.kind` (`"message"` or `"command"`) and `ctx.text`; for a command also `ctx.command` and `ctx.args`. Return nil, or `{ deny = "reason" }` to drop it. With signed chat, the first deny costs that player their chat signing |
 | `kick` | A backend kick in play: `ctx.server` is the backend that kicked the player, `ctx.reason` its text without formatting. Return `{ server = "lobby" }` to move the player there, `{ deny = "reason" }` to disconnect them with that text, or nil to leave it to [`network.on_kick`](operations.md#run-a-maintenance-window) |
 | `event` | Rift events from `rift.events.*`, as `{ subject, payload, payload_json }` |
@@ -155,7 +155,7 @@ mode:
 
 | Contract | In a persistent Lua plugin |
 | --- | --- |
-| `players.*` | `rift.players.*` as in `rift.lua`: the same [functions](players-api.md#functions), [player tables](players-api.md#player-tables) and [rich text](players-api.md#rich-text), including `lookup`, `search` and `set_language` for the [player directory](plugin-events.md#the-player-directory-and-languages). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
+| `players.*` | `rift.players.*` as in `rift.lua`: the same [functions](players-api.md#functions), [player tables](players-api.md#player-tables) and [rich text](players-api.md#rich-text), including `lookup`, `search` and `set_language` for the [player directory](plugin-events.md#the-player-directory-and-languages). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers, and the events of its [inventory menus](menus.md) (`menu`, `update_menu`, `close_menu`) its `rift.on("menu", fn)` and `rift.menus.on` handlers. |
 | `store.*` | `rift.store.*`. Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
 | `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions-lua.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil), `rift.permissions.meta(uuid, contexts?)` and `rift.permissions.set_meta(uuid, key, value_or_nil, { contexts?, expires_in?, expires_at? })`. `rift.permissions.add_group(uuid, group, { expires_in?, expires_at? })` makes the membership end after that many seconds or at that Unix time; adding again replaces the expiry. |
 | `bus.publish`, `bus.request`, `bus.subscribe`, `bus.unsubscribe` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply; `rift.subscribe` and `rift.unsubscribe(handle)`. |
@@ -164,7 +164,7 @@ mode:
 | (Lua only) cluster | `rift.cluster.lease(name, ttl_ms)`, `renew(name, token, ttl_ms)`, `release(name, token)`, `is_leader()` and `peer()`: [leases with fencing tokens](host-services.md#leases-in-a-cluster), the plugin's own names. They wait for the cluster on the plugin's thread; without a cluster a lease is always granted. |
 | `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. [Logs](plugin-operations.md#logs) says where the lines go. |
 | `background.*` | `rift.background.defer()`, `resolve(ticket, decision)`, `run(payload, [fn])` and `is_worker()`: see [background work](#background-work). |
-| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.2.1"`); `rift.clock()` and `rift.time()`. |
+| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.3.0"`); `rift.clock()` and `rift.time()`. |
 | `text.*` | [`rift.text`](text.md#rifttext-in-lua): `rift.text.render(text, language)` returns a component table, `plain`, `to_legacy` and `to_mini` a string, all with the plugin's own messages by unqualified key, in `language` or the default. `rift.text.message(key, args)` builds a `message` object, and `mini`, `legacy` and `escape` exist as in `rift.lua`. They work in `init`, hooks and background workers alike. |
 | (Lua only) | `rift.http.request(url, options)` takes any `http`/`https` URL instead of an integration name; options are `method`, `body`, `headers` and `timeout_ms` (default 10 s, at most 60 s). Requires `capabilities.network` (default true). |
 | (script only) | `rift.setup`, `rift.plugin` and `rift.config` configure Rift and exist only in `rift.lua`. |

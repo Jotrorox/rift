@@ -68,6 +68,7 @@ pub mod instance_login;
 pub mod instance_store;
 pub mod log;
 pub mod managed;
+pub mod menu;
 pub mod message_script;
 pub mod messaging;
 pub mod network_service;

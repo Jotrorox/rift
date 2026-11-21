@@ -32,6 +32,7 @@ var (
 	onTimer          = func(uint64) {}
 	onEvent          = func(Event) {}
 	onDialog         = func(DialogResponse) {}
+	onMenu           = func(MenuEvent) {}
 	onJobDone        = func(uint64, []byte, error) {}
 	onWorkInit       = func(string) error { return nil }
 	onWork           = func([]byte) ([]byte, error) { return nil, ErrNoWork }
@@ -184,6 +185,12 @@ func OnEvent(f func(Event)) {
 // with ShowDialog. It needs no hook in the registration.
 func OnDialog(f func(DialogResponse)) { onDialog = f }
 
+// OnMenu sets the handler for everything a player does in a menu shown with
+// ShowMenu: MenuEvent.Kind says whether it was a click, typing or the end of
+// the menu. Ignore the kinds you do not know. It needs no hook in the
+// registration.
+func OnMenu(f func(MenuEvent)) { onMenu = f }
+
 // OnJobDone sets the handler called when a job started with Run finished:
 // result is what the worker's OnWork handler returned, or err is a JobError
 // saying why it failed. It needs no hook in the registration.
@@ -266,6 +273,7 @@ func init() {
 	e.Timer = func(h uint64) { onTimer(h) }
 	e.Event = func(ev types.RiftEvent) { onEvent(Event{Subject: ev.Subject, PayloadJSON: ev.PayloadJSON}) }
 	e.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
+	e.Menu = func(ev types.MenuEvent) { onMenu(liftMenuEvent(ev)) }
 	e.JobDone = func(handle uint64, outcome bytesResult) {
 		if err := outcome.Err(); err != nil {
 			onJobDone(handle, nil, JobError(*err))

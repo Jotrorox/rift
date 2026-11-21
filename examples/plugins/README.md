@@ -11,7 +11,7 @@ Four persistent plugins that behave identically, one per supported language:
 | [`vanish-lua`](vanish-lua) | Lua | nothing to build | [Visibility](../../docs/permissions.md#visibility): `/vanish` through the `rift.visible-to` meta key |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.2.1` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.3.0` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names (the
 built `.wasm`, or `init.lua`), and may hold a `messages.toml` with the
 plugin's own messages and their translations
@@ -54,15 +54,34 @@ examples behave identically. Every observable effect is deterministic:
 
 | Export | Behaviour |
 | --- | --- |
-| `init(config)` | Decodes the JSON configuration `{"deny": "<name>"}` (`deny` optional; invalid JSON fails `init`). Calls `timers.every(1000)` once, then `bus.subscribe("hello.ping", none)` (a failed subscription fails `init`). Returns command `hello` with permission `hello.use` and suggest `players`, and hooks `login`, `command`, `join`, `message`, `timer`, so the host skips every other hook. |
+| `init(config)` | Decodes the JSON configuration `{"deny": "<name>"}` (`deny` optional; invalid JSON fails `init`). Calls `timers.every(1000)` once, then `bus.subscribe("hello.ping", none)` (a failed subscription fails `init`). Returns command `hello` with permission `hello.use` and suggest `players`, command `servers` without a permission or suggestions, and hooks `login`, `command`, `join`, `message`, `timer`, so the host skips every other hook. |
 | `login(ctx)` | `deny("You are not welcome here.")` when `ctx.name` equals the configured `deny` name exactly, otherwise `continue`. |
-| `command(ctx)` | `message` with the message object `{"message": "greeting", "args": {"name": ctx.name}}`, built with the SDK's message builder. `messages.toml` renders it as `Hello, <ctx.name>!`, or `Hallo, <ctx.name>!` for a player whose language is German. |
+| `command(ctx)` | `hello`: `message` with the message object `{"message": "greeting", "args": {"name": ctx.name}}`, built with the SDK's message builder. `messages.toml` renders it as `Hello, <ctx.name>!`, or `Hallo, <ctx.name>!` for a player whose language is German. `servers`: `players.menu(ctx.uuid, <the server selector>)` and `continue`; host errors are ignored. |
+| `menu(event)` | A click on a button with the action `join`: `players.transfer(event.ctx.uuid, <the button's payload>)`. Errors and every other event are ignored. |
 | `join(ctx)` | `players.message(ctx.uuid, "Welcome, <ctx.name>!")`, then `store.increment("hello", "joins", 1)`. Host errors are ignored. |
 | `message(msg)` | When `msg.reply` is set, `bus.publish(msg.reply, msg.payload, none)`; otherwise nothing. Errors are ignored. |
 | `timer(handle)` | Logs `tick` at `debug`. |
 
 Every other export keeps the SDK default (`continue`, `default`, `none` or an
 empty list), and the plugin logs nothing else.
+
+The server selector is the menu of [inventory menus](../../docs/menus.md#a-server-selector),
+with the server's name as each button's payload:
+
+```json
+{
+  "id": "servers", "type": "chest",
+  "title": {"mini": "<dark_gray>Choose a server"},
+  "layout": ["#########", "# S C M #", "####X####"],
+  "keys": {
+    "#": {"item": "gray_stained_glass_pane", "name": " "},
+    "S": {"item": "grass_block", "name": {"mini": "<green>Survival"}, "lore": ["Click to join"], "id": "join", "payload": "survival"},
+    "C": {"item": "bricks", "name": {"mini": "<gold>Creative"}, "lore": ["Click to join"], "id": "join", "payload": "creative"},
+    "M": {"item": "bow", "name": {"mini": "<red>Minigames"}, "lore": ["Click to join"], "id": "join", "payload": "minigames"},
+    "X": {"item": "barrier", "name": {"mini": "<red>Close"}, "close": true}
+  }
+}
+```
 
 Example configuration: `{"deny":"Mallory"}`.
 
@@ -71,7 +90,7 @@ Example configuration: `{"deny":"Mallory"}`.
 ```toml
 name = "hello-rs"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_rs.wasm"
@@ -142,7 +161,7 @@ as `hello-lua:greeting`.
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = "0.2"
+rift-plugin = "0.3"
 ```
 
 ```rust
@@ -171,7 +190,8 @@ Every hook has a default; implement only the ones you list in
 `Registration::hooks`. An empty list delivers every hook except `chat` and
 `kick`: a plugin registers for chat by listing the `chat` hook (`Hook::Chat`).
 The host API lives in `rift_plugin::{players, store,
-permissions, bus, servers, timers, background, log, meta}`, `rift_plugin::config::<T>`
+permissions, bus, servers, timers, background, log, meta, text}`, menus are
+built with `rift_plugin::menu`, `rift_plugin::config::<T>`
 decodes the JSON configuration with serde, and `log::info!` (or
 `rift_plugin::log::info!`) writes to Rift's log.
 

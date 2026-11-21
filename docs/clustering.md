@@ -398,7 +398,9 @@ no servers.
   `rift.network.*`, the HTTP player routes, the plugin and Lua players API,
   BungeeCord `Message`, `KickPlayer`, `Connect`, `ConnectOther` and the
   forwarding channels, and `rift admin transfer`. A peer sends the action to
-  the player's peer and returns its answer.
+  the player's peer and returns its answer. Clicks on
+  [dialogs](dialogs.md) and the events of [inventory menus](menus.md) go
+  back to the plugin on the peer that showed them.
 - **Session events** (login, chat, commands, transfer decisions,
   disconnect) run on the peer that holds the session, so plugin code sees
   each of them once.

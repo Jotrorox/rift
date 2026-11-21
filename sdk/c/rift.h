@@ -48,6 +48,7 @@ typedef rift_plugin_types_bus_message_t rift_bus_message_t;
 typedef rift_plugin_types_hook_t rift_hook_t;
 typedef rift_plugin_types_level_t rift_level_t;
 typedef rift_plugin_types_dialog_response_t rift_dialog_response_t;
+typedef rift_plugin_types_menu_event_t rift_menu_event_t;
 typedef rift_plugin_types_chat_attempt_t rift_chat_attempt_t;
 typedef rift_plugin_types_chat_kind_t rift_chat_kind_t;
 typedef rift_plugin_types_suggestion_t rift_suggestion_t;
@@ -218,6 +219,7 @@ static inline void rift_bus_message_free(rift_bus_message_t *msg) { rift_plugin_
 static inline void rift_dialog_response_free(rift_dialog_response_t *response) {
   rift_plugin_types_dialog_response_free(response);
 }
+static inline void rift_menu_event_free(rift_menu_event_t *event) { rift_plugin_types_menu_event_free(event); }
 static inline void rift_chat_attempt_free(rift_chat_attempt_t *attempt) {
   rift_plugin_types_chat_attempt_free(attempt);
 }
@@ -1168,6 +1170,52 @@ static inline bool rift_show_dialog(const rift_string_t *target, const char *dia
   return queued;
 }
 
+// Shows `target` an inventory menu (Minecraft 1.12+), or redraws the open
+// menu with the same `id` in place. `menu_json` is a menu definition in the
+// format of docs/menus.md; C has no builder, so write the JSON text (a string
+// literal, or `rift_string_fmt` for values you compute; escape player input).
+// Clicks, typing and the end of the menu come back to
+// `exports_rift_plugin_handler_menu`. A menu replaces an open menu or dialog.
+// Returns whether the menu was queued: false for an offline or pre-1.12
+// player, one with too many undelivered actions, and for an invalid menu,
+// whose error is logged.
+static inline bool rift_show_menu(const rift_string_t *target, const char *menu_json) {
+  rift_string_t t = *target, json = rift_str(menu_json), err = {NULL, 0};
+  bool queued = false;
+  if (!rift_plugin_players_menu(&t, &json, &queued, &err)) {
+    rift__host_error("players.menu", &err);
+    return false;
+  }
+  return queued;
+}
+
+// Changes part of the menu `id` (`slots`, `keys`, `title`, `state`, `text`)
+// with a patch in JSON, for a clock or a countdown. Returns whether it was
+// queued: false when the player is offline or too far behind; a patch for a
+// menu the player no longer has open is dropped by the host. An invalid patch
+// is logged and returns false.
+static inline bool rift_update_menu(const rift_string_t *target, const char *id, const char *patch_json) {
+  rift_string_t t = *target, menu = rift_str(id), patch = rift_str(patch_json), err = {NULL, 0};
+  bool queued = false;
+  if (!rift_plugin_players_update_menu(&t, &menu, &patch, &queued, &err)) {
+    rift__host_error("players.update-menu", &err);
+    return false;
+  }
+  return queued;
+}
+
+// Closes this plugin's menu `id`; with `id` NULL closes whatever Rift menu is
+// open, for any plugin. Returns whether the close was queued.
+static inline bool rift_close_menu(const rift_string_t *target, const char *id) {
+  rift_string_t t = *target, menu = rift_str(id), err = {NULL, 0};
+  bool queued = false;
+  if (!rift_plugin_players_close_menu(&t, id ? &menu : NULL, &queued, &err)) {
+    rift__host_error("players.close-menu", &err);
+    return false;
+  }
+  return queued;
+}
+
 // ---------------------------------------------------------------------------
 // Remembered players and languages
 
@@ -1233,7 +1281,7 @@ static inline bool rift_set_language(const rift_string_t *target, const char *la
 }
 
 // ---------------------------------------------------------------------------
-// Text conversions (rift:plugin 0.2.1: set `min_api = "0.2.1"` in plugin.toml)
+// Text conversions
 //
 // What `rift.text` does in Lua: Rift converts `text` (borrowed) with markup,
 // legacy codes and messages resolved, the plugin's own messages by
@@ -1644,6 +1692,159 @@ invalid:
 static inline rift_json_result_t rift_json_get_string(const rift_string_t *json, const char *key,
                                                       rift_string_t *out) {
   return rift_json_get_string_n((const char *)json->ptr, json->len, key, out);
+}
+
+// ---------------------------------------------------------------------------
+// Menu events
+//
+// Everything a player does in a menu this plugin showed arrives at
+// `exports_rift_plugin_handler_menu(rift_menu_event_t *event)`, which needs no
+// registration. The event is yours: free it with `rift_menu_event_free`
+// before returning. The contract spells `kind`, `click` and `reason` as
+// strings so a later release can add values; these helpers turn them into
+// enums with an `_OTHER` case for a value this header does not know, so a
+// plugin never compares strings. Ignore an event whose kind is
+// `RIFT_MENU_KIND_OTHER`.
+//
+//   void exports_rift_plugin_handler_menu(rift_menu_event_t *event) {
+//     if (rift_menu_kind(event) == RIFT_MENU_KIND_CLICK && event->action.is_some &&
+//         rift_string_eq(&event->action.val, "join")) {
+//       rift_string_t server;
+//       if (rift_menu_payload_string(event, &server) == RIFT_JSON_OK) {
+//         rift_string_t err = {NULL, 0};
+//         bool moved;
+//         if (!rift_plugin_players_transfer(&event->ctx.uuid, &server, &moved, &err)) rift_string_free(&err);
+//         rift_string_free(&server);
+//       }
+//     }
+//     rift_menu_event_free(event);
+//   }
+//
+// Optional fields are the generated options: `event->action`, `event->slot`
+// (0-based), `event->key` (1 to 9 for `RIFT_CLICK_NUMBER_KEY`), `event->text`
+// (an anvil's text field, from the client: check it like chat),
+// `event->payload_json` and `event->state_json`. Each has `is_some` and `val`.
+
+typedef enum rift_menu_kind {
+  RIFT_MENU_KIND_OTHER = 0,  // from a newer Rift: ignore the event
+  RIFT_MENU_KIND_CLICK,      // a click on a button with an `id`
+  RIFT_MENU_KIND_TEXT,       // typing in an anvil shown with `"typing": true`
+  RIFT_MENU_KIND_CLOSE,      // the end of the menu; exactly one per menu
+} rift_menu_kind_t;
+
+typedef enum rift_click {
+  RIFT_CLICK_OTHER = 0,  // a newer kind, and the value for an event that is no click
+  RIFT_CLICK_LEFT,
+  RIFT_CLICK_RIGHT,
+  RIFT_CLICK_SHIFT_LEFT,
+  RIFT_CLICK_SHIFT_RIGHT,
+  RIFT_CLICK_MIDDLE,
+  RIFT_CLICK_DROP,
+  RIFT_CLICK_DROP_ALL,
+  RIFT_CLICK_NUMBER_KEY,
+  RIFT_CLICK_OFFHAND,
+} rift_click_t;
+
+typedef enum rift_close_reason {
+  RIFT_CLOSE_OTHER = 0,  // a newer reason, and the value for an event that is no close
+  RIFT_CLOSE_PLAYER,     // Escape or the inventory key
+  RIFT_CLOSE_PLUGIN,     // a button with `close`, or `rift_close_menu`
+  RIFT_CLOSE_REPLACED,   // another menu or a dialog took the screen
+  RIFT_CLOSE_SERVER,     // the backend opened a screen, or the player died or changed worlds
+  RIFT_CLOSE_SWITCH,     // the player is switching servers
+  RIFT_CLOSE_DISCONNECT, // the player left
+} rift_close_reason_t;
+
+static inline rift_menu_kind_t rift_menu_kind(const rift_menu_event_t *event) {
+  if (rift_string_eq(&event->kind, "click")) return RIFT_MENU_KIND_CLICK;
+  if (rift_string_eq(&event->kind, "text")) return RIFT_MENU_KIND_TEXT;
+  if (rift_string_eq(&event->kind, "close")) return RIFT_MENU_KIND_CLOSE;
+  return RIFT_MENU_KIND_OTHER;
+}
+
+static const char *const rift__click_names[] = {NULL,   "left", "right",      "shift_left", "shift_right",
+                                                "middle", "drop", "drop_all", "number_key", "offhand"};
+
+// How the player clicked: `RIFT_CLICK_OTHER` for an event without a click or
+// with a kind this header does not know.
+static inline rift_click_t rift_menu_click(const rift_menu_event_t *event) {
+  if (!event->click.is_some) return RIFT_CLICK_OTHER;
+  for (size_t i = 1; i < sizeof rift__click_names / sizeof *rift__click_names; i++) {
+    if (rift_string_eq(&event->click.val, rift__click_names[i])) return (rift_click_t)i;
+  }
+  return RIFT_CLICK_OTHER;
+}
+
+static const char *const rift__close_names[] = {NULL,     "player", "plugin",    "replaced",
+                                                "server", "switch", "disconnect"};
+
+// Why the menu ended: `RIFT_CLOSE_OTHER` for an event that is no close or
+// with a reason this header does not know.
+static inline rift_close_reason_t rift_menu_close_reason(const rift_menu_event_t *event) {
+  if (!event->reason.is_some) return RIFT_CLOSE_OTHER;
+  for (size_t i = 1; i < sizeof rift__close_names / sizeof *rift__close_names; i++) {
+    if (rift_string_eq(&event->reason.val, rift__close_names[i])) return (rift_close_reason_t)i;
+  }
+  return RIFT_CLOSE_OTHER;
+}
+
+// The host's spelling of a click, such as "shift_left", for logs; "other" for
+// `RIFT_CLICK_OTHER`.
+static inline const char *rift_click_name(rift_click_t click) {
+  return (size_t)click > 0 && (size_t)click < sizeof rift__click_names / sizeof *rift__click_names
+             ? rift__click_names[click]
+             : "other";
+}
+
+// The host's spelling of a close reason; "other" for `RIFT_CLOSE_OTHER`.
+static inline const char *rift_close_reason_name(rift_close_reason_t reason) {
+  return (size_t)reason > 0 && (size_t)reason < sizeof rift__close_names / sizeof *rift__close_names
+             ? rift__close_names[reason]
+             : "other";
+}
+
+// Reads a JSON string value (a button's payload, or the state, when the
+// plugin wrote a string) into `out`, unescaped and owned by you (free it with
+// `rift_string_free`). Returns `RIFT_JSON_OK`; `RIFT_JSON_MISSING` for no
+// value, `RIFT_JSON_WRONG_TYPE` for a number, object or other non-string, and
+// `RIFT_JSON_INVALID` for text that is not JSON. `out` is empty unless OK.
+static inline rift_json_result_t rift_json_string_value(const rift_option_string_t *json, rift_string_t *out) {
+  out->ptr = NULL;
+  out->len = 0;
+  if (!json->is_some) return RIFT_JSON_MISSING;
+  const uint8_t *p = json->val.ptr, *end = p + json->val.len;
+  rift__json_ws(&p, end);
+  if (p >= end) return RIFT_JSON_INVALID;
+  if (*p != '"') {
+    if (rift__json_literal(&p, end, "null")) return RIFT_JSON_MISSING;
+    return rift__json_skip(&p, end, 0) ? RIFT_JSON_WRONG_TYPE : RIFT_JSON_INVALID;
+  }
+  rift_string_t value = {NULL, 0};
+  bool ok = rift__json_string(&p, end, &value);
+  if (ok) {
+    rift__json_ws(&p, end);
+    ok = p == end;
+  }
+  if (!ok) {
+    free(value.ptr);
+    return RIFT_JSON_INVALID;
+  }
+  if (value.len == 0) {
+    free(value.ptr);
+    value.ptr = NULL;
+  }
+  *out = value;
+  return RIFT_JSON_OK;
+}
+
+// The clicked button's payload, when the plugin wrote a string.
+static inline rift_json_result_t rift_menu_payload_string(const rift_menu_event_t *event, rift_string_t *out) {
+  return rift_json_string_value(&event->payload_json, out);
+}
+
+// The menu's state, when the plugin set a string.
+static inline rift_json_result_t rift_menu_state_string(const rift_menu_event_t *event, rift_string_t *out) {
+  return rift_json_string_value(&event->state_json, out);
 }
 
 #ifdef __cplusplus

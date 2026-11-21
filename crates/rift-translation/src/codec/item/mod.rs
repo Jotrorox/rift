@@ -10,6 +10,8 @@
 //!   the stack converts back when the client returns it.
 //! - [`install`]: default handlers for every item-carrying packet, only for
 //!   the pairs whose layouts or IDs differ.
+//! - [`newest`]: stacks Rift writes itself in the newest protocol's terms,
+//!   converted down the same chain for any client, outside a connection.
 //!
 //! The packet models (`window`, `merchant`, `advancements`, `recipes`) read
 //! and write each packet in every protocol's layout; handlers read in the
@@ -23,6 +25,7 @@ mod handlers;
 mod legacy;
 mod legacy_text;
 pub mod merchant;
+pub mod newest;
 pub mod recipes;
 mod stack;
 mod tags;

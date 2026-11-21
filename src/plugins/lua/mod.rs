@@ -286,6 +286,9 @@ impl LuaEngine {
             ctx.raw_set("kind", chat.kind.name())?;
             ctx.raw_set("text", chat.text.as_str())?;
         }
+        if let Some(menu) = &input.menu {
+            crate::extensions::menu_fields(&ctx, menu, |value| bind::to_lua(lua, value))?;
+        }
         let services = self.state.services.clone();
         let uuid = input.uuid.clone();
         ctx.raw_set(
@@ -408,7 +411,8 @@ impl LuaEngine {
             Event::Join(ctx)
             | Event::AfterTransfer(ctx)
             | Event::Disconnect(ctx)
-            | Event::Dialog(ctx) => {
+            | Event::Dialog(ctx)
+            | Event::Menu(ctx) => {
                 // As in script mode, observers must return nil.
                 let input = self.context(&ctx, hook)?;
                 for handler in self.state.handlers(name) {
