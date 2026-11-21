@@ -39,15 +39,40 @@ scripted client in the client's own protocol, and checks with PASS/FAIL:
                 server (death), switch (rift.players.transfer to a second
                 backend) and disconnect (seen by a second player), exactly one
                 close event per menu
+    creative    set_creative_mode_slot never reaches the backend while a menu
+                is open or within a second after Rift closed one; it does
+                right after the player closed one
+    screen_packets  rename, trade, beacon, recipe, button, transaction
+                acknowledgement and slot state for Rift's chest stay away from
+                the backend; without a menu a trade selection reaches it
+    anvil       defaults, buttons in all three slots, fast renames (a result
+                and a cost of 0 for each, the result built at most every
+                50 ms, the final text's last), typing = true (at most 5 text
+                events a second, always the final text), the result click
+                (slots, cost, set_experience, cursor), a shift-click from the
+                inventory rows, over-long and filtered renames, redraw, a new
+                title, update_menu with text, every ending with the text, a
+                late rename, none of it at the backend
+    plugin_stop a plugin restarted, then reloaded with a new file, while its
+                menu is open: Rift closes the menu, no instance gets an event
+                of the old menu, the new instance's menus work
     alive       the client stays connected and decodes every packet, Rift logs
-                no error or panic, the server no warning about the player
+                no error or panic, the server no warning about the player; the
+                backend never received a packet naming Rift's containers, and
+                Rift's inventory requests were at least 250 ms apart
 
-rift.lua player hooks need online mode, so the clients log in online against
-a fake session server on 127.0.0.1 (pure-Python RSA and AES/CFB8) and Rift
-forwards to the offline test backends in BungeeCord mode, which vanilla
-ignores. The Rift binary must therefore be built with
-`--features test-session-server` (it reads RIFT_TEST_SESSION_URL); the script
-checks that first.
+What the backend receives is recorded by a relay between Rift and the main
+backend (BackendTap), so "nothing reaches the backend" is checked on the
+wire, also on servers without a console view (Pumpkin).
+
+The default mode (--mode plugin) shows the menus from a persistent Lua
+plugin, driven over its http hook through Rift's web interface; it works with
+any build. --mode script shows them from rift.lua instead. rift.lua player
+hooks need online mode, so the clients log in online against a fake session
+server on 127.0.0.1 (pure-Python RSA and AES/CFB8) and Rift forwards to the
+offline test backends in BungeeCord mode, which vanilla ignores. The Rift
+binary must therefore be built with `--features test-session-server` (it
+reads RIFT_TEST_SESSION_URL); the script checks that first.
 
 Usage (Python 3.11+; use /opt/homebrew/bin/python3 on macOS):
 
@@ -64,10 +89,15 @@ tests/matrix_fixtures.py) in ~/.cache/rift-via; at most RIFT_VIA_MAX_SERVERS
 (here 2 by default) servers run at once. Each pair's client packet log, Rift
 log, server log and result.json go under --out.
 
---only NAME,... runs only some steps. Steps for what the binary may not have
-yet (anvils) are in OPTIONAL; --with NAME,... turns them on. Both modes also
-load a second persistent plugin, `othertest`, that tries to patch and close
-the test's menus by id; --mode plugin needs the web interface for both.
+--only NAME,... runs only some steps (they expect the steps before them, so
+use it to iterate, not to judge). Steps in OPTIONAL run only with --with
+NAME,...; none is optional now. Both modes also load a second persistent
+plugin, `othertest`, that tries to patch and close the test's menus by id and
+shows a menu of its own for the plugin_stop step.
+
+Downloads: a server jar that tests/minecraft.py already put into
+target/minecraft/downloads (CI caches that directory) is copied into the
+shared cache instead of being downloaded again.
 """
 
 import argparse
@@ -78,6 +108,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -98,7 +129,8 @@ from matrix_client import Session, SessionError, offline_uuid, text_of  # noqa: 
 import matrix_registries  # noqa: E402
 from matrix_scenario import CHAT, Commands  # noqa: E402
 from menus_probe import CHANGED_SLOTS, STATE_IDS, empty, from_record, inventory, key, short, stack  # noqa: E402
-from minecraft import varint  # noqa: E402
+from minecraft import CACHE as HARNESS_CACHE, varint  # noqa: E402
+import protodef  # noqa: E402
 
 OUT = env.HOME / "menus-e2e"
 
@@ -422,7 +454,7 @@ MENUS = {
         0: ("glass_pane", 1, None, []), 2: ("diamond", 1, "Hop", []), 4: ("glass_pane", 1, None, [])}),
     "dispenser": ("dispenser", None, "Rift test dispenser", {4: ("gold_ingot", 2, "Gold", [])}),
 }
-SLOT_COUNT = {"chest": None, "hopper": 5, "dispenser": 9}
+SLOT_COUNT = {"chest": None, "hopper": 5, "dispenser": 9, "anvil": 3}
 GLASS_SLOT = ("glass_pane", 1, None, [])
 # The "live" chest's '#' slots in 3 rows, and its buttons.
 LIVE_GLASS = list(range(0, 10)) + list(range(17, 27))
@@ -482,7 +514,9 @@ rift.on("menu", function(ctx)
     rift.players.broadcast("MENUEV who=" .. s(ctx.name) .. " menu=" .. s(ctx.menu)
         .. " kind=" .. s(ctx.kind) .. " action=" .. s(ctx.action) .. " slot=" .. s(ctx.slot)
         .. " click=" .. s(ctx.click) .. " key=" .. s(ctx.key) .. " payload=" .. enc(ctx.payload)
-        .. " reason=" .. s(ctx.reason) .. " state=" .. enc(ctx.state) .. " server=" .. s(ctx.server))
+        .. " reason=" .. s(ctx.reason) .. " state=" .. enc(ctx.state) .. " server=" .. s(ctx.server)
+        -- Last, so a text with spaces stays one field.
+        .. " text=" .. s(ctx.text))
 end)
 
 local GLASS = { item = "glass_pane", name = " " }
@@ -588,8 +622,45 @@ rift.menus.on("counter", {
     click = { inc = function(ctx) counter(ctx.uuid, ctx.state.n + 1) end },
 })
 
+-- Anvils. "anvil" and its variants share an id, so showing a variant redraws it.
+local function anvil(variant)
+    local menu = { id = "anvil", type = "anvil", title = "Rift anvil", text = "Steve", state = { tag = "st-anvil", n = 1 } }
+    if variant == "anvil_redraw" or variant == "anvil_title" then
+        menu.slots = { { slot = 1, item = "emerald", name = "Right", id = "right", payload = { tag = "right", n = 2 } } }
+        menu.state = { tag = "st-anvil", n = 2 }
+    end
+    if variant == "anvil_title" then
+        menu.title = "Rift anvil renamed"
+        menu.state = { tag = "st-anvil", n = 3 }
+    end
+    return menu
+end
+local ANVIL_TYPING = { id = "anvilt", type = "anvil", title = "Typing anvil", text = "Alex", typing = true,
+                       state = { tag = "st-anvilt", n = 1 } }
+local ANVIL_CUSTOM = {
+    id = "anvilc", type = "anvil", title = "Custom anvil", text = "Custom", state = { tag = "st-anvilc", n = 1 },
+    layout = { "LRX" },
+    keys = {
+        L = { item = "name_tag", name = "Not this name", id = "left", payload = { tag = "left", n = 1 } },
+        R = { item = "emerald", name = "Right", id = "right", payload = { tag = "right", n = 2 } },
+        X = { item = "diamond", name = "Confirm", id = "ok", payload = { tag = "ok", n = 3 } },
+    },
+}
+
 -- What the test asks for by name: a command (script mode) or the http hook (plugin mode).
 local ACTIONS = {
+    anvil = function(p) return rift.players.menu(p, anvil("anvil")) end,
+    anvil_redraw = function(p) return rift.players.menu(p, anvil("anvil_redraw")) end,
+    anvil_title = function(p) return rift.players.menu(p, anvil("anvil_title")) end,
+    anvil_typing = function(p) return rift.players.menu(p, ANVIL_TYPING) end,
+    anvil_custom = function(p) return rift.players.menu(p, ANVIL_CUSTOM) end,
+    anvil_patch_text = function(p) return rift.players.update_menu(p, "anvil", { text = "Patched" }) end,
+    anvil_patch_close = function(p)
+        return rift.players.update_menu(p, "anvilc", { slots = {
+            { slot = 2, item = "barrier", name = "Cancel", close = true } } })
+    end,
+    anvil_close = function(p) return rift.players.close_menu(p, "anvil") end,
+    chest = function(p) return rift.players.menu(p, MENUS.chest) end,
     live = function(p) return rift.players.menu(p, live("live")) end,
     live_two = function(p) return rift.players.menu(p, live("live_two")) end,
     live_title = function(p) return rift.players.menu(p, live("live_title")) end,
@@ -682,19 +753,24 @@ rift.on("http", function(request)
             slots = { { slot = 10, item = "tnt", name = "Hijacked", id = "evil" } } })
     elseif w[1] == "close" then
         ok = rift.players.close_menu(w[2], w[3])
+    elseif w[1] == "show" then
+        -- Its own menu, for the test of a plugin that stops while it is open.
+        ok = rift.players.menu(w[2], { id = "otherm", rows = 1, title = "Other plugin",
+            slots = { { slot = 4, item = "gold_ingot", name = "Other", id = "otherclick" } } })
     else
         return { status = 400, body = "unknown verb" }
     end
     return { body = "queued=" .. tostring(ok) }
 end)
 rift.on("menu", function(ctx)
-    rift.players.broadcast("OTHEREV menu=" .. tostring(ctx.menu) .. " kind=" .. tostring(ctx.kind))
+    rift.players.broadcast("OTHEREV menu=" .. tostring(ctx.menu) .. " kind=" .. tostring(ctx.kind)
+        .. " reason=" .. tostring(ctx.reason) .. " who=" .. tostring(ctx.name) .. " gen=@GEN@")
 end)
 '''
 
 PLUGIN_TOML = '''name = "@NAME@"
 version = "0.1.0"
-api = "0.2"
+api = "0.3"
 engine = "lua"
 
 [capabilities]
@@ -703,15 +779,215 @@ env = []
 '''
 
 
+# --- What the backend receives ----------------------------------------------------------
+
+def _read_varint(data, offset):
+    """(value, next offset), or (None, offset) when `data` ends mid-VarInt."""
+    value = 0
+    for shift in range(0, 35, 7):
+        if offset >= len(data):
+            return None, offset
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 127) << shift
+        if not byte & 128:
+            return value, offset
+    raise ValueError("invalid VarInt")
+
+
+# Serverbound packets the tap keeps with their bodies; of the others only the name.
+TAPPED = {"window_click", "close_window", "transaction", "craft_recipe_request", "enchant_item", "set_slot_state",
+          "name_item", "select_trade", "set_beacon_effect", "set_creative_slot", "custom_payload"}
+
+
+class BackendTap:
+    """A loopback relay between Rift and a backend that records, per player,
+    every serverbound play packet the backend receives: the evidence that a
+    menu's packets never reach it. Bytes pass unchanged; it follows the
+    handshake, compression and the login, configuration and play states.
+    The backend runs offline, so nothing is encrypted."""
+
+    def __init__(self, target_port):
+        self.target = ("127.0.0.1", target_port)
+        self.lock = threading.Lock()
+        self.records = []        # (monotonic time, player, name, body or None)
+        self.errors = []
+        self.decoders = {}
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self.listener.getsockname()[1]
+        self.sockets = []
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        try:
+            while True:
+                client, _ = self.listener.accept()
+                threading.Thread(target=self.serve, args=(client,), daemon=True).start()
+        except OSError:
+            return
+
+    def serve(self, client):
+        try:
+            upstream = socket.create_connection(self.target, timeout=15)
+        except OSError as error:
+            self.errors.append(f"tap could not reach the backend: {error}")
+            client.close()
+            return
+        upstream.settimeout(None)
+        self.sockets += [client, upstream]
+        session = {"compression": False, "state": "handshake", "protocol": None, "player": None,
+                   "raw_clientbound": False, "raw": False}
+        threading.Thread(target=self.pump, args=(upstream, client, True, session), daemon=True).start()
+        self.pump(client, upstream, False, session)
+
+    def pump(self, source, destination, clientbound, session):
+        pending = b""
+        try:
+            while data := source.recv(65536):
+                if session["raw"] or (clientbound and session["raw_clientbound"]):
+                    destination.sendall(data)
+                    continue
+                pending += data
+                out = bytearray()
+                while pending:
+                    length, offset = _read_varint(pending, 0)
+                    if length is None or len(pending) < offset + length:
+                        break
+                    raw, frame = pending[:offset + length], pending[offset:offset + length]
+                    pending = pending[offset + length:]
+                    try:
+                        self.frame(frame, clientbound, session)
+                    except Exception as error:  # Observation never breaks the stream.
+                        self.errors.append(f"tap lost sync ({'clientbound' if clientbound else 'serverbound'}): "
+                                           f"{type(error).__name__}: {error}")
+                        session["raw"] = True
+                    out += raw
+                    if clientbound and session["raw_clientbound"]:
+                        out += pending
+                        pending = b""
+                        break
+                destination.sendall(bytes(out))
+        except OSError:
+            pass
+        finally:
+            # Pass the end on as a half-close, as the peer did: Rift closes
+            # its side first and then waits for the backend's end.
+            try:
+                destination.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            with self.lock:
+                session["ended"] = session.get("ended", 0) + 1
+                done = session["ended"] == 2
+            if done:
+                for sock in (source, destination):
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    def payload(self, frame, session):
+        if not session["compression"]:
+            return frame
+        size, offset = _read_varint(frame, 0)
+        return frame[offset:] if size == 0 else zlib.decompress(frame[offset:])
+
+    def names(self, protocol, state):
+        if (protocol, state) not in self.decoders:
+            self.decoders[(protocol, state)] = protodef.Decoder(protodef.schema_for(protocol), state, "serverbound")
+        return self.decoders[(protocol, state)]
+
+    def frame(self, frame, clientbound, session):
+        if clientbound:
+            # Only the login matters: compression, then success.
+            if session["state"] in ("handshake", "status"):
+                session["raw_clientbound"] = session["state"] == "status"
+                return
+            packet_id, _ = _read_varint(self.payload(frame, session), 0)
+            if packet_id == 0x03:
+                session["compression"] = True
+            elif packet_id == 0x02:
+                if session["protocol"] < 764:
+                    session["state"] = "play"
+                session["raw_clientbound"] = True
+            return
+        payload = self.payload(frame, session) if session["state"] != "handshake" else frame
+        packet_id, offset = _read_varint(payload, 0)
+        state = session["state"]
+        if state == "handshake":
+            protocol, offset = _read_varint(payload, offset)
+            size, offset = _read_varint(payload, offset)
+            offset += size + 2
+            following, _ = _read_varint(payload, offset)
+            session["protocol"] = protocol
+            session["state"] = "login" if following in (2, 3) else "status"
+            if session["state"] == "status":
+                session["raw"] = True
+            return
+        if state == "login":
+            if packet_id == 0x00 and session["player"] is None:
+                size, start = _read_varint(payload, offset)
+                session["player"] = payload[start:start + size].decode(errors="replace")
+            elif packet_id == 0x03 and session["protocol"] >= 764:
+                session["state"] = "configuration"
+            return
+        decoder = self.names(session["protocol"], state)
+        name = decoder.names.get(packet_id, f"0x{packet_id:02x}")
+        if state == "configuration":
+            if name == "finish_configuration":
+                session["state"] = "play"
+            return
+        if name == "configuration_acknowledged":
+            session["state"] = "configuration"
+        with self.lock:
+            self.records.append((time.monotonic(), session["player"], name,
+                                 payload[offset:] if name in TAPPED else None, session["protocol"]))
+
+    def received(self, player, names=None, since=0.0, until=None):
+        """[(time, name, value)] the backend got from `player`, decoded."""
+        names = {names} if isinstance(names, str) else names
+        with self.lock:
+            records = [r for r in self.records if r[1] == player and r[0] >= since
+                       and (until is None or r[0] <= until) and (names is None or r[2] in names)]
+        found = []
+        for when, _, name, body, protocol in records:
+            value = None
+            if body is not None:
+                decoder = self.names(protocol, "play")
+                try:
+                    value = self.decode(decoder, name, body)
+                except Exception as error:  # Kept, undecoded: still evidence.
+                    value = {"undecoded": str(error)}
+            found.append((when, name, value))
+        return found
+
+    @staticmethod
+    def decode(decoder, name, body):
+        packet_id = next(i for i, n in decoder.names.items() if n == name)
+        return decoder.packet(packet_id, body)[1]
+
+    def stop(self):
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+        for sock in self.sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 # --- Rift ------------------------------------------------------------------------------
 
 class Rift:
     """Rift with the test's menus: in rift.lua (script mode, online, needs a
     test-session-server build) or in a persistent Lua plugin (plugin mode)."""
 
-    def __init__(self, binary, directory, mode, main, second, session_url):
+    def __init__(self, binary, directory, mode, main, second, session_url, tap):
         self.binary, self.directory, self.mode = binary, Path(directory), mode
         self.main, self.second, self.session_url = main, second, session_url
+        self.tap = tap  # Between Rift and the main backend.
         self.log = self.directory / "rift.log"
         self.proc = self.port = self.web = None
         self.token = "menus-" + uuid.uuid4().hex
@@ -721,7 +997,7 @@ class Rift:
         transfer = 'rift.players.message(ctx.uuid, "no second backend")'
         lines = ['local config = require("rift.config")',
                  f'config.listeners.public = "127.0.0.1:{self.port}"',
-                 f'config.backends.main = {{ address = "127.0.0.1:{self.main.port}", version = "{self.main.release}" }}']
+                 f'config.backends.main = {{ address = "127.0.0.1:{self.tap.port}", version = "{self.main.release}" }}']
         if self.second is not None:
             lines.append(f'config.backends.second = {{ address = "127.0.0.1:{self.second.port}", '
                          f'version = "{self.second.release}" }}')
@@ -732,7 +1008,7 @@ class Rift:
         self.web = env.allocate_port()
         lines.append(f'config.web = {{ enabled = true, listen = "127.0.0.1:{self.web}", ui = false, '
                      f'token = "{self.token}" }}')
-        plugins = {"othertest": OTHER_LUA}
+        plugins = {"othertest": OTHER_LUA.replace("@GEN@", "1")}
         if self.mode == "script":
             lines += ["config.authentication = { online_mode = true }", 'config.forwarding = { mode = "bungeecord" }',
                       menus, SCRIPT_LUA]
@@ -764,8 +1040,14 @@ class Rift:
 
     def post(self, body, path="/ext/menu"):
         """One request to a plugin's http hook; (status, body)."""
-        request = urllib.request.Request(f"http://127.0.0.1:{self.web}{path}", data=body.encode(),
-                                         method="POST", headers={"Authorization": f"Bearer {self.token}"})
+        return self.request("POST", path, body)
+
+    def request(self, method, path, body=None):
+        """One request to Rift's web interface with the administrator token; (status, body)."""
+        request = urllib.request.Request(f"http://127.0.0.1:{self.web}{path}",
+                                         data=None if body is None else body.encode(), method=method,
+                                         headers={"Authorization": f"Bearer {self.token}",
+                                                  "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.status, response.read().decode(errors="replace")
@@ -907,7 +1189,10 @@ class Pair:
             index = text.find("MENUEV ")
             if index < 0:
                 continue
-            fields = dict(part.split("=", 1) for part in text[index + 7:].split() if "=" in part)
+            body, separator, typed = text[index + 7:].partition(" text=")
+            fields = dict(part.split("=", 1) for part in body.split() if "=" in part)
+            fields["text"] = typed.strip() if separator else "nil"
+            fields["_at"] = record.index
             if fields.get("who") == who:
                 found.append(fields)
         return found
@@ -962,12 +1247,14 @@ class Pair:
 
     def window_type_ok(self, value, kind, rows):
         if self.protocol < MENU_REGISTRY:
-            names = {"chest": "minecraft:chest", "hopper": "minecraft:hopper", "dispenser": "minecraft:dispenser"}
-            slots = rows * 9 if kind == "chest" else SLOT_COUNT[kind]
+            names = {"chest": "minecraft:chest", "hopper": "minecraft:hopper", "dispenser": "minecraft:dispenser",
+                     "anvil": "minecraft:anvil"}
+            # An anvil is announced with 0 slots; with any other number the client shows a chest.
+            slots = rows * 9 if kind == "chest" else 0 if kind == "anvil" else SLOT_COUNT[kind]
             ok = value.get("inventoryType") == names[kind] and value.get("slotCount") == slots
             return ok, f"{value.get('inventoryType')} with {value.get('slotCount')} slots"
         names = {"chest": f"minecraft:generic_9x{rows}", "hopper": "minecraft:hopper",
-                 "dispenser": "minecraft:generic_3x3"}
+                 "dispenser": "minecraft:generic_3x3", "anvil": "minecraft:anvil"}
         got = self.registries.name("menu", value.get("inventoryType")) if self.registries else None
         if got is None or got.startswith("<"):
             return True, f"menu ID {value.get('inventoryType')} (no registry names to compare)"
@@ -1243,6 +1530,146 @@ class Pair:
                 return True
         return False
 
+    # What the backend received (the tap between Rift and it)
+
+    def backend_got(self, names, since, until=None, where=None):
+        """[(time, name, value)] the backend received from this player."""
+        return [(t, n, v) for t, n, v in self.rift.tap.received(self.client.name, names, since, until)
+                if where is None or where(n, v or {})]
+
+    def screen_leaks(self, since, until=None):
+        """Packets of a game screen the backend received: renames, trades,
+        beacons, and the 1.12 plugin messages for them."""
+        def screen(name, value):
+            if name == "custom_payload":
+                return value.get("channel") in ("MC|ItemName", "MC|TrSel", "MC|Beacon")
+            return True
+        return self.backend_got({"name_item", "select_trade", "set_beacon_effect", "custom_payload"}, since, until,
+                                screen)
+
+    def rift_container_leaks(self, since=0.0, until=None):
+        """Packets naming one of Rift's containers (101..127) the backend received."""
+        def rifts(name, value):
+            window = value.get("windowId", value.get("window_id"))
+            return isinstance(window, int) and 101 <= window <= 127
+        return self.backend_got({"window_click", "close_window", "transaction", "craft_recipe_request",
+                                 "enchant_item", "set_slot_state"}, since, until, rifts)
+
+    def requests_sent(self, since=0.0, until=None):
+        """Times of Rift's inventory requests: a click on container 0 between the slots."""
+        return [t for t, _, v in self.backend_got("window_click", since, until,
+                                                 lambda n, v: v.get("windowId") == 0 and v.get("slot") == -1)]
+
+    # Anvils
+
+    def rename(self, text):
+        """What the client sends for a new text in an anvil."""
+        if self.client.has("name_item"):
+            self.client.send_packet("name_item", {"name": text})
+        else:
+            data = text.encode()
+            self.client.send_packet("custom_payload", {"channel": "MC|ItemName", "data": varint(len(data)) + data})
+
+    def container_packets(self, mark, names=("set_slot", "craft_progress_bar")):
+        return [r for r in self.client.packets(names, mark) if r.value.get("windowId") == self.container]
+
+    def anvil_answers(self, mark):
+        """The result slots and costs sent for the anvil since `mark`."""
+        records = self.container_packets(mark)
+        results = [r for r in records if r.name == "set_slot" and r.value.get("slot") == 2]
+        costs = [r for r in records if r.name == "craft_progress_bar"]
+        return results, costs
+
+    def track(self, mark):
+        """Remember what the client now shows in the open menu's slots."""
+        for r in self.container_packets(mark, ("set_slot",)):
+            self.stacks[r.value["slot"]] = r.value["item"]
+
+    def cursor_packets(self, mark):
+        cursor = []
+        for r in self.client.packets(("set_slot", "set_cursor_item"), mark):
+            v = r.value
+            if r.name == "set_cursor_item":
+                cursor.append(("set_cursor_item", key(v.get("contents")) is None))
+            elif v.get("windowId") in (-1, 255) and v.get("slot") == -1:
+                cursor.append(("set_slot(-1)", key(v.get("item")) is None))
+        return cursor
+
+    def check_cursor(self, label, mark):
+        wanted = "set_cursor_item" if self.protocol >= WIDE else "set_slot(-1)"
+        cursor = self.cursor_packets(mark)
+        self.check(f"{label}: the cursor is emptied with {wanted}", (wanted, True) in cursor, f"cursor packets {cursor}")
+
+    def check_costs(self, label, costs):
+        bad = [(r.value.get("property"), r.value.get("value")) for r in costs
+               if (r.value.get("property"), r.value.get("value")) != (0, 0)]
+        self.check(f"{label}: every cost packet is property 0, value 0", costs and not bad,
+                   f"{len(costs)} cost packets, wrong: {bad}")
+
+    def anvil_click(self, slot, mode=0, button=0):
+        """A click on an anvil slot as the client sends it."""
+        p, here = self.protocol, self.stack_at(slot)
+        if slot == 2:
+            # Taking the result empties the inputs on the client.
+            changed = [(2, empty(p)), (0, empty(p)), (1, empty(p))]
+        else:
+            changed = [(slot, empty(p))]
+        self.send_click(slot, button, mode, changed=changed, cursor=here, item=here)
+
+    def after_anvil_click(self, label, mark, result=False):
+        """After a click in an anvil: its three slots and the cost again, the
+        backend's last set_experience after a click on the result, and an
+        empty cursor."""
+        time.sleep(0.6)
+        self.client.check()
+        records = self.container_packets(mark)
+        slots = sorted({r.value["slot"] for r in records if r.name == "set_slot"})
+        self.check(f"{label}: the anvil's three slots come back", {0, 1, 2} <= set(slots), f"slots sent {slots}")
+        last_slot = max((r.index for r in records if r.name == "set_slot"), default=-1)
+        costs = [r for r in records if r.name == "craft_progress_bar" and r.index > last_slot]
+        self.check_costs(f"{label}: a cost of 0 follows the slots", costs)
+        if result:
+            before = self.client.packets("experience", 0)
+            before = [r for r in before if r.index < mark]
+            after = self.client.packets("experience", mark)
+            if before:
+                self.check(f"{label}: the backend's last set_experience follows a click on the result",
+                           after and after[-1].value == before[-1].value,
+                           f"before {before[-1].value}, after {[r.value for r in after]}")
+            else:
+                self.note("the backend sent no set_experience before: none expected after the result click")
+                self.check(f"{label}: no set_experience without one from the backend", not after,
+                           f"{[r.value for r in after]}")
+        self.check_cursor(label, mark)
+        self.track(mark)
+
+    def stack_text(self, slot):
+        return plain(self.stacks.get(slot))
+
+    def rows_back(self, label, mark):
+        """After a click that disturbed the inventory rows: the backend sends
+        the inventory again with the same items (a 1.17 backend: only when the
+        menu closes). Positions are not compared: the backend may have moved
+        items with real clicks the client's model never heard of."""
+        full = lambda: [r for r in self.client.packets("window_items", mark) if r.value.get("windowId") == 0]
+        if self.backend == 755:
+            time.sleep(0.8)
+            self.check(f"{label}: a 1.17 backend is not asked while the menu is open", not full(),
+                       f"{len(full())} container_set_content(0)")
+            return
+        deadline = time.monotonic() + 4
+        while not full() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        got = full()
+        items = lambda entries: sorted(short(json.loads(e)) for e in entries if e)
+        ok = bool(got)
+        detail = f"{len(got)} container_set_content(0)"
+        if ok:
+            after = inventory(self.client).snapshot()
+            ok = items(after["slots"][9:45]) == items(self.baseline["slots"][9:45])
+            detail += f"; items now {items(after['slots'][9:45])}, before {items(self.baseline['slots'][9:45])}"
+        self.check(f"{label}: the backend's inventory comes back with the same items", ok, detail)
+
     # The run
 
     def run(self):
@@ -1338,6 +1765,17 @@ class Pair:
                     self.client.name in line or "Exception" in line or "ERROR" in line):
                 bad.append(line.strip())
         self.check("the server logged no warning about the player", not bad, " | ".join(bad[-5:]))
+        # What the backend received over the whole pair.
+        tap = self.rift.tap
+        self.check("the tap between Rift and the backend followed every connection", not tap.errors, tap.errors[:3])
+        leaks = self.rift_container_leaks()
+        self.check("the backend never received a packet naming one of Rift's containers", not leaks, leaks[:3])
+        sent = self.requests_sent()
+        gaps = [round(b - a, 3) for a, b in zip(sent, sent[1:])]
+        # The tap reads what Rift wrote at once; 20 ms for scheduling.
+        self.check("two inventory requests are at least 250 ms apart", all(g >= 0.23 for g in gaps),
+                   f"{len(sent)} requests, gaps below 250 ms: {[g for g in gaps if g < 0.25]}")
+        self.note(f"{len(sent)} inventory requests, shortest gap {min(gaps) if gaps else None} s")
 
 
 # --- The steps ---------------------------------------------------------------------------
@@ -1395,19 +1833,29 @@ def burst(pair):
     last click still gets the inventory back (a request that never got its
     answer would block every later one)."""
     mark = pair.client.mark()
+    first = time.monotonic()
     for _ in range(10):
         pair.real_click("shift_left", BUY)
+        last = time.monotonic()
         time.sleep(0.05)
     time.sleep(2.0)
     events = [e for e in pair.events(mark) if e.get("click") == "shift_left"]
     pair.check("a burst of ten shift-clicks: ten events", len(events) == 10, f"{len(events)} events")
     answers = [r for r in pair.client.packets("window_items", mark) if r.value.get("windowId") == 0]
     if pair.backend != 755:
-        # One request at a time limits concurrency, not rate: on a fast link
-        # every click of the burst gets its own answer.
-        pair.note(f"a burst of ten shift-clicks in 0.5 s got {len(answers)} inventory answers")
-        pair.check("a burst of ten shift-clicks: the inventory comes back, at most a few times",
-                   1 <= len(answers) <= 10, f"{len(answers)} container_set_content(0)")
+        # At most one request on its way and at least 250 ms between two,
+        # with one that always follows the last click.
+        sent = pair.requests_sent(first)
+        allowed = int((last - first) / 0.25) + 2
+        offsets = [round(t - first, 3) for t in sent]
+        pair.note(f"a burst of ten shift-clicks in {last - first:.2f} s: {len(sent)} requests at {offsets}, "
+                  f"{len(answers)} inventory answers")
+        pair.check("a burst of ten shift-clicks: the backend gets a few requests, not one per click",
+                   1 <= len(sent) <= allowed, f"{len(sent)} requests at {offsets} (at most {allowed})")
+        pair.check("a burst of ten shift-clicks: a request follows the last click", sent and sent[-1] >= last,
+                   f"requests at {offsets}, last click at {round(last - first, 3)}")
+        pair.check("a burst of ten shift-clicks: the inventory comes back, once per request at most",
+                   1 <= len(answers) <= max(len(sent), 1), f"{len(answers)} container_set_content(0)")
     pair.click_case("a shift-click after the burst", "shift_left", BUY,
                     report=dict(action="buy", slot=BUY, payload="buy:5", state="st-chest:1", key="nil",
                                 click="shift_left"))
@@ -1658,35 +2106,52 @@ def step_backend_screen(pair):
 def step_creative(pair):
     """A client in creative mode that drops an item from a menu also asks the
     backend to create it (set_creative_mode_slot); Rift drops that packet
-    while a menu is open."""
-    if pair.software == "pumpkin":
-        raise Skip("Pumpkin has no console view of the inventory")
+    while a menu is open and for a second after Rift itself closed the menu.
+    After the player closed it, the packet passes at once. Evidence: the tap
+    (every server) and the backend's own view (not on Pumpkin)."""
     name, p = pair.client.name, pair.protocol
+    console = pair.software != "pumpkin"
     pair.console(pair.cmd.gamemode(name, "creative"), 0.8)
-    try:
-        open_menu(pair, "chest")
-        stone = (pair.registries.id("item", "stone") if pair.registries else None) or 1
-        if p >= 766:
-            item = {"itemCount": 1, "itemId": stone, "addedComponentCount": 0, "removedComponentCount": 0,
-                    "components": [], "removeComponents": []}
-        else:
-            item = stack(p, stone, 1)
-        pair.client.send_packet("set_creative_slot", {"slot": 36, "item": item})
+    stone = (pair.registries.id("item", "stone") if pair.registries else None) or 1
+    if p >= 766:
+        item = {"itemCount": 1, "itemId": stone, "addedComponentCount": 0, "removedComponentCount": 0,
+                "components": [], "removeComponents": []}
+    else:
+        item = stack(p, stone, 1)
+
+    def creative(label, passes):
+        since = time.monotonic()
+        # Hotbar slot 9, which is empty: the control really puts the stone there.
+        pair.client.send_packet("set_creative_slot", {"slot": 44, "item": item})
         time.sleep(1.0)
         pair.client.check()
-        pair.check("a creative-mode slot while a menu is open does not reach the backend",
-                   not pair.item_in_slot(0, "stone"), "the backend has stone in the first hotbar slot")
+        got = pair.backend_got("set_creative_slot", since)
+        pair.check(f"{label}: the creative-mode slot {'reaches' if passes else 'does not reach'} the backend",
+                   bool(got) == passes, f"the backend received {len(got)}")
+        if console:
+            has = pair.item_in_slot(8, "stone")
+            pair.check(f"{label}: the backend {'has' if passes else 'has no'} stone in the last hotbar slot",
+                       has == passes, f"stone there: {has}")
+            if has:
+                pair.console(f"clear {name} {'minecraft:' if pair.backend >= 393 else ''}stone", 0.5)
+
+    try:
+        open_menu(pair, "chest")
+        creative("while a menu is open", False)
         mark = pair.client.mark()
         pair.client.send_packet("close_window", {"windowId": pair.container})
         pair.expect_event("closed by the player in creative mode: reason player", mark, menu="chest",
                           kind="close", reason="player")
-        # The control: without a menu the backend takes the same packet.
-        time.sleep(0.5)
-        pair.client.send_packet("set_creative_slot", {"slot": 36, "item": item})
-        time.sleep(1.0)
-        pair.check("the control: without a menu the same creative-mode slot reaches the backend",
-                   pair.item_in_slot(0, "stone"), "the backend has no stone in the first hotbar slot")
-        pair.console(f"clear {name} {'minecraft:' if pair.backend >= 393 else ''}stone", 0.5)
+        time.sleep(0.2)
+        creative("just after the player closed the menu", True)
+        open_menu(pair, "chest")
+        mark = pair.client.mark()
+        pair.close_any()
+        pair.client.wait_packet("close_window", "Rift's container_close", 6, mark)
+        creative("within a second after Rift closed the menu", False)
+        close_expected(pair, "closed by close_menu in creative mode", mark, "chest", "plugin", "st-chest:1", True)
+        time.sleep(0.3)
+        creative("more than a second after Rift closed the menu", True)
     finally:
         pair.console(pair.cmd.gamemode(name, "survival"), 0.5)
 
@@ -1735,13 +2200,16 @@ def step_disconnect(pair):
     observer.join()
     time.sleep(1.5)
     observer.send_packet("close_window", {"windowId": 101})  # Its own welcome menu, if it got one.
-    open_menu(pair, "hopper")
+    # An anvil, so the close event also shows the text typed last.
+    open_anvil(pair, "anvil", "anvil", anvil_spec("Rift anvil", "Steve"), label="the anvil left open")
+    renames(pair, "a rename before leaving", ["Bye"], "Bye")
     mark = observer.mark()
     pair.left = True
     pair.client.close()
-    event = pair.wait_event(mark, timeout=10, session=observer, menu="hopper", kind="close")
-    pair.check("leaving with a menu open: reason disconnect (seen by another player)",
-               event is not None and event.get("reason") == "disconnect", f"close event {event}")
+    event = pair.wait_event(mark, timeout=10, session=observer, menu="anvil", kind="close")
+    pair.check("leaving with an anvil open: reason disconnect with the text (seen by another player)",
+               event is not None and event.get("reason") == "disconnect" and event.get("text") == "Bye",
+               f"close event {event}")
 
 
 def step_one_close(pair):
@@ -1946,14 +2414,422 @@ def step_redraw_burst(pair):
     pair.close_by_player("the counter closed", f"count:{(shown or 0) + 1}")
 
 
+def anvil_spec(title, text, extra=None):
+    slots = {0: ("paper", 1, text, []), 2: ("paper", 1, text, [])}
+    slots.update(extra or {})
+    return ("anvil", None, title, slots)
+
+
+RIGHT = {1: ("emerald", 1, "Right", [])}
+
+
+def open_anvil(pair, action, menu_id, spec, label=None, same=None, count=True):
+    """Show an anvil: open_screen, its filled slots, then a cost of 0."""
+    mark = pair.client.mark()
+    pair.act(action)
+    if not pair.expect_open(menu_id, mark, spec=spec, label=label or action, same=same, count=count):
+        raise Skip(f"{action} did not open")
+    records = pair.container_packets(mark)
+    last_slot = max((r.index for r in records if r.name == "set_slot"), default=-1)
+    pair.check_costs(f"{label or action}: a cost of 0 after the slots",
+                     [r for r in records if r.name == "craft_progress_bar" and r.index > last_slot])
+    return mark
+
+
+def anvil_report(text, state, action="submit", slot=2, payload="nil", click="left"):
+    return dict(action=action, slot=slot, payload=payload, state=state, click=click, key="nil", text=text)
+
+
+def click_result(pair, label, text, state):
+    """A left click on the result: reported with the text; then the three
+    slots, the cost, set_experience and an empty cursor."""
+    mark = pair.client.mark()
+    pair.anvil_click(2)
+    pair.expect_event(f"{label}: reported with the text", mark, only=True, kind="click", menu=pair.menu,
+                      **anvil_report(text, state))
+    pair.after_anvil_click(label, mark, result=True)
+    return mark
+
+
+def renames(pair, label, texts, final, pause=0.0):
+    """Renames as the client sends them; each gets the result slot and a cost
+    of 0 back, the result for the final text comes last."""
+    mark = pair.client.mark()
+    since = time.monotonic()
+    for text in texts:
+        pair.rename(text)
+        if pause:
+            time.sleep(pause)
+    time.sleep(0.6)
+    pair.client.check()
+    results, costs = pair.anvil_answers(mark)
+    pair.check(f"{label}: every rename gets the result slot back", len(results) >= len(texts),
+               f"{len(results)} result slots for {len(texts)} renames")
+    pair.check(f"{label}: every rename gets a cost back", len(costs) >= len(texts),
+               f"{len(costs)} costs for {len(texts)} renames")
+    pair.check_costs(label, costs)
+    last = plain(results[-1].value["item"]) if results else ""
+    pair.check(f"{label}: the last result is named after the final text", final in last,
+               f"last result {last!r}")
+    leaks = pair.screen_leaks(since)
+    pair.check(f"{label}: the backend received none of the renames", not leaks, leaks[:3])
+    pair.track(mark)
+    return mark, results
+
+
 def step_anvil(pair):
-    raise Skip("anvil menus are not in this build")
+    """Anvil menus (docs/menus.md, "Text input with an anvil")."""
+    p = pair.protocol
+    limit = 50 if p >= 755 else 35
+    since = time.monotonic()
+    # Defaults: paper named after the text left, its submit copy as the result.
+    open_anvil(pair, "anvil", "anvil", anvil_spec("Rift anvil", "Steve"), label="anvil with defaults")
+    pair.check("the anvil's right slot stays empty", 1 not in pair.stacks, sorted(pair.stacks))
+    # Typing fast: the result is built at most every 50 ms, a rename in
+    # between gets the last result, the final text always its own.
+    texts = [f"Fast{n}" for n in range(1, 9)]
+    mark, results = renames(pair, "eight renames at once", texts, "Fast8")
+    names = [next((t for t in texts if t in plain(r.value["item"])), "?") for r in results]
+    built = len(set(names))
+    pair.note(f"eight renames at once: {len(results)} results named {names}")
+    pair.check("eight renames at once: the result is not built again for every rename", built < len(texts),
+               f"{built} distinct results for {len(texts)} renames")
+    pair.expect_no_event("an anvil without typing reports no text event", mark, wait=0.3)
+    click_result(pair, "the result after fast typing", "Fast8", "st-anvil:1")
+    pair.check("after the click the left item is named after the typed text", "Fast8" in pair.stack_text(0),
+               pair.stack_text(0))
+    # An over-long rename is ignored; control characters and § are removed.
+    mark = pair.client.mark()
+    pair.rename("L" * (limit + 1))
+    time.sleep(0.6)
+    results, costs = pair.anvil_answers(mark)
+    pair.check(f"a rename of {limit + 1} characters is ignored (nothing comes back)", not results and not costs,
+               f"{len(results)} results, {len(costs)} costs")
+    click_result(pair, "the result after an over-long rename", "Fast8", "st-anvil:1")
+    renames(pair, f"a rename of exactly {limit} characters", ["M" * limit], "M" * limit)
+    click_result(pair, f"the result after {limit} characters", "M" * limit, "st-anvil:1")
+    renames(pair, "a rename with a section sign", ["Cl§ean"], "Clean")
+    click_result(pair, "the result after a section sign", "Clean", "st-anvil:1")
+    # A shift-click in the inventory rows moves an item into the anvil on the client.
+    mark = pair.client.mark()
+    row = pair.hotbar(0)
+    held = from_record(p, json.loads(pair.baseline_slot(row))) if pair.baseline_slot(row) else stack(p, 1, 5)
+    pair.send_click(row, 0, 1, changed=[(row, empty(p)), (1, held)], cursor=empty(p), item=held)
+    pair.expect_no_event("a shift-click of an inventory item into the anvil: not reported", mark, wait=0.6)
+    pair.after_anvil_click("a shift-click of an inventory item into the anvil", mark)
+    pair.check("after the shift-click the right slot is empty again", key(pair.stacks.get(1)) is None,
+               short(pair.stacks.get(1)))
+    pair.rows_back("a shift-click of an inventory item into the anvil", mark)
+    # A redraw keeps the typed text; a new right button brings the result along.
+    mark, before = pair.client.mark(), pair.state_id()
+    pair.act("anvil_redraw")
+    pair.expect_diff("an anvil redrawn with a right button", mark, before,
+                     {1: RIGHT[1], 2: ("paper", 1, "Clean", [])}, [1, 2])
+    records = pair.container_packets(mark)
+    pair.check("an anvil redrawn: a cost of 0 follows", records and records[-1].name == "craft_progress_bar",
+               [r.name for r in records])
+    pair.expect_no_close("an anvil redrawn", mark)
+    click_result(pair, "the result after the redraw (the typed text stays)", "Clean", "st-anvil:2")
+    mark = pair.client.mark()
+    pair.anvil_click(1)
+    pair.expect_event("the right button: reported with the text", mark, only=True, kind="click", menu="anvil",
+                      **anvil_report("Clean", "st-anvil:2", action="right", slot=1, payload="right:2"))
+    pair.after_anvil_click("the right button", mark)
+    # A new title opens the screen again with the same container; the text stays.
+    mark = open_anvil(pair, "anvil_title", "anvil", anvil_spec("Rift anvil renamed", "Clean", RIGHT),
+                      label="an anvil with a new title", same=True, count=False)
+    pair.expect_no_close("an anvil with a new title", mark)
+    click_result(pair, "the result after the new title", "Clean", "st-anvil:3")
+    # A patch with text replaces it: the left item renamed, the result after it.
+    mark = pair.client.mark()
+    pair.act("anvil_patch_text")
+    time.sleep(0.8)
+    records = pair.container_packets(mark)
+    sets = [(r.value["slot"], plain(r.value["item"])) for r in records if r.name == "set_slot"]
+    pair.check("update_menu with text: the left item and the result named after it",
+               [slot for slot, _ in sets] == [0, 2] and all("Patched" in text for _, text in sets),
+               f"sent {sets}")
+    pair.check("update_menu with text: a cost of 0 follows", records and records[-1].name == "craft_progress_bar",
+               [r.name for r in records])
+    pair.track(mark)
+    click_result(pair, "the result after the text patch", "Patched", "st-anvil:3")
+    renames(pair, "a rename after the text patch", ["Other"], "Other")
+    mark = pair.client.mark()
+    pair.act("anvil_patch_text")
+    time.sleep(0.8)
+    records = pair.container_packets(mark)
+    sets = [(r.value["slot"], key(r.value["item"]) is None, plain(r.value["item"])) for r in records
+            if r.name == "set_slot"]
+    pair.check("update_menu with the text the left item already has: an empty left slot first, then the item",
+               [(slot, gone) for slot, gone, _ in sets] == [(0, True), (0, False), (2, False)]
+               and all("Patched" in text for _, gone, text in sets if not gone), f"sent {sets}")
+    pair.track(mark)
+    click_result(pair, "the result after the second text patch", "Patched", "st-anvil:3")
+    # Endings, each with the text.
+    mark = pair.client.mark()
+    pair.client.send_packet("close_window", {"windowId": pair.container})
+    pair.expect_event("the anvil closed by the player: reason player with the text", mark, menu="anvil",
+                      kind="close", reason="player", state="st-anvil:3", text="Patched")
+    tap_mark = time.monotonic()
+    mark = pair.client.mark()
+    pair.rename("Late")
+    time.sleep(0.6)
+    pair.check("a late rename after the anvil closed: nothing comes back", not pair.anvil_answers(mark)[0])
+    pair.check("a late rename after the anvil closed does not reach the backend", not pair.screen_leaks(tap_mark),
+               pair.screen_leaks(tap_mark))
+    open_anvil(pair, "anvil", "anvil", anvil_spec("Rift anvil", "Steve"), label="the anvil again")
+    renames(pair, "a rename before close_menu", ["ByPlugin"], "ByPlugin")
+    mark = pair.client.mark()
+    pair.act("anvil_close")
+    close_expected(pair, "the anvil closed by close_menu", mark, "anvil", "plugin", "st-anvil:1", True)
+    pair.expect_event("the anvil closed by close_menu: the close event has the text", mark, menu="anvil",
+                      kind="close", text="ByPlugin")
+    open_anvil(pair, "anvil", "anvil", anvil_spec("Rift anvil", "Steve"), label="the anvil to be replaced")
+    renames(pair, "a rename before another menu", ["Replaced"], "Replaced")
+    mark = pair.client.mark()
+    pair.act("chest")
+    if pair.expect_open("chest", mark):
+        pair.expect_event("the anvil replaced by a chest: reason replaced with the text", mark, menu="anvil",
+                          kind="close", reason="replaced", state="st-anvil:1", text="Replaced")
+        pair.close_by_player("the chest after the anvil", "st-chest:1")
+    open_anvil(pair, "anvil", "anvil", anvil_spec("Rift anvil", "Steve"), label="the anvil before a death")
+    renames(pair, "a rename before a death", ["Dead"], "Dead")
+    mark = pair.client.mark()
+    pair.console(f"kill {pair.client.name}", 1.0)
+    try:
+        pair.client.send_packet("client_command", {"actionId": "perform_respawn"})
+    except Exception:
+        pair.client.send_packet("client_command", {"actionId": 0})
+    pair.expect_event("death and respawn with an anvil open: reason server with the text", mark, menu="anvil",
+                      kind="close", reason="server", state="st-anvil:1", text="Dead")
+    time.sleep(1.0)
+    anvil_typing(pair, limit)
+    anvil_custom(pair)
+    # Control: after a chest (not an anvil) was the last screen, a rename is
+    # the backend's again, and the tap sees it.
+    mark = open_menu(pair, "dispenser")
+    pair.close_by_player("the dispenser before the control rename", "st-disp:3")
+    tap_mark = time.monotonic()
+    pair.rename("Control")
+    time.sleep(0.8)
+    seen = pair.screen_leaks(tap_mark)
+    pair.check("control: without Rift's anvil a rename reaches the backend (the tap sees it)", seen,
+               "the backend received no rename")
+    leaks = pair.rift_container_leaks(since)
+    pair.check("no anvil packet naming Rift's container reached the backend", not leaks, leaks[:3])
+
+
+def anvil_typing(pair, limit):
+    """typing = true: text events at most 5 a second, always the final text."""
+    open_anvil(pair, "anvil_typing", "anvilt", anvil_spec("Typing anvil", "Alex"), label="an anvil with typing")
+    mark = pair.client.mark()
+    started = time.monotonic()
+    texts = [f"Type{n}" for n in range(1, 13)]
+    renames(pair, "twelve renames in 1.2 s", texts, "Type12", pause=0.1)
+    duration = time.monotonic() - started - 0.6  # renames() waits 0.6 s after the last.
+    time.sleep(0.4)
+    events = [e for e in pair.events(mark) if e.get("kind") == "text"]
+    got = [e["text"] for e in events]
+    allowed = int(duration * 5) + 2
+    pair.note(f"twelve renames in {duration:.2f} s: text events {got}")
+    pair.check("typing: at most 5 text events a second", 2 <= len(events) <= allowed,
+               f"{len(events)} text events in {duration:.2f} s (at most {allowed}): {got}")
+    pair.check("typing: the last text event has the final text", got[-1:] == ["Type12"], got)
+    pair.check("typing: the text events come in the order typed", got == [t for t in texts if t in got], got)
+    pair.check("typing: every text event names the menu and its state",
+               all(e.get("menu") == "anvilt" and e.get("state") == "st-anvilt:1" for e in events), events[:3])
+    mark = pair.client.mark()
+    pair.rename("Type12")
+    pair.expect_no_event("typing: a rename that does not change the text gives no event", mark, wait=0.6)
+    mark = pair.client.mark()
+    renames(pair, "six renames at once with typing", [f"Burst{n}" for n in range(1, 7)], "Burst6")
+    time.sleep(0.4)
+    got = [e["text"] for e in pair.events(mark) if e.get("kind") == "text"]
+    pair.check("six renames at once: one text event at once and one for the final text",
+               1 <= len(got) <= 2 and got[-1:] == ["Burst6"], got)
+    mark = pair.client.mark()
+    pair.rename("X" * (limit + 1))
+    pair.expect_no_event("typing: an over-long rename gives no event", mark, wait=0.6)
+    # The menu ends before the next text event is due: the close event has the final text.
+    mark = pair.client.mark()
+    pair.rename("Last1")
+    pair.rename("Last2")
+    pair.client.send_packet("close_window", {"windowId": pair.container})
+    pair.expect_event("typing, closed right after typing: the close event has the final text", mark,
+                      menu="anvilt", kind="close", reason="player", state="st-anvilt:1", text="Last2")
+    late = [e["text"] for e in pair.events(mark) if e.get("kind") == "text"]
+    pair.check("typing, closed right after typing: no text event after the close", "Last2" not in late, late)
+
+
+def anvil_custom(pair):
+    """Buttons of the plugin's own in all three slots."""
+    spec = ("anvil", None, "Custom anvil", {0: ("name_tag", 1, "Custom", []), 1: RIGHT[1],
+                                             2: ("diamond", 1, "Confirm", [])})
+    open_anvil(pair, "anvil_custom", "anvilc", spec, label="an anvil with buttons in all three slots")
+    pair.check("a custom left button is named after the text, not its own name",
+               "Not this name" not in pair.stack_text(0), pair.stack_text(0))
+    for slot, action, payload in ((0, "left", "left:1"), (1, "right", "right:2"), (2, "ok", "ok:3")):
+        mark = pair.client.mark()
+        pair.anvil_click(slot)
+        pair.expect_event(f"custom anvil: the button in slot {slot} reported with the text", mark, only=True,
+                          kind="click", menu="anvilc",
+                          **anvil_report("Custom", "st-anvilc:1", action=action, slot=slot, payload=payload))
+        pair.after_anvil_click(f"custom anvil: slot {slot}", mark, result=slot == 2)
+    mark, results = renames(pair, "custom anvil: a rename", ["Mine"], "Confirm")
+    pair.check("custom anvil: a rename keeps the plugin's result button",
+               all("Confirm" in plain(r.value["item"]) for r in results), [plain(r.value["item"]) for r in results])
+    mark = pair.client.mark()
+    pair.anvil_click(2)
+    pair.expect_event("custom anvil: the result after a rename", mark, only=True, kind="click", menu="anvilc",
+                      **anvil_report("Mine", "st-anvilc:1", action="ok", payload="ok:3"))
+    pair.after_anvil_click("custom anvil: the result after a rename", mark, result=True)
+    mark, before = pair.client.mark(), pair.state_id()
+    pair.act("anvil_patch_close")
+    pair.expect_diff("custom anvil: a close button patched into the result slot", mark, before,
+                     {2: ("barrier", 1, "Cancel", [])}, [2])
+    mark = pair.client.mark()
+    pair.anvil_click(2)
+    close_expected(pair, "custom anvil: the close button", mark, "anvilc", "plugin", "st-anvilc:1", True)
+    pair.expect_event("custom anvil: the close button's close event has the text", mark, menu="anvilc",
+                      kind="close", text="Mine")
+    clicks = [e for e in pair.events(mark) if e.get("kind") == "click"]
+    pair.check("custom anvil: a close button without an id reports no click", not clicks, clicks)
+
+
+def step_screen_packets(pair):
+    """While a menu is open, the packets only a game screen sends (rename,
+    trade, beacon) and those naming Rift's container (recipe, button,
+    transaction acknowledgement, slot state) never reach the backend; after it
+    closed a trade selection is the backend's again (the control)."""
+    open_menu(pair, "chest")
+    p, container = pair.protocol, pair.container
+    since, events = time.monotonic(), pair.client.mark()
+    pair.rename("Sneaky")
+    if pair.client.has("select_trade"):
+        pair.client.send_packet("select_trade", {"slot": 0})
+        effects = {"primary_effect": 1, "secondary_effect": 1}
+        if p >= 759:
+            effects = {"primary_effect": 1, "secondary_effect": None}
+        pair.client.send_packet("set_beacon_effect", effects)
+    else:
+        pair.client.send_packet("custom_payload", {"channel": "MC|TrSel", "data": (0).to_bytes(4, "big")})
+        pair.client.send_packet("custom_payload", {"channel": "MC|Beacon",
+                                                   "data": (1).to_bytes(4, "big") + (1).to_bytes(4, "big")})
+    recipe = 1 if p < FLATTENING or p >= WIDE else "minecraft:stick"
+    fields = {"windowId": container, "makeAll": False}
+    fields["recipeId" if p >= WIDE else "recipe"] = recipe
+    pair.client.send_packet("craft_recipe_request", fields)
+    pair.client.send_packet("enchant_item", {"windowId": container, "enchantment": 0})
+    if p < TRANSACTIONS_END:
+        pair.client.send_packet("transaction", {"windowId": container, "action": 3, "accepted": True})
+    if pair.client.has("set_slot_state"):
+        pair.client.send_packet("set_slot_state", {"slot_id": 0, "window_id": container, "state": True})
+    time.sleep(1.0)
+    pair.client.check()
+    leaks = pair.screen_leaks(since) + pair.rift_container_leaks(since)
+    pair.check("screen packets and packets naming Rift's container do not reach the backend", not leaks, leaks[:4])
+    pair.expect_no_event("screen packets: no event", events, wait=0.1)
+    pair.close_by_player("the chest after the screen packets", "st-chest:1")
+    time.sleep(0.3)
+    control = time.monotonic()
+    if pair.client.has("select_trade"):
+        pair.client.send_packet("select_trade", {"slot": 0})
+    else:
+        pair.client.send_packet("custom_payload", {"channel": "MC|TrSel", "data": (0).to_bytes(4, "big")})
+    time.sleep(0.8)
+    pair.check("control: without a menu a trade selection reaches the backend (the tap sees it)",
+               pair.screen_leaks(control), "the backend received nothing")
+
+
+def step_plugin_stop(pair):
+    """A plugin that stops while its menu is open (an operator restart, then a
+    reload that replaces its files): Rift closes the menu on the client, the
+    stopping plugin gets no close event, and the new instance gets no event of
+    the old menu; the new instance's own menus work."""
+    rift, name = pair.rift, pair.client.name
+    spec = ("chest", 1, "Other plugin", {4: ("gold_ingot", 1, "Other", [])})
+
+    def other_events(mark):
+        return [chat_text(r)[chat_text(r).find("OTHEREV"):] for r in pair.client.packets(CHAT, mark)
+                if "OTHEREV" in chat_text(r) and f"who={name}" in chat_text(r)]
+
+    def show_other(label):
+        mark = pair.client.mark()
+        status, body = rift.post(f"show {name}", path="/ext/other")
+        pair.check(f"{label}: the other plugin queued its menu", status == 200 and "queued=true" in body,
+                   f"HTTP {status} {body[-200:]}")
+        if not pair.expect_open("otherm", mark, spec=spec, label=label, count=False):
+            raise Skip(f"{label}: the other plugin's menu did not open")
+
+    def wait_running(label):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            status, body = rift.request("GET", "/api/plugins/othertest")
+            if status == 200 and '"status":"running"' in body.replace(" ", ""):
+                return True
+            time.sleep(0.2)
+        pair.check(f"{label}: the plugin runs again", False, f"HTTP {status} {body[-300:]}")
+        return False
+
+    for how, generation in (("restart", "1"), ("reload", "2")):
+        show_other(f"{how}: the other plugin's menu")
+        mark = pair.client.mark()
+        pair.real_click("left", 4)
+        deadline = time.monotonic() + 6
+        while not any("kind=click" in e for e in other_events(mark)) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        pair.check(f"{how}: the running plugin gets the click of its menu",
+                   any("kind=click" in e and "menu=otherm" in e for e in other_events(mark)), other_events(mark))
+        old = pair.container
+        mark = pair.client.mark()
+        if how == "restart":
+            status, body = rift.request("POST", "/api/plugins/othertest/restart", "{}")
+            pair.check("restart: POST /api/plugins/othertest/restart is accepted", status == 202,
+                       f"HTTP {status} {body[-300:]}")
+        else:
+            folder = rift.directory / "plugins" / "othertest"
+            (folder / "init.lua").write_text(OTHER_LUA.replace("@GEN@", generation))
+            status, body = rift.request("POST", "/api/reload", "{}")
+            pair.check("reload: POST /api/reload with a changed plugin file is accepted", status in (200, 202),
+                       f"HTTP {status} {body[-300:]}")
+        try:
+            pair.client.wait_packet("close_window", "Rift's container_close", 15, mark,
+                                    where=lambda v: v.get("windowId") == old)
+            pair.check(f"{how}: Rift closes the stopped plugin's menu on the client", True)
+        except SessionError as error:
+            pair.check(f"{how}: Rift closes the stopped plugin's menu on the client", False, error)
+        wait_running(how)
+        # Late packets for the old menu: a click and a close.
+        pair.real_click("left", 4)
+        pair.client.send_packet("close_window", {"windowId": old})
+        time.sleep(1.5)
+        pair.client.check()
+        events = other_events(mark)
+        pair.check(f"{how}: neither instance gets an event of the old menu (no close event either)", not events,
+                   events)
+        leaks = pair.rift_container_leaks(since=0.0)
+        pair.check(f"{how}: the late packets for the old menu do not reach the backend", not leaks, leaks[:3])
+        # The new instance's own menu works.
+        show_other(f"{how}: the new instance's menu")
+        mark = pair.client.mark()
+        pair.real_click("left", 4)
+        pair.client.send_packet("close_window", {"windowId": pair.container})
+        deadline = time.monotonic() + 6
+        while len(other_events(mark)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        events = other_events(mark)
+        wanted_gen = "1" if how == "restart" else generation
+        pair.check(f"{how}: the new instance gets the click and the close of its own menu",
+                   any("kind=click" in e for e in events) and any("kind=close" in e and "reason=player" in e
+                                                                  for e in events)
+                   and all(f"gen={wanted_gen}" in e for e in events), events)
+        pair.container = pair.menu = None
 
 
 STEPS = [step_clicks, step_backend, step_endings, step_real_click, step_same_id, step_redraw, step_update_menu,
-         step_pages, step_stale_click, step_redraw_burst, step_backend_screen, step_creative, step_anvil, step_switch,
-         step_disconnect, step_one_close]
-OPTIONAL = {"step_anvil"}
+         step_pages, step_stale_click, step_redraw_burst, step_backend_screen, step_creative, step_screen_packets,
+         step_anvil, step_plugin_stop, step_switch, step_disconnect, step_one_close]
+OPTIONAL = set()
 ALWAYS = {"step_one_close"}  # Runs with --only too.
 
 
@@ -1968,12 +2844,35 @@ def parse_pair(text):
     return key_name, protocol
 
 
+def seed_downloads(plan):
+    """Server jars the other harnesses already downloaded (target/minecraft/
+    downloads, CI's cache) are copied into the shared cache instead of being
+    downloaded again; matrix_fixtures verifies the checksum of every copy."""
+    keys = set(plan)
+    for protocols in plan.values():
+        for protocol in protocols:
+            try:
+                keys.add(fixtures.vanilla_for(protocol))  # Registry names come from its data generator.
+            except (KeyError, SystemExit):
+                pass
+    for key_name in keys:
+        fixture = fixtures.SERVERS.get(key_name, {})
+        if "filename" not in fixture or fixture.get("build") == "buildtools":
+            continue
+        source = HARNESS_CACHE / "downloads" / fixture["filename"]
+        target = env.HOME / "servers" / fixture["filename"]
+        if source.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            env.log(f"using {source} for {key_name}")
+
+
 def run_server(key_name, protocols, args, session_server):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     workdir = Path(tempfile.mkdtemp(prefix=f"menus-{key_name}-", dir=args.work))
     server = fixtures.Server(key_name, workdir / "main")
     second = None if args.no_switch else fixtures.Server(key_name, workdir / "second")
-    rift = None
+    rift = tap = None
     results = []
     try:
         server.start()
@@ -1981,7 +2880,8 @@ def run_server(key_name, protocols, args, session_server):
         if second is not None:
             second.start()
             env.log(f"second {second.name} ready on port {second.port}")
-        rift = Rift(args.binary, workdir, args.mode, server, second, session_server.url).start()
+        tap = BackendTap(server.port)
+        rift = Rift(args.binary, workdir, args.mode, server, second, session_server.url, tap).start()
         for protocol in protocols:
             directory = args.out / f"{stamp}-{key_name}-client-{fixtures.RELEASE_OF[protocol]}"
             directory.mkdir(parents=True, exist_ok=True)
@@ -2004,11 +2904,17 @@ def run_server(key_name, protocols, args, session_server):
                         session.close()
                 if pair.client is not None:
                     pair.client.write_log(directory / "client.jsonl")
+                if pair.observer is not None:
+                    pair.observer.write_log(directory / "observer.jsonl")
                 time.sleep(0.5)
                 (directory / "rift.log").write_text(rift.text()[pair.rift_offset:])
                 (directory / "server.log").write_text(server.text()[pair.server_offset:])
                 if second is not None:
                     (directory / "second.log").write_text(second.text()[pair.second_offset:])
+                if pair.client is not None:
+                    (directory / "backend.jsonl").write_text("".join(
+                        json.dumps(dict(t=round(when, 3), name=name, value=value), default=str) + "\n"
+                        for when, name, value in tap.received(pair.client.name)))
             result = dict(mode=args.mode, server=key_name, server_protocol=server.protocol, client=fixtures.RELEASE_OF[protocol],
                           client_protocol=protocol, checks=pair.checks, notes=pair.notes, logs=str(directory))
             result["passed"] = sum(c["ok"] for c in pair.checks)
@@ -2028,6 +2934,8 @@ def run_server(key_name, protocols, args, session_server):
     finally:
         if rift is not None:
             rift.stop()
+        if tap is not None:
+            tap.stop()
         for instance in (second, server):
             if instance is not None:
                 instance.stop()
@@ -2095,6 +3003,7 @@ def main():
         plan.setdefault(key_name, [])
         if protocol not in plan[key_name]:
             plan[key_name].append(protocol)
+    seed_downloads(plan)
     args.out.mkdir(parents=True, exist_ok=True)
     args.work = args.work or (env.HOME / "menus-e2e-work")
     args.work.mkdir(parents=True, exist_ok=True)
