@@ -438,15 +438,25 @@ Rift with a scripted client in the client's own protocol. It checks opening
 dispenser; real clicks in each client's packet layout, which of them are
 reported and with which fields; the undo packets of the client's version;
 that clicks on the inventory rows make the backend send the inventory again
-without the backend's own view changing; that nothing reaches the backend,
-late clicks included; redraws, `update_menu`, the paged list, stale clicks
-and a burst of 20 clicks a second on a button that redraws its menu; every
-ending, each with exactly one `close` event; and that the client stays
-connected and Rift and the server log no error. It passed on 24
-server/client pairs: vanilla 1.12.2 to 26.3, Paper, Spigot and Pumpkin
-backends, and translated pairs in both directions (26.3 backends with 1.12.2,
-1.16.5 and 1.20.4 clients; 1.12.2, 1.16.5 and 1.17 backends with a 26.3
-client).
+without the backend's own view changing; redraws, `update_menu`, the paged
+list, stale clicks and a burst of 20 clicks a second on a button that redraws
+its menu; anvils (typing in each version's packet, `typing` events and their
+rate, the result click, a shift-click from the inventory rows, an over-long
+rename, redraws, patches and a new title); a plugin that restarts or reloads
+while its menu is open; every ending, each with exactly one `close` event;
+and that the client stays connected and Rift and the server log no error. A
+relay between Rift and the backend records everything the backend receives:
+nothing names Rift's containers, no rename arrives, and two inventory
+requests are at least 250 ms apart.
+
+It passed on 25 server/client pairs: vanilla 1.12.2 to 26.3, Paper, Spigot
+and Pumpkin backends, and translated pairs in both directions (26.3 backends
+with 1.12.2, 1.16.5 and 1.20.4 clients; 1.12.2, 1.16.5 and 1.17 backends with
+a 26.3 client). `--mode script` runs the same checks with menus shown from
+`rift.lua`, a command and a join handler; it passed on six of the pairs. CI
+runs the test for each server of the Minecraft job, for a 1.12.2 pair and a
+translated pair in the compatibility job, and in script mode with the
+session server build.
 
 ### Real clients
 
@@ -482,3 +492,5 @@ WebAssembly plugins.
 - Rendering. The headless clients draw nothing, so flicker, cursor position
   and how a button looks were not seen.
 - The inventory request in game modes other than survival.
+- The retry of a lost inventory request against a real server. A session
+  test covers it.

@@ -368,6 +368,11 @@ Every menu ends with exactly one `close` event while its plugin runs, so a
 plugin that keeps something per open menu can always release it. A menu
 that could not be shown ends that way too.
 
+In `rift.lua` a `menu` callback is an observer like any other: one that
+fails or misses its 50 ms deadline is logged and its event is gone
+([when a callback fails](extensions.md#when-a-callback-fails)). The script
+keeps no state between callbacks, so there is nothing to release.
+
 | `reason` | The menu ended because |
 | --- | --- |
 | `player` | The player pressed Escape or the inventory key |
