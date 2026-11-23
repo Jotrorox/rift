@@ -16,11 +16,11 @@ Rust crates are consumed as git dependencies pinned to a release tag:
 
 ```toml
 [dependencies]
-rift-permissions = { git = "https://github.com/Jotrorox/rift", tag = "v0.1.0" }
-rift-permissions-client = { git = "https://github.com/Jotrorox/rift", tag = "v0.1.0" }
+rift-permissions = { git = "https://github.com/Jotrorox/rift", tag = "v0.2.0" }
+rift-permissions-client = { git = "https://github.com/Jotrorox/rift", tag = "v0.2.0" }
 
 [dev-dependencies]
-rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0.1.0" }
+rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0.2.0" }
 ```
 
 ## Proxy setup

@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "rift"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "rift-messaging"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "quinn",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "log",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "log",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-testing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rift-permissions",
  "rift-permissions-client",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "rift-translation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "serde",

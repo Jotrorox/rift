@@ -12,6 +12,14 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
+The second release. It moves plugins to the `rift:plugin@0.3.0` contract
+(`api = "0.3"` in `plugin.toml`; see **Changed**), lets the instance database
+live in PostgreSQL or MariaDB, and adds inventory menus, backups of persistent
+instances, node rebalancing plans and new `rift.sqlite3` components (see
+**Database**).
+
 ### Added
 
 - `rift admin node plan` suggests moves that even out memory across nodes,
@@ -243,22 +251,23 @@ and are listed under **SDKs**.
 
 ### SDKs
 
-- Rust `rift-plugin` 0.3.0 implements `rift:plugin@0.3.0`. Its `menu` module
-  builds menus, patches and buttons (`Menu::chest(id)`, `hopper`,
-  `dispenser`, `anvil`, `Button::new(item)`, `MenuPatch`) for
+- Rust `rift-plugin` 0.3.0 (git tag `sdk/rust/v0.3.0`) implements
+  `rift:plugin@0.3.0`. Its `menu` module builds menus, patches and buttons
+  (`Menu::chest(id)`, `hopper`, `dispenser`, `anvil`, `Button::new(item)`,
+  `MenuPatch`) for
   `players::show_menu`, `players::update_menu` and `players::close_menu`, and
   `Plugin::menu` receives a `MenuEvent` whose `kind()` is a typed
   `MenuKind`, with `payload::<T>()` and `state::<T>()` to decode the JSON.
-- Go `github.com/Jotrorox/rift/sdk/go` v0.3.0 and the C SDK implement
-  `rift:plugin@0.3.0`. Go builds menus from plain structs (`rift.Menu`,
-  `rift.Button`, `rift.MenuPatch`) for `rift.ShowMenu`, `rift.UpdateMenu` and
+- Go `github.com/Jotrorox/rift/sdk/go` v0.3.0 (git tag `sdk/go/v0.3.0`) and
+  the C SDK implement `rift:plugin@0.3.0`. Go builds menus from plain structs
+  (`rift.Menu`, `rift.Button`, `rift.MenuPatch`) for `rift.ShowMenu`, `rift.UpdateMenu` and
   `rift.CloseMenu`, and `rift.OnMenu` receives a `rift.MenuEvent` with typed
   `Kind`, `Click` and `Reason`. C takes menus as JSON text
   (`rift_show_menu`, `rift_update_menu`, `rift_close_menu`), and
   `rift_menu_kind`, `rift_menu_click` and `rift_menu_close_reason` sort an
   event into enums. See [Go](docs/plugins-go.md) and [C](docs/plugins-c.md).
-- Rust `rift-plugin` 0.2.1, Go `github.com/Jotrorox/rift/sdk/go` v0.2.1 and
-  the C SDK implement `rift:plugin@0.2.1`. They build messages
+- The 0.3.0 SDKs also carry the `rift:plugin@0.2.1` text additions, which had
+  no SDK release of their own. They build messages
   (`text::message`, `rift.Msg`, `rift_msg`), style arguments and escaped
   markup, and components with translations (arguments and a fallback), key
   bindings, sprites, heads, a font, a shadow, a decoration turned off,
@@ -348,5 +357,6 @@ The first stable release, after three release candidates (`v0.1.0-rc.1` to
 - Java `io.github.jotrorox.rift` artifacts at the proxy's version, from
   `https://jotrorox.github.io/rift/maven` and GitHub Packages.
 
-[Unreleased]: https://github.com/Jotrorox/rift/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Jotrorox/rift/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Jotrorox/rift/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Jotrorox/rift/releases/tag/v0.1.0

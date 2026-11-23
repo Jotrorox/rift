@@ -2734,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "rift-messaging"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "quinn",
@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "quinn",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-pumpkin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hashbrown 0.17.1",
  "hyper",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "rift-permissions-testing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rift-permissions",
  "rift-permissions-client",
