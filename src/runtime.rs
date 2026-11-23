@@ -3543,6 +3543,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     for warning in snapshot.config.text.warnings() {
         log_warn!("{warning}");
     }
+    for warning in snapshot.config.waiting_groups() {
+        log_warn!("{warning}");
+    }
     for (name, listener) in listeners {
         log_info!("listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
@@ -3805,6 +3808,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     log_warn!("{warning}");
                 }
                 for warning in snapshot.config.text.warnings() {
+                    log_warn!("{warning}");
+                }
+                for warning in snapshot.config.waiting_groups() {
                     log_warn!("{warning}");
                 }
                 // A configuration-derived write: the leader's in a cluster.

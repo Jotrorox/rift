@@ -1085,9 +1085,15 @@ warming, and what was not covered by tests.
   loaded (the first evaluation before the peer attached, `rift check` and
   `rift witness`), validation accepts any valid peer name as a node and
   does not check labels or a named server's node address yet; the
-  configuration is evaluated again once the peer is attached, strictly.
-  So servers and groups that name a peer as their node pass
-  `check_cluster_placement` and node validation.
+  configuration is evaluated again once the peer is attached, strictly
+  for named servers. Service groups are checked the same way before and
+  after (`config::nodes::validate_selectors`): on a peer, a selector may
+  name any valid peer name that is no node and may match no node, since
+  the group waits for a peer that joins; `Config::waiting_groups` gives the
+  warnings the runtime logs at startup and on reload. So servers and
+  groups that name a peer as their node pass `check_cluster_placement` and
+  node validation, and a group naming a peer that has not joined does not
+  stop the peer that evaluates it.
 - **Reachability.** A peer-node is `unreachable` while its peer is expired,
   whatever its agent last reported, and otherwise follows its state
   reports like any node. A peer that leaves the membership stops being a

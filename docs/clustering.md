@@ -233,8 +233,9 @@ state:
 Init refuses a peer whose Raft file already belongs to a cluster, and an
 instance database that already holds another cluster's state. Init reads
 the configuration as the peer will: `rift.peer` is the peer's name, and
-servers and groups may name peer-nodes (any valid peer name, checked once
-the peers run). Servers still on `local` do not stop init; it names them,
+servers and groups may name peer-nodes (any valid peer name; a server's
+node is checked once the peers run, while a group may keep naming a peer
+that has not joined yet). Servers still on `local` do not stop init; it names them,
 and they must get a node before the peer starts.
 
 ## `cluster.toml`
@@ -509,6 +510,13 @@ list them with `"peer": true`. A cluster has no `local`: configuration
 validation refuses managed servers, service groups and instances without a
 node. A `nodes.<peer>` entry in the configuration takes precedence; its
 `rift node` agent then serves that host and the peer embeds none.
+
+A service group may name a peer that has not joined the cluster yet, or
+select labels no peer has yet: `rift check`, `rift cluster init` and the
+running peers accept any valid peer name (malformed names are still
+refused). The group places no instance on that peer until it joins, and
+each peer logs a warning at startup and on every reload while a group
+waits for one.
 
 The servers on a peer's host stop when its proxy process stops, after the
 sessions drained, except named servers with
