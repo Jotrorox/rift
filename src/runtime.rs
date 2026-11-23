@@ -3855,6 +3855,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     }
                 }
             }
+            // A cluster deployment that waits for this peer's restart.
+            Err(error) if error.is_pending_restart() => {
+                log_info!("configuration deployed: {}", error.message);
+                Err(error)
+            }
             Err(error) => {
                 metrics.reload_failures.inc();
                 log_warn!("reload rejected: {}", error.message);
@@ -3864,6 +3869,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         if actor == "signal" {
             let (outcome, status) = match &response {
                 Ok(_) => ("accepted", 200),
+                Err(error) if error.is_pending_restart() => ("pending restart", error.status),
                 Err(error) if applied_without_plugins => ("failed", error.status),
                 Err(error) => ("rejected", error.status),
             };
@@ -3876,13 +3882,20 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             }
         }
         if let Some(reply) = admin_reply {
-            let response = response.as_ref()
-                .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
-                .map_err(|error| if applied_without_plugins {
-                    error.message.clone()
-                } else {
-                    format!("reload rejected; previous configuration retained: {}", error.message)
-                });
+            let response = match &response {
+                Err(error) if error.is_pending_restart() => Ok(serde_json::json!({
+                    "reloaded": false,
+                    "deployed": true,
+                    "pending_restart": error.message.clone(),
+                })),
+                response => response.as_ref()
+                    .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
+                    .map_err(|error| if applied_without_plugins {
+                        error.message.clone()
+                    } else {
+                        format!("reload rejected; previous configuration retained: {}", error.message)
+                    }),
+            };
             let _ = reply.send(response);
         }
         if let Some(reply) = reply {

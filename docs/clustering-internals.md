@@ -692,8 +692,10 @@ the data of running servers, not shared configuration.
 - A key-value store in the instance database (`extensions.storage.database =
   true`) is replicated with `kv` entries.
 - A store kept in its own file (`path`) cannot be replicated as a file. In a
-  cluster it is a configuration error; `rift cluster init` copies its entries
-  into the instance database.
+  cluster it is a configuration error. `rift cluster init` refuses a
+  `rift.lua` that still names one, since it records that file as the first
+  deployment; with `database = true` already set, `--extension-store <file>`
+  copies the old file's entries into the instance database.
 - Writes from plugin hooks wait at most `STORE_WAIT` (5 s,
   `src/plugins/services.rs`). An election takes 1.5–3 s, so hook writes
   during an election usually finish late rather than fail, but a longer
@@ -832,7 +834,8 @@ What the cluster core does differently from the design, and why:
   on every peer at startup until step 7 moved them to the leader; they go
   through the leader like any other write.
 - **File-backed key-value stores** are refused in a cluster;
-  `rift cluster init` copies their entries into the instance database.
+  `rift cluster init --extension-store <file>` copies their entries into the
+  instance database once `rift.lua` says `database = true`.
 
 ### Steps 4 and 6 notes
 
@@ -1202,6 +1205,20 @@ from the design:
   older deployed revision applies the last deployment instead (the deployer
   is about to rewrite the file); one whose file is the last deployment is a
   plain reload, as on a single Rift.
+- **Settings only a restart applies.** A single Rift refuses to reload a
+  change to the listeners, the admin listener, messaging, `cluster`, or the
+  extensions' enablement, storage and queues (`live_compatible` in
+  `src/control.rs`), and the operator restarts with the edited file. A peer
+  restarts only with a deployed revision, so a cluster deploys such a
+  change instead (`cluster_compatible`): everything else in it must still
+  apply live, as for a reload. Every peer writes it to `rift.lua`, and its
+  reload answers with status 202 and the sections that wait (the proposer's
+  reply, `rift admin reload` and `PUT /api/config` say so; on the other
+  peers it is the reported reload error). Nothing of the deployment applies
+  until the peer restarts, which then finds the last deployment in
+  `rift.lua` and starts with it. Later deployments wait the same way on a
+  peer that has not restarted, since they still differ from what it runs
+  in those sections.
 - **History and audit** are `config_deployments` and `config_audit` (the
   last 1,024 operator records). The summaries of refused requests stay with
   each peer. `rift cluster init` imports `deployments.json` and the
@@ -1530,6 +1547,15 @@ every part of the documentation that depends on it.
 | **Adopt if it matches an older deployed revision, otherwise refuse to start** (chosen) | Stale hosts update themselves; hand edits are never silently lost | A hand-edited host needs an explicit `--adopt-deployed` |
 | Always adopt the deployed revision | No operator action ever | Hand edits on one host vanish without notice |
 | Always refuse to start | Nothing is ever overwritten | Every stale host needs manual work |
+
+Settings only a restart applies follow from this choice. Since a peer
+restarts only with a deployed revision, they must be deployable:
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Deploy them; each peer applies the deployment when it restarts** (chosen) | One supported path, the same as for every other change; hand edits stay refused | Until it restarts, a peer runs an older configuration than its `rift.lua`, and later deployments wait with it |
+| Apply the live part now and the rest on restart | Live changes are not held back | The running configuration would be a mix no file describes; listeners and routes refer to each other |
+| Accept a local edit at startup that differs only in restart settings | No deployment for a local change | Peers diverge until each host is edited by hand the same way |
 
 ### 7. Where membership comes from
 

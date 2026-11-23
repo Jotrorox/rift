@@ -2917,6 +2917,17 @@ async fn validate_config(
     .await
     {
         Ok(Ok(config)) => {
+            // A cluster deploys a change only a restart applies; it waits
+            // for each peer's restart.
+            if rift::cluster::files::active().is_some() {
+                match control::cluster_compatible(&config, &snapshot.config) {
+                    Err(reason) => return error(StatusCode::BAD_REQUEST, reason),
+                    Ok(pending) if !pending.is_empty() => {
+                        return Json(json!({"valid":true,"pending_restart":pending,"message":format!("Configuration valid; it changes {}, which applies when each peer restarts.", pending.join(", "))})).into_response();
+                    }
+                    Ok(_) => {}
+                }
+            }
             if let Err(reason) = control::live_compatible(&config, &snapshot.config)
                 .and_then(|()| app.record_settings_compatible(&config))
             {
@@ -2948,6 +2959,12 @@ async fn submit(app: App, operation: control::Operation, actor: String) -> Respo
         Ok(Ok(revision)) => {
             Json(json!({"revision":revision,"message":"Configuration applied"})).into_response()
         }
+        // Deployed to the cluster; it applies when each peer restarts.
+        Ok(Err(e)) if e.is_pending_restart() => (
+            StatusCode::ACCEPTED,
+            Json(json!({"deployed":true,"pending_restart":true,"message":e.message})),
+        )
+            .into_response(),
         Ok(Err(e)) => e.into_response(),
         Err(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,
