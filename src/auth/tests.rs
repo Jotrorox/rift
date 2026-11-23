@@ -240,7 +240,11 @@ async fn http_fixture(
         let mut request = Vec::new();
         loop {
             let mut byte = [0];
-            socket.read_exact(&mut byte).await.unwrap();
+            // A client with a short timeout may give up while it still sends
+            // the request; the test then checks its error, not the request.
+            if socket.read_exact(&mut byte).await.is_err() {
+                return String::from_utf8_lossy(&request).into_owned();
+            }
             request.push(byte[0]);
             if request.ends_with(b"\r\n\r\n") {
                 break;
@@ -546,16 +550,19 @@ async fn session_body_without_content_length_is_bounded_and_timed() {
             let mut request = Vec::new();
             loop {
                 let mut byte = [0];
-                stream.read_exact(&mut byte).await.unwrap();
+                // With the 30 ms timeout the client may give up while it
+                // still sends the request; its error is what the test checks.
+                if stream.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
                 request.push(byte[0]);
                 if request.ends_with(b"\r\n\r\n") {
                     break;
                 }
             }
-            stream
+            let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                .await
-                .unwrap();
+                .await;
             if slow {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
