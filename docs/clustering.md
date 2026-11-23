@@ -369,6 +369,14 @@ rift admin cluster add w-1 10.0.0.9:7444 --witness     # on a member
 rift admin cluster promote w-1
 ```
 
+When the cluster sets `forwarding.secret_env` or node tokens, the witness
+needs the same `rift.lua` as the members, with the files it names (plugins,
+icons, certificates) and the same secrets in its environment: the members
+refuse a peer whose forwarding secret or node tokens differ, and a witness
+reads them from its `rift.lua`. It takes no deployments, so its copy only
+has to keep those secrets current. Without such settings `rift.lua` is
+optional on the witness host.
+
 A witness holds the whole state, including the bus-login key and template
 files, so treat its host like a proxy host. It may lead for a moment, but it
 hands the leadership to a player-serving voter as soon as one can take it,

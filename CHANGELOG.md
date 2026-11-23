@@ -12,6 +12,15 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Fixed
+
+- `rift witness` now joins a cluster that sets `forwarding.secret_env` or
+  node tokens. It used to start without the shared secrets, so every member
+  refused its links ("secret forwarding is set on … but not on this peer")
+  whatever its host held. A witness takes them from its `rift.lua`, which
+  such a cluster therefore needs on the witness host (see
+  [witnesses](docs/clustering.md#voters-learners-and-witnesses)).
+
 ## [0.2.0] - 2026-11-23
 
 The second release. It moves plugins to the `rift:plugin@0.3.0` contract

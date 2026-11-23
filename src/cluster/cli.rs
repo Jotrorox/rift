@@ -444,19 +444,24 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     let mut settings = load_settings(&flags.config, None)?;
     settings.witness = true;
     settings::set_local_peer(&settings.peer);
-    // The shared settings come from rift.lua when this host has one.
+    // The shared settings come from rift.lua when this host has one, and
+    // with them the shared secrets (the forwarding secret, the node tokens)
+    // whose equality every handshake checks: without them the members
+    // refuse the witness's links.
     let config = load_config(&flags.config)?;
-    let shared = config
-        .as_ref()
-        .and_then(|config| config.cluster.clone())
-        .unwrap_or_default();
     // A witness holds the whole state machine: the instance database.
     let database = Arc::new(Database::open_with(
         &instance_database(config.as_ref(), &settings),
         Mode::Replicated,
     )?);
     let name = settings.peer.clone();
-    let mut options = Options::new(shared);
+    let mut options = match &config {
+        Some(config) => Options::from_config(config, None)?,
+        None => Options::new(Default::default()),
+    };
+    // A witness takes no deployments, so its rift.lua is not compared with
+    // the members' configuration.
+    options.config_hash.clear();
     // A witness applies every entry kind a player-serving peer applies.
     options.components = super::attach::cluster_components(config.as_ref())?;
     options.database = Some(database.clone());
