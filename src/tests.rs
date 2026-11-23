@@ -586,3 +586,21 @@ async fn a_cluster_peer_claims_every_name_before_the_backend_and_sends_it_logins
     .await
     .unwrap();
 }
+
+#[test]
+fn peer_source_treats_a_missing_config_as_a_new_peer() {
+    // `rift --config <missing>` on a cluster peer starts like `rift`
+    // without a file instead of failing to read it.
+    let directory = std::env::temp_dir().join(format!("rift-peer-source-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let missing = directory.join("missing.lua");
+    assert_eq!(peer_source(Some(&missing)).unwrap(), None);
+    assert_eq!(peer_source(None).unwrap(), None);
+    let present = directory.join("rift.lua");
+    std::fs::write(&present, "return {}").unwrap();
+    assert_eq!(
+        peer_source(Some(&present)).unwrap().as_deref(),
+        Some(&b"return {}"[..])
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}

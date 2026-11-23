@@ -397,7 +397,7 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
     if let Some(peer) = peer {
-        let source = path.as_deref().map(fs::read).transpose()?;
+        let source = peer_source(path.as_deref())?;
         // The replicated instance database first: the peer starts on it and
         // its executor is installed before `serve` opens the stores.
         // Presence, the bus and the other steps' components, registered
@@ -416,6 +416,17 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         return runtime::serve(config, path).await;
     }
     runtime::serve(config, path).await
+}
+
+/// The peer's own rift.lua, handed to the cluster attach. A path given with
+/// `--config` that does not exist yet is a new peer without a file, as with
+/// `rift` alone: it receives the deployed configuration there
+/// (docs/clustering.md).
+fn peer_source(path: Option<&Path>) -> io::Result<Option<Vec<u8>>> {
+    match path.map(fs::read).transpose() {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        result => result,
+    }
 }
 
 #[cfg(test)]
