@@ -30,7 +30,25 @@ impl Error {
             message: message.to_string(),
         }
     }
+    /// A cluster deployment that was committed but changes a setting only a
+    /// restart applies: this peer keeps running its previous configuration
+    /// until it restarts with the deployed file (see [`restart_pending`]).
+    pub fn pending_restart(message: impl ToString) -> Self {
+        Self {
+            status: PENDING_RESTART,
+            message: message.to_string(),
+        }
+    }
+    /// Whether this is [`Error::pending_restart`]: nothing failed, the
+    /// change waits for a restart.
+    pub fn is_pending_restart(&self) -> bool {
+        self.status == PENDING_RESTART
+    }
 }
+
+/// The status of [`Error::pending_restart`]: accepted, not applied yet.
+pub const PENDING_RESTART: u16 = 202;
+
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Self::invalid(error)
@@ -135,6 +153,76 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
         return Err("extension queue capacity changes require a restart".into());
     }
     Ok(())
+}
+
+/// The sections of `config` that differ from `previous`, that a reload
+/// cannot apply and that a restart does: the listeners, the admin listener,
+/// messaging, `cluster`, and the extensions' enablement, storage and queues.
+/// In a cluster such a change is deployed anyway and waits for each peer's
+/// restart (docs/clustering.md, "Settings that need a restart"), since a
+/// peer restarts only with a deployed `rift.lua`.
+pub fn restart_pending(config: &Config, previous: &Config) -> Vec<&'static str> {
+    let mut pending = Vec::new();
+    if config.listeners != previous.listeners {
+        pending.push("listeners");
+    }
+    if config.admin != previous.admin {
+        pending.push("admin");
+    }
+    if config.messaging != previous.messaging {
+        pending.push("messaging");
+    }
+    if config.cluster != previous.cluster {
+        pending.push("cluster");
+    }
+    if extensions_need_restart(config, previous) {
+        pending.push("extensions");
+    }
+    pending
+}
+
+fn extensions_need_restart(config: &Config, previous: &Config) -> bool {
+    rift::extensions::ExtensionScript::live_compatible(
+        previous.extensions.as_ref(),
+        config.extensions.as_ref(),
+    )
+    .is_err()
+}
+
+/// `config` with the sections [`restart_pending`] names taken from
+/// `previous`, to check whether everything else could apply live.
+fn without_restart_pending(config: &Config, previous: &Config) -> Config {
+    let mut live = config.clone();
+    live.listeners = previous.listeners.clone();
+    live.admin = previous.admin.clone();
+    live.messaging = previous.messaging.clone();
+    live.cluster = previous.cluster.clone();
+    if extensions_need_restart(config, previous) {
+        live.extensions = previous.extensions.clone();
+    }
+    live
+}
+
+/// Whether a cluster peer running `previous` may take `config` as a
+/// deployment. `Ok` names the sections only a restart applies (none when
+/// all of it applies live); any other reason a reload refuses `config`
+/// refuses the deployment.
+pub fn cluster_compatible(config: &Config, previous: &Config) -> Result<Vec<&'static str>, String> {
+    let pending = restart_pending(config, previous);
+    if pending.is_empty() {
+        live_compatible(config, previous)?;
+    } else {
+        live_compatible(&without_restart_pending(config, previous), previous)?;
+    }
+    Ok(pending)
+}
+
+/// What a peer answers for a deployment it cannot apply before a restart.
+fn pending_message(id: u64, pending: &[&str]) -> String {
+    format!(
+        "deployment #{id} changes {}, which only a restart applies; every peer wrote it to rift.lua and keeps running its previous configuration until it restarts (one peer at a time, see docs/clustering.md, \"Settings that need a restart\")",
+        pending.join(", ")
+    )
 }
 
 /// Nodes may be added, removed and changed live, except that a node keeps
@@ -289,16 +377,27 @@ fn prepare_in_cluster(
     let config = Config::from_lua_at_with_instances(&source, path, previous)?;
     let deployed = latest
         .as_ref()
-        .is_some_and(|latest| latest.source == source);
-    if !deployed {
-        live_compatible(&config, previous).map_err(Error::invalid)?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error {
-            status: 500,
-            message: "cluster deployments need the async runtime".into(),
-        })?;
-        runtime
-            .block_on(files.deploy(&source, path, actor, action))
-            .map_err(Error::conflict)?;
+        .filter(|latest| latest.source == source)
+        .map(|latest| latest.id);
+    // A change only a restart applies is deployed all the same: a peer
+    // restarts only with a deployed rift.lua, so refusing it here would
+    // leave no way to make it. Until it restarts, a peer keeps running its
+    // previous configuration and says why.
+    let pending = cluster_compatible(&config, previous).map_err(Error::invalid)?;
+    let id = match deployed {
+        Some(id) => id,
+        None => {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error {
+                status: 500,
+                message: "cluster deployments need the async runtime".into(),
+            })?;
+            runtime
+                .block_on(files.deploy(&source, path, actor, action))
+                .map_err(Error::conflict)?
+        }
+    };
+    if !pending.is_empty() {
+        return Err(Error::pending_restart(pending_message(id, &pending)));
     }
     // The deployer writes rift.lua; nothing is saved here.
     Ok(Candidate {
@@ -414,6 +513,74 @@ mod tests {
             error.contains("managed_servers.static") && error.contains("restart"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_cluster_deploys_changes_only_a_restart_applies() {
+        let previous = Config::from_lua(
+            &nodes_source("rift.config.nodes.a={address='10.0.0.1'}"),
+            "pending.lua",
+        )
+        .unwrap();
+        assert!(restart_pending(&previous, &previous).is_empty());
+        assert_eq!(cluster_compatible(&previous, &previous), Ok(Vec::new()));
+
+        // Listeners, messaging and the cluster section wait for a restart:
+        // a reload refuses them, a cluster deploys them.
+        let mut restart = previous.clone();
+        restart
+            .listeners
+            .insert("other".into(), "127.0.0.1:25570".parse().unwrap());
+        restart.messaging = None;
+        restart.cluster = Some(rift::config::ClusterConfig {
+            max_players: Some(100),
+            ..Default::default()
+        });
+        assert!(live_compatible(&restart, &previous).is_err());
+        assert_eq!(
+            restart_pending(&restart, &previous),
+            vec!["listeners", "messaging", "cluster"]
+        );
+        assert_eq!(
+            cluster_compatible(&restart, &previous),
+            Ok(vec!["listeners", "messaging", "cluster"])
+        );
+        let message = pending_message(7, &restart_pending(&restart, &previous));
+        assert!(
+            message.contains("deployment #7 changes listeners, messaging, cluster"),
+            "{message}"
+        );
+        assert!(Error::pending_restart(message).is_pending_restart());
+        assert!(!Error::invalid("x").is_pending_restart());
+
+        // A live change alongside them deploys too; it applies with them.
+        let mut nodes = Config::from_lua(
+            &nodes_source(
+                "rift.config.nodes.a={address='10.0.0.1'}
+rift.config.nodes.b={address='10.0.0.2'}",
+            ),
+            "pending.lua",
+        )
+        .unwrap();
+        nodes.listeners = restart.listeners.clone();
+        assert_eq!(cluster_compatible(&nodes, &previous), Ok(vec!["listeners"]));
+
+        // What a restart does not fix is still refused.
+        let mut running =
+            Config::from_lua(&source("command={'java'}", "'java'"), "live.lua").unwrap();
+        running.add_instance("lobby", "lobby-1", 25600).unwrap();
+        let mut changed = Config::from_lua_with_instances(
+            &source("command={'java'}", "'java'"),
+            "live.lua",
+            &running,
+        )
+        .unwrap();
+        changed.instance_database = "other.sqlite3".into();
+        changed
+            .listeners
+            .insert("other".into(), "127.0.0.1:25570".parse().unwrap());
+        let error = cluster_compatible(&changed, &running).unwrap_err();
+        assert!(error.contains("instance_database"), "{error}");
     }
 
     fn nodes_source(nodes: &str) -> String {

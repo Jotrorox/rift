@@ -362,6 +362,13 @@ records are replicated, so `GET /api/deployments`, rollbacks and
   that took the request and writes it to every other peer's `rift.lua`,
   which then reloads. A peer whose reload fails keeps its configuration and
   shows the reason in `GET /api/cluster` under `configuration`.
+- A change to a setting only a restart applies (listeners, `admin`,
+  `messaging`, `cluster`, the extensions' store and queues) is deployed
+  too, but applies on each peer when it restarts. The request answers
+  `202 Accepted` with `"deployed": true`, `"pending_restart": true` and a
+  `message` naming the sections; `POST /api/config/validate` answers
+  `"valid": true` with `"pending_restart"` listing them. See
+  [settings that need a restart](clustering.md#settings-that-need-a-restart).
 - Unauthenticated request summaries stay with each peer.
 - The Servers table gains a Peer column: the peer whose own node runs each
   server, or none for servers on `rift node` agents.
