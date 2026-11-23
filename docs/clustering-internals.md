@@ -157,7 +157,15 @@ During the handshake each peer also sends its version, the entry kinds it
 supports, the hash of the [shared configuration](#one-configuration), and an
 HMAC of each shared secret keyed by the cluster token: the forwarding secret
 and the node tokens, as far as its environment holds them. A peer whose
-secrets differ is refused, and its log names which secret differs.
+secrets differ is refused, and its log names which secret differs. A peer
+without a configuration (a new peer before it installed the deployed
+`rift.lua`, or a witness) cannot know which variables hold the secrets, so
+its `Hello` sets `secrets_unknown` and carries none, and neither side
+compares them. Once a new peer wrote the received `rift.lua`,
+`files::start` reads the secrets that configuration names
+(`Links::set_secrets`), refuses to start when its forwarding variable is
+unset or a linked peer's last handshake presented other secrets, and
+presents them in every handshake from then on.
 
 ### Voters, learners and witnesses
 
@@ -695,7 +703,8 @@ the data of running servers, not shared configuration.
 
 Secrets stay in each peer's environment: the cluster token, node tokens, the
 forwarding secret and the web tokens. They must be equal on all peers; the handshake checks the forwarding secret and the node tokens without
-revealing them. The bus-login key moves into the replicated state.
+revealing them (not for a peer still without a configuration, see
+[peer links](#peer-links)). The bus-login key moves into the replicated state.
 
 ## Code map
 

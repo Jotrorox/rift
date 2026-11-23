@@ -677,3 +677,37 @@ fn listings_follow_uploads_folders_and_deletes() {
     assert_eq!(directories, ["a"]);
     assert!(without(&folder, "missing").is_none());
 }
+
+/// A peer that started without `rift.lua` checks the secrets the received
+/// configuration names: they are not replicated, so a missing variable is
+/// named, and present ones become the secrets its handshakes compare.
+#[test]
+fn received_secrets_name_a_missing_forwarding_variable() {
+    use crate::config::{Forwarding, ForwardingMode};
+    let mut config = crate::config::Config::default();
+    assert!(received_secrets(&config).unwrap().is_empty());
+    let variable = "RIFT_TEST_RECEIVED_SECRETS_UNSET";
+    config.forwarding = Some(Forwarding {
+        mode: ForwardingMode::Velocity,
+        secret_env: Some(variable.into()),
+    });
+    let error = received_secrets(&config).unwrap_err().to_string();
+    assert!(error.contains(variable), "{error}");
+    assert!(error.contains("Velocity forwarding secret"), "{error}");
+    // BungeeCord forwarding has no secret to miss.
+    config.forwarding = Some(Forwarding {
+        mode: ForwardingMode::BungeeCord,
+        secret_env: None,
+    });
+    assert!(received_secrets(&config).unwrap().is_empty());
+    // Any variable that is set stands in for the cluster's secret.
+    config.forwarding = Some(Forwarding {
+        mode: ForwardingMode::BungeeGuard,
+        secret_env: Some("PATH".into()),
+    });
+    let secrets = received_secrets(&config).unwrap();
+    assert_eq!(
+        secrets.get("forwarding").map(String::as_str),
+        std::env::var("PATH").ok().as_deref()
+    );
+}

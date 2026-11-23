@@ -65,7 +65,9 @@ MariaDB. The two cannot be combined: a cluster always replicates SQLite.
 - **The same secrets on every peer:** the forwarding secret, node tokens and
   the web tokens. The peer links refuse a peer whose forwarding secret or
   node tokens differ. The admin token may differ per host, since each admin
-  endpoint is local.
+  endpoint is local. Secrets are never replicated, only `rift.lua` with the
+  names of their variables, so a new peer needs them in its environment
+  before it starts, like the cluster token. A witness needs none of them.
 - **Network.** Peers reach each other on the UDP port of `listen` in
   `cluster.toml`. Bus clients and node agents reach every peer's
   `messaging.listen` port (UDP), and players reach every peer's game
@@ -162,12 +164,19 @@ now runs as the cluster's leader.
 ### 4. Start and add the other peers
 
 On `eu-2` and `eu-3`, put the certificates and `cluster.toml` in place, set
-the token, and start Rift without a `rift.lua` (`rift`, or
-`rift --config <path>` with a path that does not exist yet). The peer waits
-until a member adds it, installs a snapshot of the cluster's state, then
-writes the deployed configuration to `rift.lua` and starts with it. A peer
-started with a `rift.lua` of its own must hold a revision the cluster
-deployed (see [deployments](#deployments-and-hand-edits)).
+the token and the [shared secrets](#requirements) (the variables the
+cluster's `rift.lua` names, such as `RIFT_FORWARDING_SECRET`), and start
+Rift without a `rift.lua` (`rift`, or `rift --config <path>` with a path
+that does not exist yet). The peer waits until a member adds it, installs a
+snapshot of the cluster's state, then writes the deployed configuration to
+`rift.lua` and starts with it. Until it has that configuration it cannot
+know which variables hold the secrets, so it links without having them
+compared; once it has it, it compares them with the other peers' and stops
+with an error that names a variable the configuration needs but this host
+lacks, or a secret that differs. Set it and start Rift again: the received
+`rift.lua` stays in place. A peer started with a `rift.lua` of its own must
+hold a revision the cluster deployed (see
+[deployments](#deployments-and-hand-edits)).
 
 On any member, add each new peer with its `advertise` address and, once it
 has caught up, make it a voter:
@@ -345,7 +354,9 @@ so they work from any peer.
   least its own token. Peers prove that they hold it without sending it.
 - During the handshake each peer also proves which forwarding secret and
   node tokens it holds. A peer that differs is refused, and the log names
-  the secret that differs.
+  the secret that differs. A peer started without a `rift.lua`, and a
+  witness, present no secrets and are not compared until the peer has the
+  deployed configuration (see [step 4](#4-start-and-add-the-other-peers)).
 - To change a certificate, replace the files and restart that peer. To
   change the CA or the token, every peer needs the new value; peers with
   different values cannot talk, so change them during a maintenance window.

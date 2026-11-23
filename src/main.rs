@@ -397,7 +397,12 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
     if let Some(peer) = peer {
-        let source = path.as_deref().map(fs::read).transpose()?;
+        // A new peer has no rift.lua yet, even at a `--config` path.
+        let source = path
+            .as_deref()
+            .filter(|path| path.is_file())
+            .map(fs::read)
+            .transpose()?;
         // The replicated instance database first: the peer starts on it and
         // its executor is installed before `serve` opens the stores.
         // Presence, the bus and the other steps' components, registered
