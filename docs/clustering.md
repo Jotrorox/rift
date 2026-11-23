@@ -65,7 +65,9 @@ MariaDB. The two cannot be combined: a cluster always replicates SQLite.
 - **The same secrets on every peer:** the forwarding secret, node tokens and
   the web tokens. The peer links refuse a peer whose forwarding secret or
   node tokens differ. The admin token may differ per host, since each admin
-  endpoint is local.
+  endpoint is local. Secrets are never replicated, only `rift.lua` with the
+  names of their variables, so a new peer needs them in its environment
+  before it starts, like the cluster token. A witness needs none of them.
 - **Network.** Peers reach each other on the UDP port of `listen` in
   `cluster.toml`. Bus clients and node agents reach every peer's
   `messaging.listen` port (UDP), and players reach every peer's game
@@ -162,12 +164,19 @@ now runs as the cluster's leader.
 ### 4. Start and add the other peers
 
 On `eu-2` and `eu-3`, put the certificates and `cluster.toml` in place, set
-the token, and start Rift without a `rift.lua` (`rift`, or
-`rift --config <path>` with a path that does not exist yet). The peer waits
-until a member adds it, installs a snapshot of the cluster's state, then
-writes the deployed configuration to `rift.lua` and starts with it. A peer
-started with a `rift.lua` of its own must hold a revision the cluster
-deployed (see [deployments](#deployments-and-hand-edits)).
+the token and the [shared secrets](#requirements) (the variables the
+cluster's `rift.lua` names, such as `RIFT_FORWARDING_SECRET`), and start
+Rift without a `rift.lua` (`rift`, or `rift --config <path>` with a path
+that does not exist yet). The peer waits until a member adds it, installs a
+snapshot of the cluster's state, then writes the deployed configuration to
+`rift.lua` and starts with it. Until it has that configuration it cannot
+know which variables hold the secrets, so it links without having them
+compared; once it has it, it compares them with the other peers' and stops
+with an error that names a variable the configuration needs but this host
+lacks, or a secret that differs. Set it and start Rift again: the received
+`rift.lua` stays in place. A peer started with a `rift.lua` of its own must
+hold a revision the cluster deployed (see
+[deployments](#deployments-and-hand-edits)).
 
 On any member, add each new peer with its `advertise` address and, once it
 has caught up, make it a voter:
@@ -216,10 +225,24 @@ state:
   MariaDB installation first runs `rift database copy --to rift.sqlite3`
   and removes `database.backend` from the configuration (see
   [copy between backends](database.md#copy-between-backends)).
-- A key-value store in a file of its own (`extensions.storage.path`) is
-  copied into the instance database; set
-  `extensions.storage.database = true` afterwards, since a cluster refuses
-  the file.
+- A key-value store in a file of its own (`extensions.storage.path`) moves
+  into the instance database. Init records `rift.lua` as the first
+  deployment and a cluster refuses the file, so change the configuration
+  before init, while Rift is still stopped: replace `path` with
+  `database = true` (keep `quota`), then name the old file on the command
+  line. Init copies its entries:
+
+  ```lua
+  -- before: storage = { path = "extensions.state" }
+  storage = { database = true },
+  ```
+
+  ```sh
+  rift cluster init --peer eu-1 --extension-store extensions.state
+  ```
+
+  Init refuses a `rift.lua` that still names the file, before it changes
+  anything. Once the cluster runs, the old file is no longer read.
 - Instances registered on `local` move to the initializing peer's own
   node. Their folders stay where they are when they already lie where that
   node keeps them, below the directory of `rift.lua`; otherwise init says
@@ -233,8 +256,9 @@ state:
 Init refuses a peer whose Raft file already belongs to a cluster, and an
 instance database that already holds another cluster's state. Init reads
 the configuration as the peer will: `rift.peer` is the peer's name, and
-servers and groups may name peer-nodes (any valid peer name, checked once
-the peers run). Servers still on `local` do not stop init; it names them,
+servers and groups may name peer-nodes (any valid peer name; a server's
+node is checked once the peers run, while a group may keep naming a peer
+that has not joined yet). Servers still on `local` do not stop init; it names them,
 and they must get a node before the peer starts.
 
 ## `cluster.toml`
@@ -300,6 +324,7 @@ take `--config <path>` for a `rift.lua` elsewhere.
 | --- | --- |
 | `rift cluster init --peer <name>` | Creates a cluster whose only voter is this peer, from this Rift's instance database. Run it while Rift is stopped |
 | `rift cluster init --peer <name> --from-backup <file>` | The same, from a [backup](#backup-and-recovery) instead of the local database |
+| `rift cluster init --peer <name> --extension-store <file>` | Also copies the entries of the extension store file this Rift used into the instance database. `rift.lua` must already say `extensions.storage.database = true`. Not with `--from-backup` |
 | `rift cluster recover --peer <name> --i-understand-data-loss` | Makes this peer the only voter when the other voters are gone for good. Run it while Rift is stopped on this host |
 | `rift witness` | Runs this host as a [witness](#voters-learners-and-witnesses) until SIGTERM (`systemctl stop`) or Ctrl-C (SIGINT), either of which stops it cleanly |
 
@@ -345,7 +370,9 @@ so they work from any peer.
   least its own token. Peers prove that they hold it without sending it.
 - During the handshake each peer also proves which forwarding secret and
   node tokens it holds. A peer that differs is refused, and the log names
-  the secret that differs.
+  the secret that differs. A peer started without a `rift.lua`, and a
+  witness, present no secrets and are not compared until the peer has the
+  deployed configuration (see [step 4](#4-start-and-add-the-other-peers)).
 - To change a certificate, replace the files and restart that peer. To
   change the CA or the token, every peer needs the new value; peers with
   different values cannot talk, so change them during a maintenance window.
@@ -510,6 +537,13 @@ validation refuses managed servers, service groups and instances without a
 node. A `nodes.<peer>` entry in the configuration takes precedence; its
 `rift node` agent then serves that host and the peer embeds none.
 
+A service group may name a peer that has not joined the cluster yet, or
+select labels no peer has yet: `rift check`, `rift cluster init` and the
+running peers accept any valid peer name (malformed names are still
+refused). The group places no instance on that peer until it joins, and
+each peer logs a warning at startup and on every reload while a group
+waits for one.
+
 The servers on a peer's host stop when its proxy process stops, after the
 sessions drained, except named servers with
 [`keep_running`](kept-servers.md) on the peer's own node, which keep running
@@ -561,7 +595,9 @@ structured edit, a rollback, or a reload (`rift admin reload`, SIGHUP,
    atomically and reloads.
 3. A peer whose reload fails keeps its previous configuration and reports
    why under `configuration` in `rift admin cluster` and `GET /api/cluster`.
-   It does not retry until the next deployment or a manual reload.
+   It does not retry until the next deployment or a manual reload. A
+   deployment that changes a [setting that needs a restart](#settings-that-need-a-restart)
+   waits for each peer's restart this way.
 
 A reload whose file is already the last deployment is a plain reload. The
 deployment history (the last 64 deployments) and the operator audit trail
@@ -576,12 +612,38 @@ When a peer starts, it compares its `rift.lua` with the deployments:
 | Missing | It receives the last deployment once it has caught up |
 | The last deployment | It starts with it |
 | An older deployed revision (one of the last 64) | It adopts the last deployment and writes it to `rift.lua` |
-| No deployed revision (edited by hand) | It refuses to start and keeps the file. Deploy the edit from a running peer instead, or start this peer with `--adopt-deployed`, which keeps the hand-edited file as `rift.lua.hand-edited` and runs the last deployment |
+| No deployed revision (edited by hand) | It refuses to start and keeps the file. Deploy the edit from a running peer instead (also for [settings that need a restart](#settings-that-need-a-restart)), or start this peer with `--adopt-deployed`, which keeps the hand-edited file as `rift.lua.hand-edited` and runs the last deployment |
 
 Lua modules (`require`) and plugin folders are files on each host and are not
 replicated. A peer that evaluates a shared section differently because its
 files differ is reported by `rift check --strict` and in the cluster status,
 and logged when peers connect.
+
+#### Settings that need a restart
+
+A reload cannot change the game listeners (`listeners`), `admin`,
+`messaging`, `cluster`, or whether extensions are on, where their store
+lives, its quotas and the queue capacities. A single Rift
+refuses such a reload and applies the edited file at its next restart. A
+peer starts only with a deployed `rift.lua`, so a cluster deploys the change
+instead:
+
+1. Edit `rift.lua` on one peer and run `rift admin reload` there (or save
+   it on the dashboard or with `PUT /api/config`). Everything else in the
+   file must still be a change a reload accepts.
+2. The change is deployed and every peer writes it to `rift.lua`. The answer
+   says that it waits for a restart and names the sections (`rift admin
+   reload` prints `"pending_restart"`, `PUT /api/config` and
+   `POST /api/reload` answer `202 Accepted`). Every peer keeps running its
+   previous configuration, all of it, and `rift admin cluster` shows the
+   same reason as its `reload_error`.
+3. Restart the peers one at a time, as in [rolling restarts](#rolling-restarts).
+   Each starts with the deployed `rift.lua` and runs the change.
+
+Until a peer restarts, later deployments wait on it the same way, and a
+dashboard save on it is refused because `rift.lua` is no longer what it
+runs; edit the file and reload instead. A hand edit of `rift.lua` followed
+by a restart is still refused; deploy the edit first.
 
 ### Templates and other files
 
@@ -608,7 +670,8 @@ peers by their SHA-256 (stored under `cache/blobs/` beside `rift.lua`).
 
 - The extension key-value store must live in the instance database
   (`extensions.storage.database = true`), where it is replicated. A store
-  in a file of its own is refused.
+  in a file of its own is refused; `rift cluster init --extension-store`
+  moves one (see [getting there from one Rift](#getting-there-from-one-rift)).
 - A plugin's store write waits at most five seconds. During a leader
   election (1.5–3 s) writes wait; a longer outage makes them fail with a
   timeout.

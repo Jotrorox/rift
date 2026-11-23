@@ -381,7 +381,7 @@ pub async fn cluster_peers(config: &Config, path: &Path, report: &mut Report) {
     }
     if let Some(store) = rift::cluster::attach::file_store(config) {
         report.errors.push(format!(
-            "extensions.storage.path ({}): a cluster cannot replicate a store in a file of its own; set extensions.storage.database = true (`rift cluster init` copies its entries into the instance database)",
+            "extensions.storage.path ({0}): a cluster cannot replicate a store in a file of its own; set extensions.storage.database = true before `rift cluster init` and run it with --extension-store {0}, which copies the file's entries into the instance database",
             store.display()
         ));
     }

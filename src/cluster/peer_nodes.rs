@@ -24,6 +24,8 @@
 //! node commands and the dashboard treat them like any node. Until the
 //! registry is loaded (before the peer attached its cluster, and in
 //! `rift check`), validation accepts node names that are valid peer names.
+//! Service groups accept them afterwards too: a group may name a peer that
+//! has not joined yet, and its instances wait until it does.
 use super::{
     Cluster,
     settings::{self, Settings},

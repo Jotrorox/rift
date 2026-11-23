@@ -342,23 +342,33 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             }
         }
     }
+    validate_selectors(config, crate::cluster::settings::local_peer().is_some())
+}
+
+/// The checks of `service_groups.*.nodes` against `config.nodes`. On a
+/// cluster peer (`clustered`) the peers come and go with the membership: a
+/// valid peer name that is no node names a peer that has not joined yet,
+/// and a selector that matches no node waits for a peer that does, whether
+/// or not this peer knows its cluster's peer-nodes yet. So `rift check`,
+/// `rift cluster init` and the running peers accept the same groups;
+/// [`Config::waiting_groups`] warns about those that wait.
+fn validate_selectors(config: &Config, clustered: bool) -> Result<(), String> {
+    let nodes = &config.nodes;
     for (name, group) in &config.service_groups {
         let Some(selector) = &group.nodes else {
             continue;
         };
         let path = format!("service_groups.{name}.nodes");
-        // Before a peer knows the peer-nodes of its cluster, any valid peer
-        // name may be one, and labels cannot be checked yet.
-        let pending = crate::cluster::peer_nodes::pending();
-        if nodes.is_empty() && !pending {
+        if nodes.is_empty() && !clustered {
             return Err(format!("{path}: no nodes are configured"));
         }
         for node in &selector.names {
-            if !nodes.contains_key(node) && !crate::cluster::peer_nodes::may_be_peer(node) {
+            let may_join = clustered && crate::cluster::settings::valid_peer_name(node);
+            if !nodes.contains_key(node) && !may_join {
                 return Err(format!("{path}: unknown node {node:?}{}", peer_hint()));
             }
         }
-        if !pending
+        if !clustered
             && !nodes
                 .iter()
                 .any(|(node, definition)| selector.matches(node, definition))
@@ -367,6 +377,53 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+impl Config {
+    /// Warnings about service groups that select a peer that has not joined
+    /// the cluster yet, or no node at all: they place no instance there
+    /// until a matching peer joins. Only on a cluster peer that knows its
+    /// peer-nodes (empty before, as in `rift check`, where every peer name
+    /// would look absent).
+    pub fn waiting_groups(&self) -> Vec<String> {
+        if crate::cluster::settings::local_peer().is_none()
+            || crate::cluster::peer_nodes::current().is_none()
+        {
+            return Vec::new();
+        }
+        waiting_groups(self)
+    }
+}
+
+fn waiting_groups(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, group) in &config.service_groups {
+        let Some(selector) = &group.nodes else {
+            continue;
+        };
+        let path = format!("service_groups.{name}.nodes");
+        let absent: Vec<String> = selector
+            .names
+            .iter()
+            .filter(|node| !config.nodes.contains_key(*node))
+            .map(|node| format!("{node:?}"))
+            .collect();
+        if !absent.is_empty() {
+            warnings.push(format!(
+                "{path}: no peer {} has joined the cluster yet; the group's instances there wait until it does (a witness never runs any)",
+                absent.join(", ")
+            ));
+        } else if !config
+            .nodes
+            .iter()
+            .any(|(node, definition)| selector.matches(node, definition))
+        {
+            warnings.push(format!(
+                "{path}: no node matches yet; the group places no instance until a peer that matches joins"
+            ));
+        }
+    }
+    warnings
 }
 
 /// On a cluster peer: where peer-nodes come from, for errors about nodes.
@@ -535,6 +592,75 @@ rift.config.nodes.a={address='10.0.0.1'}",
         .unwrap_err()
         .to_string();
         assert!(error.contains("messaging.listen"), "{error}");
+    }
+
+    fn select(config: &mut Config, names: &[&str], labels: &[&str]) {
+        let selector = config
+            .service_groups
+            .get_mut("g")
+            .unwrap()
+            .nodes
+            .as_mut()
+            .unwrap();
+        selector.names = names.iter().map(|name| (*name).to_owned()).collect();
+        selector.labels = labels.iter().map(|label| (*label).to_owned()).collect();
+    }
+
+    #[test]
+    fn cluster_groups_may_select_peers_that_have_not_joined_yet() {
+        let mut config = config(
+            "rift.config.nodes.node1={address='10.0.0.11',labels={'games'}}
+rift.config.service_groups.g={command={'java'},port_range={30000,30009},nodes={'node1'}}",
+        )
+        .unwrap();
+        assert_eq!(validate_selectors(&config, true), Ok(()));
+        assert!(waiting_groups(&config).is_empty());
+
+        // eu-2 is a valid peer name that is no node (yet): a cluster peer
+        // accepts it whether or not it knows its peer-nodes, and warns.
+        select(&mut config, &["node1", "eu-2"], &[]);
+        assert_eq!(validate_selectors(&config, true), Ok(()));
+        let warnings = waiting_groups(&config);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("service_groups.g.nodes: no peer \"eu-2\" has joined"),
+            "{warnings:?}"
+        );
+        // Outside a cluster it is an unknown node, as before.
+        let error = validate_selectors(&config, false).unwrap_err();
+        assert!(error.contains("unknown node \"eu-2\""), "{error}");
+
+        // Only peers that have not joined: nothing matches yet.
+        select(&mut config, &["eu-2", "eu-3"], &[]);
+        assert_eq!(validate_selectors(&config, true), Ok(()));
+        let warnings = waiting_groups(&config);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("\"eu-2\", \"eu-3\""), "{warnings:?}");
+
+        // Labels no node has yet: a peer with them may join.
+        select(&mut config, &[], &["proxy"]);
+        assert_eq!(validate_selectors(&config, true), Ok(()));
+        assert!(
+            waiting_groups(&config)[0].contains("no node matches yet"),
+            "{:?}",
+            waiting_groups(&config)
+        );
+        let error = validate_selectors(&config, false).unwrap_err();
+        assert!(error.contains("no configured node matches"), "{error}");
+
+        // A name no peer can have is still refused.
+        for name in ["Bad Name", "EU-2", "local", ""] {
+            select(&mut config, &[name], &[]);
+            let error = validate_selectors(&config, true).unwrap_err();
+            assert!(error.contains("unknown node"), "{name:?}: {error}");
+        }
+
+        // A peer without nodes of its own (a witness) accepts peer names.
+        config.nodes.clear();
+        select(&mut config, &["eu-2"], &[]);
+        assert_eq!(validate_selectors(&config, true), Ok(()));
+        let error = validate_selectors(&config, false).unwrap_err();
+        assert!(error.contains("no nodes are configured"), "{error}");
     }
 
     #[test]

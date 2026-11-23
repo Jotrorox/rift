@@ -157,7 +157,15 @@ During the handshake each peer also sends its version, the entry kinds it
 supports, the hash of the [shared configuration](#one-configuration), and an
 HMAC of each shared secret keyed by the cluster token: the forwarding secret
 and the node tokens, as far as its environment holds them. A peer whose
-secrets differ is refused, and its log names which secret differs.
+secrets differ is refused, and its log names which secret differs. A peer
+without a configuration (a new peer before it installed the deployed
+`rift.lua`, or a witness) cannot know which variables hold the secrets, so
+its `Hello` sets `secrets_unknown` and carries none, and neither side
+compares them. Once a new peer wrote the received `rift.lua`,
+`files::start` reads the secrets that configuration names
+(`Links::set_secrets`), refuses to start when its forwarding variable is
+unset or a linked peer's last handshake presented other secrets, and
+presents them in every handshake from then on.
 
 ### Voters, learners and witnesses
 
@@ -684,8 +692,10 @@ the data of running servers, not shared configuration.
 - A key-value store in the instance database (`extensions.storage.database =
   true`) is replicated with `kv` entries.
 - A store kept in its own file (`path`) cannot be replicated as a file. In a
-  cluster it is a configuration error; `rift cluster init` copies its entries
-  into the instance database.
+  cluster it is a configuration error. `rift cluster init` refuses a
+  `rift.lua` that still names one, since it records that file as the first
+  deployment; with `database = true` already set, `--extension-store <file>`
+  copies the old file's entries into the instance database.
 - Writes from plugin hooks wait at most `STORE_WAIT` (5 s,
   `src/plugins/services.rs`). An election takes 1.5–3 s, so hook writes
   during an election usually finish late rather than fail, but a longer
@@ -695,7 +705,8 @@ the data of running servers, not shared configuration.
 
 Secrets stay in each peer's environment: the cluster token, node tokens, the
 forwarding secret and the web tokens. They must be equal on all peers; the handshake checks the forwarding secret and the node tokens without
-revealing them. The bus-login key moves into the replicated state.
+revealing them (not for a peer still without a configuration, see
+[peer links](#peer-links)). The bus-login key moves into the replicated state.
 
 ## Code map
 
@@ -823,7 +834,8 @@ What the cluster core does differently from the design, and why:
   on every peer at startup until step 7 moved them to the leader; they go
   through the leader like any other write.
 - **File-backed key-value stores** are refused in a cluster;
-  `rift cluster init` copies their entries into the instance database.
+  `rift cluster init --extension-store <file>` copies their entries into the
+  instance database once `rift.lua` says `database = true`.
 
 ### Steps 4 and 6 notes
 
@@ -1085,9 +1097,15 @@ warming, and what was not covered by tests.
   loaded (the first evaluation before the peer attached, `rift check` and
   `rift witness`), validation accepts any valid peer name as a node and
   does not check labels or a named server's node address yet; the
-  configuration is evaluated again once the peer is attached, strictly.
-  So servers and groups that name a peer as their node pass
-  `check_cluster_placement` and node validation.
+  configuration is evaluated again once the peer is attached, strictly
+  for named servers. Service groups are checked the same way before and
+  after (`config::nodes::validate_selectors`): on a peer, a selector may
+  name any valid peer name that is no node and may match no node, since
+  the group waits for a peer that joins; `Config::waiting_groups` gives the
+  warnings the runtime logs at startup and on reload. So servers and
+  groups that name a peer as their node pass `check_cluster_placement` and
+  node validation, and a group naming a peer that has not joined does not
+  stop the peer that evaluates it.
 - **Reachability.** A peer-node is `unreachable` while its peer is expired,
   whatever its agent last reported, and otherwise follows its state
   reports like any node. A peer that leaves the membership stops being a
@@ -1187,6 +1205,20 @@ from the design:
   older deployed revision applies the last deployment instead (the deployer
   is about to rewrite the file); one whose file is the last deployment is a
   plain reload, as on a single Rift.
+- **Settings only a restart applies.** A single Rift refuses to reload a
+  change to the listeners, the admin listener, messaging, `cluster`, or the
+  extensions' enablement, storage and queues (`live_compatible` in
+  `src/control.rs`), and the operator restarts with the edited file. A peer
+  restarts only with a deployed revision, so a cluster deploys such a
+  change instead (`cluster_compatible`): everything else in it must still
+  apply live, as for a reload. Every peer writes it to `rift.lua`, and its
+  reload answers with status 202 and the sections that wait (the proposer's
+  reply, `rift admin reload` and `PUT /api/config` say so; on the other
+  peers it is the reported reload error). Nothing of the deployment applies
+  until the peer restarts, which then finds the last deployment in
+  `rift.lua` and starts with it. Later deployments wait the same way on a
+  peer that has not restarted, since they still differ from what it runs
+  in those sections.
 - **History and audit** are `config_deployments` and `config_audit` (the
   last 1,024 operator records). The summaries of refused requests stay with
   each peer. `rift cluster init` imports `deployments.json` and the
@@ -1515,6 +1547,15 @@ every part of the documentation that depends on it.
 | **Adopt if it matches an older deployed revision, otherwise refuse to start** (chosen) | Stale hosts update themselves; hand edits are never silently lost | A hand-edited host needs an explicit `--adopt-deployed` |
 | Always adopt the deployed revision | No operator action ever | Hand edits on one host vanish without notice |
 | Always refuse to start | Nothing is ever overwritten | Every stale host needs manual work |
+
+Settings only a restart applies follow from this choice. Since a peer
+restarts only with a deployed revision, they must be deployable:
+
+| Option | For | Against |
+| --- | --- | --- |
+| **Deploy them; each peer applies the deployment when it restarts** (chosen) | One supported path, the same as for every other change; hand edits stay refused | Until it restarts, a peer runs an older configuration than its `rift.lua`, and later deployments wait with it |
+| Apply the live part now and the rest on restart | Live changes are not held back | The running configuration would be a mix no file describes; listeners and routes refer to each other |
+| Accept a local edit at startup that differs only in restart settings | No deployment for a local change | Peers diverge until each host is edited by hand the same way |
 
 ### 7. Where membership comes from
 
