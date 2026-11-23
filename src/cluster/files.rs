@@ -1454,6 +1454,18 @@ pub async fn start(
         // cluster.
         (config, None)
     };
+    // A peer started without `rift.lua` presented no shared secrets, since
+    // the defaults name none; the configuration it received does.
+    if path.is_some() && cluster.links().secrets_unknown() {
+        let secrets = received_secrets(&config)?;
+        let problems = cluster.links().set_secrets(&secrets);
+        if !problems.is_empty() {
+            return Err(super::invalid(format!(
+                "cluster: this peer's secrets differ from the other peers' ({}); set the same forwarding secret and node tokens as on the other peers and start Rift again",
+                problems.join("; ")
+            )));
+        }
+    }
     let options = AttachOptions::from_config(&config, path.as_deref());
     let attached = attach(cluster, &state, options).await?;
     *lock(&ATTACHED) = Some(attached);
@@ -1481,6 +1493,24 @@ pub async fn start(
         }
     }
     Ok((config, path))
+}
+
+/// The shared secrets of `config`, the configuration a peer that started
+/// without `rift.lua` received from the cluster. Secrets are never
+/// replicated, only the names of their variables: a variable the received
+/// configuration names for the forwarding secret must be set on this peer
+/// too, and the error says which.
+fn received_secrets(config: &crate::config::Config) -> io::Result<BTreeMap<String, String>> {
+    if let Some(forwarding) = &config.forwarding
+        && let (Some(variable), Some(what)) =
+            (&forwarding.secret_env, forwarding.mode.secret_name())
+        && std::env::var_os(variable).is_none()
+    {
+        return Err(super::invalid(format!(
+            "cluster: the deployed configuration reads the {what} from {variable}, which is not set on this peer; secrets are not replicated, so set {variable} to the value the other peers have and start Rift again (the received rift.lua stays in place)"
+        )));
+    }
+    Ok(node::shared_secrets(config))
 }
 
 async fn deployer(state: Arc<FilesState>) {

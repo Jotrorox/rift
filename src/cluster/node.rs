@@ -136,6 +136,9 @@ pub struct Options {
     pub config_hash: String,
     /// Shared secrets (by name) whose equality handshakes check.
     pub secrets: BTreeMap<String, String>,
+    /// This peer has no configuration to name the secrets' variables (see
+    /// [`link::Identity::secrets_unknown`]).
+    pub secrets_unknown: bool,
 }
 
 impl Options {
@@ -145,8 +148,12 @@ impl Options {
     /// with one that knows the configuration's directory once attached) and
     /// the shared secrets whose equality handshakes check: the forwarding
     /// secret and the node tokens, as far as this environment holds them.
-    /// `_source`, the text of `rift.lua`, is no longer hashed.
-    pub fn from_config(config: &crate::config::Config, _source: Option<&[u8]>) -> io::Result<Self> {
+    /// `source` is the text of `rift.lua`, no longer hashed: without one
+    /// (a new peer waiting for the deployed configuration) `config` holds
+    /// the built-in defaults, which name no secrets, so the handshakes
+    /// leave them unchecked until [`shared_secrets`] of the received
+    /// configuration replace them.
+    pub fn from_config(config: &crate::config::Config, source: Option<&[u8]>) -> io::Result<Self> {
         if config.database.is_some() {
             return Err(super::invalid(
                 "cluster: database.backend = \"postgres\" or \"mariadb\" cannot be combined with cluster.toml; a cluster replicates SQLite",
@@ -154,19 +161,8 @@ impl Options {
         }
         let mut options = Self::new(config.cluster.clone().unwrap_or_default());
         options.config_hash = super::files::shared::of_config(config, None).hash;
-        if let Some(variable) = config
-            .forwarding
-            .as_ref()
-            .and_then(|forwarding| forwarding.secret_env.as_ref())
-            && let Ok(value) = std::env::var(variable)
-        {
-            options.secrets.insert("forwarding".to_owned(), value);
-        }
-        for (name, node) in &config.nodes {
-            if let Ok(value) = std::env::var(&node.token_env) {
-                options.secrets.insert(format!("nodes.{name}"), value);
-            }
-        }
+        options.secrets = shared_secrets(config);
+        options.secrets_unknown = source.is_none();
         Ok(options)
     }
 
@@ -181,8 +177,30 @@ impl Options {
             link_timing: link::Timing::default(),
             config_hash: String::new(),
             secrets: BTreeMap::new(),
+            secrets_unknown: false,
         }
     }
+}
+
+/// The shared secrets of `config` whose equality handshakes check, by name:
+/// the forwarding secret and the node tokens, as far as this environment
+/// holds them.
+pub fn shared_secrets(config: &crate::config::Config) -> BTreeMap<String, String> {
+    let mut secrets = BTreeMap::new();
+    if let Some(variable) = config
+        .forwarding
+        .as_ref()
+        .and_then(|forwarding| forwarding.secret_env.as_ref())
+        && let Ok(value) = std::env::var(variable)
+    {
+        secrets.insert("forwarding".to_owned(), value);
+    }
+    for (name, node) in &config.nodes {
+        if let Ok(value) = std::env::var(&node.token_env) {
+            secrets.insert(format!("nodes.{name}"), value);
+        }
+    }
+    secrets
 }
 
 /// A peer's part in the membership.
@@ -396,6 +414,7 @@ impl Cluster {
                 kinds: supported,
                 config_hash: options.config_hash,
                 secrets: options.secrets,
+                secrets_unknown: options.secrets_unknown,
             },
             &token,
             options.link_timing,

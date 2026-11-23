@@ -12,6 +12,19 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Fixed
+
+- A new cluster peer started without a `rift.lua`, as the documented join
+  flow says, is no longer refused by the other peers because the forwarding
+  secret (or a node token) is "set on them but not on this peer": until it
+  has the deployed configuration it cannot know which variables hold the
+  secrets, so they are compared once it has. It then stops with an error
+  naming a variable the configuration needs but its host lacks. Witnesses,
+  which never had a configuration to name the secrets, are no longer
+  refused for the same reason. `rift --config <path>` with a path that does
+  not exist yet starts such a peer instead of failing to read the file. See
+  [clustering](docs/clustering.md#4-start-and-add-the-other-peers).
+
 ## [0.2.0] - 2026-11-23
 
 The second release. It moves plugins to the `rift:plugin@0.3.0` contract

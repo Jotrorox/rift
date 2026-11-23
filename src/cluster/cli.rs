@@ -457,6 +457,9 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     )?);
     let name = settings.peer.clone();
     let mut options = Options::new(shared);
+    // A witness never uses the forwarding secret or node tokens and need
+    // not hold them, so the handshakes do not compare them.
+    options.secrets_unknown = true;
     // A witness applies every entry kind a player-serving peer applies.
     options.components = super::attach::cluster_components(config.as_ref())?;
     options.database = Some(database.clone());

@@ -13,8 +13,11 @@
 //! TLS-derived binding (so the proof cannot be replayed on another
 //! connection) and send an HMAC of every shared secret keyed by the token. A
 //! peer of another cluster, without the token, or with a differing secret is
-//! refused, and the log names the reason. TLS itself (mutual, against the
-//! cluster CA) is the transport's job.
+//! refused, and the log names the reason. A peer without a configuration (a
+//! new peer before it received the deployed `rift.lua`, a witness) cannot
+//! know which variables hold the secrets: it says so
+//! ([`Identity::secrets_unknown`]) and its secrets are not compared. TLS
+//! itself (mutual, against the cluster CA) is the transport's job.
 //!
 //! When both sides dial each other, both connections survive the handshake;
 //! each side then sends on the one dialed by the peer with the smaller name
@@ -168,6 +171,11 @@ pub struct Identity {
     /// Shared secrets by name (forwarding secret, node tokens). Only their
     /// HMACs keyed by the cluster token leave the process.
     pub secrets: BTreeMap<String, String>,
+    /// This peer has no configuration yet (a new peer before it received
+    /// the deployed `rift.lua`) or never has one (a witness), so it cannot
+    /// know which variables hold the shared secrets: it presents none and
+    /// handshakes do not compare them. [`Links::set_secrets`] ends this.
+    pub secrets_unknown: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +210,9 @@ pub struct Hello {
     pub proof: String,
     /// Hex HMAC of each shared secret, keyed by the cluster token.
     pub secrets: BTreeMap<String, String>,
+    /// See [`Identity::secrets_unknown`]; absent from older peers.
+    #[serde(default)]
+    pub secrets_unknown: bool,
 }
 
 /// A handler's error, as the remote peer reported it.
@@ -305,7 +316,9 @@ struct Inner {
     /// starts as [`Identity::config_hash`] and follows reloads.
     config_hash: RwLock<String>,
     key: hmac::Key,
-    secret_proofs: BTreeMap<String, String>,
+    /// What handshakes present about the shared secrets from now on: it
+    /// starts as [`Identity::secrets`] and follows [`Links::set_secrets`].
+    secrets: RwLock<SecretProofs>,
     timing: Timing,
     cluster: RwLock<ClusterIdentity>,
     state: Mutex<State>,
@@ -315,6 +328,63 @@ struct Inner {
     dials: Mutex<Dials>,
     shutdown: watch::Sender<bool>,
     next_link: AtomicU64,
+}
+
+/// The HMACs of this peer's shared secrets, keyed by the cluster token.
+#[derive(Debug, Clone, Default)]
+struct SecretProofs {
+    proofs: BTreeMap<String, String>,
+    /// See [`Identity::secrets_unknown`].
+    unknown: bool,
+}
+
+impl SecretProofs {
+    fn new(key: &hmac::Key, secrets: &BTreeMap<String, String>, unknown: bool) -> Self {
+        let proofs = secrets
+            .iter()
+            .map(|(name, value)| {
+                let mut message = b"rift-cluster/1 secret\0".to_vec();
+                message.extend_from_slice(name.as_bytes());
+                message.push(0);
+                message.extend_from_slice(value.as_bytes());
+                (name.clone(), hex(hmac::sign(key, &message).as_ref()))
+            })
+            .collect();
+        Self { proofs, unknown }
+    }
+
+    /// Whether `hello`'s secrets equal these. Not checked when either side
+    /// does not know its secrets: a peer without a configuration presents
+    /// none.
+    fn check(&self, hello: &Hello) -> Result<(), String> {
+        if self.unknown || hello.secrets_unknown {
+            return Ok(());
+        }
+        let names: std::collections::BTreeSet<&String> =
+            self.proofs.keys().chain(hello.secrets.keys()).collect();
+        for name in names {
+            match (self.proofs.get(name), hello.secrets.get(name)) {
+                (Some(ours), Some(theirs)) if ours == theirs => {}
+                (Some(_), Some(_)) => {
+                    return Err(format!("secret {name} differs between the peers"));
+                }
+                (Some(_), None) => {
+                    return Err(format!(
+                        "secret {name} is set on this peer but not on {}",
+                        hello.name
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(format!(
+                        "secret {name} is set on {} but not on this peer",
+                        hello.name
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The peer links of this process. Cheap to clone.
@@ -334,17 +404,7 @@ impl Links {
         seeds: Vec<String>,
     ) -> Self {
         let key = hmac::Key::new(hmac::HMAC_SHA256, token.as_bytes());
-        let secret_proofs = identity
-            .secrets
-            .iter()
-            .map(|(name, value)| {
-                let mut message = b"rift-cluster/1 secret\0".to_vec();
-                message.extend_from_slice(name.as_bytes());
-                message.push(0);
-                message.extend_from_slice(value.as_bytes());
-                (name.clone(), hex(hmac::sign(&key, &message).as_ref()))
-            })
-            .collect();
+        let secrets = SecretProofs::new(&key, &identity.secrets, identity.secrets_unknown);
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
         let links = Self {
@@ -353,7 +413,7 @@ impl Links {
                 config_hash: RwLock::new(identity.config_hash.clone()),
                 identity,
                 key,
-                secret_proofs,
+                secrets: RwLock::new(secrets),
                 timing,
                 cluster: RwLock::new(ClusterIdentity::default()),
                 state: Mutex::new(State {
@@ -407,6 +467,45 @@ impl Links {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Whether this peer presents no shared secrets because it has no
+    /// configuration ([`Identity::secrets_unknown`]).
+    pub fn secrets_unknown(&self) -> bool {
+        self.inner
+            .secrets
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .unknown
+    }
+
+    /// The shared secrets of the configuration this peer received, presented
+    /// in handshakes from now on. Links already up stay up; returns, for
+    /// each of their peers whose last handshake presented other secrets,
+    /// why, so the caller can say so (the next handshake refuses them).
+    pub fn set_secrets(&self, secrets: &BTreeMap<String, String>) -> Vec<String> {
+        let proofs = SecretProofs::new(&self.inner.key, secrets, false);
+        let mut problems: Vec<String> = {
+            let state = self.inner.state.lock().unwrap();
+            state
+                .peers
+                .values()
+                .filter_map(|slot| slot.hello.as_ref())
+                .filter_map(|hello| {
+                    proofs
+                        .check(hello)
+                        .err()
+                        .map(|reason| format!("{}: {reason}", hello.name))
+                })
+                .collect()
+        };
+        problems.sort();
+        *self
+            .inner
+            .secrets
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = proofs;
+        problems
     }
 
     pub fn set_admission(&self, admission: Admission) {
@@ -798,6 +897,12 @@ impl Links {
     fn hello_for(&self, class: Class, binding: &[u8; 32], role: Role) -> Hello {
         let identity = &self.inner.identity;
         let cluster = self.inner.cluster.read().unwrap().clone();
+        let secrets = self
+            .inner
+            .secrets
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let proof = hmac::sign(
             &self.inner.key,
             &proof_message(role, binding, &identity.name),
@@ -814,7 +919,8 @@ impl Links {
             kinds: identity.kinds.clone(),
             config_hash: self.config_hash(),
             proof: hex(proof.as_ref()),
-            secrets: self.inner.secret_proofs.clone(),
+            secrets: secrets.proofs,
+            secrets_unknown: secrets.unknown,
         }
     }
 
@@ -859,33 +965,11 @@ impl Links {
                 "belongs to cluster {theirs}, this peer to cluster {ours}"
             ));
         }
-        let names: std::collections::BTreeSet<&String> = self
-            .inner
-            .secret_proofs
-            .keys()
-            .chain(hello.secrets.keys())
-            .collect();
-        for name in names {
-            match (self.inner.secret_proofs.get(name), hello.secrets.get(name)) {
-                (Some(ours), Some(theirs)) if ours == theirs => {}
-                (Some(_), Some(_)) => {
-                    return Err(format!("secret {name} differs between the peers"));
-                }
-                (Some(_), None) => {
-                    return Err(format!(
-                        "secret {name} is set on this peer but not on {}",
-                        hello.name
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(format!(
-                        "secret {name} is set on {} but not on this peer",
-                        hello.name
-                    ));
-                }
-                (None, None) => {}
-            }
-        }
+        self.inner
+            .secrets
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .check(hello)?;
         let admission = self.inner.admission.read().unwrap().clone();
         if let Some(admission) = admission {
             admission(hello)?;
@@ -1233,6 +1317,7 @@ mod tests {
             kinds: vec!["peer".into()],
             config_hash: "hash".into(),
             secrets: BTreeMap::from([("forwarding".to_owned(), secret.to_owned())]),
+            secrets_unknown: false,
         }
     }
 
@@ -1308,6 +1393,57 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("secret forwarding"), "{error}");
+    }
+
+    /// A new peer started without `rift.lua` (or a witness) cannot know
+    /// which variables hold the secrets, so it presents none: the members
+    /// link with it, and once it knows its secrets they are compared again.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_without_a_configuration_links_without_secrets() {
+        let network = Network::default();
+        let member = links(&network, "a", "0123456789abcdef", "s");
+        let mut fresh = identity("b", "s");
+        fresh.secrets.clear();
+        fresh.secrets_unknown = true;
+        let joining = Links::new(
+            network.bind("b"),
+            fresh,
+            "0123456789abcdef",
+            Timing::default(),
+            Vec::new(),
+        );
+        assert!(joining.secrets_unknown());
+        member
+            .connect_address("b", Duration::from_secs(5))
+            .await
+            .unwrap();
+        joining
+            .connect_address("a", Duration::from_secs(5))
+            .await
+            .unwrap();
+        // The deployed configuration names another secret than the member's.
+        let problems =
+            joining.set_secrets(&BTreeMap::from([("forwarding".to_owned(), "x".to_owned())]));
+        assert!(!joining.secrets_unknown());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("a: secret forwarding"),
+            "{problems:?}"
+        );
+        let _c = links(&network, "c", "0123456789abcdef", "s");
+        let error = joining
+            .connect_address("c", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("secret forwarding"), "{error}");
+        // The same secret as the members: nothing to report.
+        let problems =
+            joining.set_secrets(&BTreeMap::from([("forwarding".to_owned(), "s".to_owned())]));
+        assert!(problems.is_empty(), "{problems:?}");
+        joining
+            .connect_address("c", Duration::from_secs(5))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(start_paused = true)]
