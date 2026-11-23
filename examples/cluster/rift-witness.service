@@ -2,9 +2,7 @@
 # Install it on the witness host as /etc/systemd/system/rift-witness.service,
 # with witness.toml as /var/lib/rift/cluster.toml, the certificates in
 # /etc/rift/cluster/ and /etc/rift/cluster.env (root, mode 0600) holding
-# RIFT_CLUSTER_TOKEN=<the same token on every peer> and, since rift.lua sets
-# forwarding.secret_env, RIFT_FORWARDING_SECRET=<the members' secret>, with a
-# copy of the members' rift.lua (and the files it names) in /var/lib/rift/.
+# RIFT_CLUSTER_TOKEN=<the same token on every peer>.
 [Unit]
 Description=Rift cluster witness
 Wants=network-online.target

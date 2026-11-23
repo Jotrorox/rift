@@ -142,7 +142,7 @@ fn check(config: &Config) -> io::Result<()> {
     }
     if let Some(path) = crate::extensions::storage::file_target(config) {
         return Err(super::invalid(format!(
-            "extensions.storage.path ({}): a store in a file of its own cannot be replicated; set extensions.storage.database = true instead (`rift cluster init` copies the file's entries into the instance database)",
+            "extensions.storage.path ({0}): a store in a file of its own cannot be replicated; set extensions.storage.database = true before `rift cluster init` and run it with --extension-store {0}, which copies the file's entries into the instance database",
             path.display()
         )));
     }

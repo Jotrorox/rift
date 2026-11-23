@@ -14,12 +14,16 @@ and are listed under **SDKs**.
 
 ### Fixed
 
-- `rift witness` now joins a cluster that sets `forwarding.secret_env` or
-  node tokens. It used to start without the shared secrets, so every member
-  refused its links ("secret forwarding is set on … but not on this peer")
-  whatever its host held. A witness takes them from its `rift.lua`, which
-  such a cluster therefore needs on the witness host (see
-  [witnesses](docs/clustering.md#voters-learners-and-witnesses)).
+- A new cluster peer started without a `rift.lua`, as the documented join
+  flow says, is no longer refused by the other peers because the forwarding
+  secret (or a node token) is "set on them but not on this peer": until it
+  has the deployed configuration it cannot know which variables hold the
+  secrets, so they are compared once it has. It then stops with an error
+  naming a variable the configuration needs but its host lacks. Witnesses,
+  which never had a configuration to name the secrets, are no longer
+  refused for the same reason. `rift --config <path>` with a path that does
+  not exist yet starts such a peer instead of failing to read the file. See
+  [clustering](docs/clustering.md#4-start-and-add-the-other-peers).
 
 ## [0.2.0] - 2026-11-23
 

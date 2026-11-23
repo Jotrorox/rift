@@ -1218,24 +1218,63 @@ pub(crate) fn file_target(config: &crate::config::Config) -> Option<&Path> {
     }
 }
 
-/// `rift cluster init`: copy every entry of the file-backed store `config`
-/// names into `extension_entries` of `database`, which then becomes the
-/// cluster's first state. Returns the file and the number of entries, or
-/// `None` without such a store (or file).
-pub(crate) fn copy_file_store(
+/// `rift cluster init`: the store file whose entries move into the instance
+/// database, the cluster's first state. Init records `rift.lua` as the
+/// first deployment and a cluster refuses a store in a file of its own, so
+/// the configuration must already say `extensions.storage.database = true`
+/// and `from` (`--extension-store`) names the file it used before. A
+/// configuration that still names the file is refused before init changes
+/// anything, so that no peer has to start with a hand-edited `rift.lua`.
+pub(crate) fn init_store_file(
     config: &crate::config::Config,
-    database: &Database,
-) -> io::Result<Option<(PathBuf, usize)>> {
-    let Some(storage) = config.extensions.as_ref().and_then(|s| s.storage.as_ref()) else {
-        return Ok(None);
-    };
-    let Target::File(path) = &storage.target else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
+    from: Option<&Path>,
+) -> io::Result<Option<PathBuf>> {
+    let storage = config.extensions.as_ref().and_then(|s| s.storage.as_ref());
+    match (storage.map(|storage| &storage.target), from) {
+        (Some(Target::File(path)), _) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "extensions.storage.path ({0}): a cluster cannot replicate a store in a file of its own, and init makes this rift.lua the first deployment; set extensions.storage = {{ database = true }} (keeping quota) and run init again with --extension-store {0}, which copies the file's entries into the instance database",
+                path.display()
+            ),
+        )),
+        (Some(Target::Database), Some(from)) => Ok(Some(from.to_owned())),
+        (None, Some(from)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "--extension-store {}: the configuration keeps no extension store; set extensions.storage = {{ database = true }} first",
+                from.display()
+            ),
+        )),
+        (_, None) => Ok(None),
     }
-    let store = Store::open(Some(storage), None)?;
+}
+
+/// Copy every entry of the store file `file` into `extension_entries` of
+/// `database` under the quotas of `config`'s store (see
+/// [`init_store_file`]). Returns the number of entries.
+pub(crate) fn copy_store_file(
+    config: &crate::config::Config,
+    file: &Path,
+    database: &Database,
+) -> io::Result<usize> {
+    if !file.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("--extension-store {}: no such store file", file.display()),
+        ));
+    }
+    let quotas = config
+        .extensions
+        .as_ref()
+        .and_then(|s| s.storage.as_ref())
+        .map(|storage| storage.quotas.clone())
+        .unwrap_or_default();
+    let storage = StorageConfig {
+        target: Target::File(file.to_owned()),
+        quotas,
+    };
+    let store = Store::open(Some(&storage), None)?;
     let entries: Vec<KvEntry> = store
         .memory()
         .entries
@@ -1245,6 +1284,7 @@ pub(crate) fn copy_file_store(
             value: Some(value.clone()),
         })
         .collect();
+    drop(store);
     prepare_shared(database)?;
     for chunk in entries.chunks(1024) {
         let op = KvOp::Mutate {
@@ -1257,12 +1297,12 @@ pub(crate) fn copy_file_store(
             other => {
                 return Err(shared_error(
                     database,
-                    format!("copying {}: {other:?}", path.display()),
+                    format!("copying {}: {other:?}", file.display()),
                 ));
             }
         }
     }
-    Ok(Some((path.clone(), entries.len())))
+    Ok(entries.len())
 }
 
 /// The store's schema component in the instance database and the version
@@ -1929,6 +1969,65 @@ mod tests {
             )
             .unwrap();
         assert!(Store::open(Some(&shared(16)), Some(&database)).is_err());
+    }
+
+    #[test]
+    fn cluster_init_moves_a_store_file_into_the_instance_database() {
+        let config = |storage: &str| {
+            crate::config::Config::from_lua(
+                &format!(
+                    "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:25001' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ storage = {storage} }} }}"
+                ),
+                "init.lua",
+            )
+            .unwrap()
+        };
+        let temp = Temporary::new();
+        let file = temp.config();
+        let store = Store::open(Some(&file), None).unwrap();
+        lua(&store)
+            .load("rift.store.set('one', 'key', 'value') rift.store.set('two', 'key', '')")
+            .exec()
+            .unwrap();
+        drop(store);
+        let path = file.path().to_owned();
+
+        // A configuration that still names the file is refused, with or
+        // without --extension-store: init would deploy it, and a cluster
+        // refuses it.
+        let named = config("{ path = 'state' }");
+        let error = init_store_file(&named, None).unwrap_err().to_string();
+        assert!(
+            error.contains("database = true") && error.contains("--extension-store"),
+            "{error}"
+        );
+        assert!(init_store_file(&named, Some(&path)).is_err());
+
+        let database_config = config("{ database = true, quota = { entries = 10 } }");
+        assert_eq!(init_store_file(&database_config, None).unwrap(), None);
+        assert_eq!(
+            init_store_file(&database_config, Some(&path)).unwrap(),
+            Some(path.clone())
+        );
+
+        let database = Arc::new(Database::memory());
+        assert_eq!(
+            copy_store_file(&database_config, &temp.0.join("missing"), &database)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            copy_store_file(&database_config, &path, &database).unwrap(),
+            2
+        );
+        let copied = Store::open(Some(&shared(16)), Some(&database)).unwrap();
+        lua(&copied)
+            .load(
+                "assert(rift.store.get('one', 'key') == 'value') assert(rift.store.get('two', 'key') == '')",
+            )
+            .exec()
+            .unwrap();
     }
 
     #[test]

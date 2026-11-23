@@ -24,11 +24,13 @@ use std::{
     time::Duration,
 };
 
-pub const USAGE: &str = "Usage: rift cluster init --peer <name> [--from-backup <file>] [--config <path>]\n\
+pub const USAGE: &str = "Usage: rift cluster init --peer <name> [--from-backup <file>] [--extension-store <file>] [--config <path>]\n\
     \x20   Create a cluster whose only voter is this peer (cluster.toml beside the configuration names it).\n\
     \x20   Its state starts as this Rift's instance database (SQLite; a PostgreSQL or MariaDB\n\
     \x20   installation runs `rift database copy --to rift.sqlite3` first).\n\
     \x20   With --from-backup, its state starts as a `rift admin cluster backup` copy.\n\
+    \x20   With --extension-store, the entries of the extension store file this Rift used move into\n\
+    \x20   the instance database; the configuration must already say extensions.storage.database = true.\n\
     rift cluster recover --peer <name> --i-understand-data-loss [--config <path>]\n\
     \x20   Make this peer the only voter when the others are gone for good. Writes only\n\
     \x20   the lost peers acknowledged are lost. Run it while Rift is stopped.\n\
@@ -42,6 +44,7 @@ struct Flags {
     peer: Option<String>,
     config: PathBuf,
     backup: Option<PathBuf>,
+    extension_store: Option<PathBuf>,
     data_loss: bool,
 }
 
@@ -50,6 +53,7 @@ fn flags(args: &[String]) -> io::Result<Flags> {
         peer: None,
         config: PathBuf::from("rift.lua"),
         backup: None,
+        extension_store: None,
         data_loss: false,
     };
     let mut args = args.iter();
@@ -63,6 +67,7 @@ fn flags(args: &[String]) -> io::Result<Flags> {
             "--peer" => flags.peer = Some(value()?),
             "--config" => flags.config = PathBuf::from(value()?),
             "--from-backup" => flags.backup = Some(PathBuf::from(value()?)),
+            "--extension-store" => flags.extension_store = Some(PathBuf::from(value()?)),
             "--i-understand-data-loss" => flags.data_loss = true,
             _ => return Err(super::invalid(USAGE)),
         }
@@ -121,6 +126,29 @@ async fn init(flags: Flags) -> io::Result<()> {
             "rift cluster init: a cluster replicates SQLite; copy the instance database with `rift database copy --to rift.sqlite3`, remove database.backend from the configuration, then run this again",
         ));
     }
+    // Init makes this rift.lua the first deployment, so it must already be
+    // what the cluster runs: a store in a file of its own is refused here,
+    // before anything changes, rather than when the peer starts.
+    let store_file = match &config {
+        Some(config) => {
+            crate::extensions::storage::init_store_file(config, flags.extension_store.as_deref())?
+        }
+        None => match &flags.extension_store {
+            Some(file) => {
+                return Err(super::invalid(format!(
+                    "--extension-store {}: {} is missing",
+                    file.display(),
+                    flags.config.display()
+                )));
+            }
+            None => None,
+        },
+    };
+    if store_file.is_some() && flags.backup.is_some() {
+        return Err(super::invalid(
+            "--extension-store cannot be combined with --from-backup: the backup holds the cluster's extension store already",
+        ));
+    }
     let database_path = instance_database(config.as_ref(), &settings);
     std::fs::create_dir_all(&settings.directory)?;
     let log = LogStore::open(&settings.raft_file())?;
@@ -139,15 +167,15 @@ async fn init(flags: Flags) -> io::Result<()> {
             )));
         }
         None => {
-            // A store in a file of its own cannot be replicated: its
-            // entries move into the instance database, the first state.
             if let Some(config) = &config {
                 let database = Database::open(&database_path)?;
-                if let Some((file, count)) =
-                    crate::extensions::storage::copy_file_store(config, &database)?
-                {
+                // A store in a file of its own cannot be replicated: its
+                // entries move into the instance database, the first state.
+                if let Some(file) = &store_file {
+                    let count =
+                        crate::extensions::storage::copy_store_file(config, file, &database)?;
                     println!(
-                        "rift: copied {count} entries of the extension store {} into {}; set extensions.storage.database = true, a cluster refuses the file",
+                        "rift: copied {count} entries of the extension store {} into {}; the file is no longer used and can be removed once the cluster runs",
                         file.display(),
                         database_path.display()
                     );
@@ -444,24 +472,22 @@ pub async fn witness(args: &[String]) -> io::Result<()> {
     let mut settings = load_settings(&flags.config, None)?;
     settings.witness = true;
     settings::set_local_peer(&settings.peer);
-    // The shared settings come from rift.lua when this host has one, and
-    // with them the shared secrets (the forwarding secret, the node tokens)
-    // whose equality every handshake checks: without them the members
-    // refuse the witness's links.
+    // The shared settings come from rift.lua when this host has one.
     let config = load_config(&flags.config)?;
+    let shared = config
+        .as_ref()
+        .and_then(|config| config.cluster.clone())
+        .unwrap_or_default();
     // A witness holds the whole state machine: the instance database.
     let database = Arc::new(Database::open_with(
         &instance_database(config.as_ref(), &settings),
         Mode::Replicated,
     )?);
     let name = settings.peer.clone();
-    let mut options = match &config {
-        Some(config) => Options::from_config(config, None)?,
-        None => Options::new(Default::default()),
-    };
-    // A witness takes no deployments, so its rift.lua is not compared with
-    // the members' configuration.
-    options.config_hash.clear();
+    let mut options = Options::new(shared);
+    // A witness never uses the forwarding secret or node tokens and need
+    // not hold them, so the handshakes do not compare them.
+    options.secrets_unknown = true;
     // A witness applies every entry kind a player-serving peer applies.
     options.components = super::attach::cluster_components(config.as_ref())?;
     options.database = Some(database.clone());
