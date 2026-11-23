@@ -468,9 +468,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The release profile (thin LTO, one codegen unit) links every test
     # executable slowly, so the targets are split across jobs. Together the
-    # suites are `cargo test --release --all-targets` for the whole workspace.
+    # suites are `cargo test --release --all-targets` for the whole workspace,
+    # each target in exactly one suite: integration takes only tests/*.rs
+    # (`--test '*'`), since `--tests` would build and run the library's unit
+    # tests again, the largest test executable, which unit already covers.
     # The cluster code and tests/cluster.rs add about ten minutes to the
-    # release build; macOS integration takes about 45 minutes uncached.
+    # release build.
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -487,7 +490,7 @@ jobs:
           - suite: unit
             select: -p rift --lib --bins --examples --benches
           - suite: integration
-            select: -p rift --tests
+            select: '-p rift --test *'
           - suite: crates
             select: --workspace --exclude rift --all-targets
     steps:
@@ -513,6 +516,8 @@ jobs:
           SELECT: ${{ matrix.select }}
         run: |
           # Word splitting is intended: SELECT holds several cargo arguments.
+          # Globbing is not: `--test *` is a pattern for cargo, not the shell.
+          set -f
           # shellcheck disable=SC2086
           python scripts/ci_test.py --release $SELECT
 
