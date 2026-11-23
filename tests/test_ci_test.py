@@ -93,6 +93,11 @@ class CiTestTests(unittest.TestCase):
             ),
             ["--release", "--features", "a"],
         )
+        # The release integration suite selects every tests/*.rs by pattern.
+        self.assertEqual(
+            ci_test.build_arguments(["--release", "-p", "rift", "--test", "*"]),
+            ["--release"],
+        )
 
     def test_a_passing_run_is_not_repeated(self):
         cargo = Cargo((0, ""))
