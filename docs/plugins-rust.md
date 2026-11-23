@@ -49,7 +49,7 @@ strip = true
   works as well.
 - The release profile keeps the component small.
 - Check the result with `wasm-tools component wit my_plugin.wasm`: it exports
-  `rift:plugin/handler@0.2.1` and imports the `rift:plugin/*` interfaces it
+  `rift:plugin/handler@0.3.0` and imports the `rift:plugin/*` interfaces it
   uses.
 
 ## A minimal plugin

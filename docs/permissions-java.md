@@ -36,8 +36,8 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.github.jotrorox.rift:rift-permissions-api:0.1.0")
-    testImplementation("io.github.jotrorox.rift:rift-permissions-test:0.1.0")
+    compileOnly("io.github.jotrorox.rift:rift-permissions-api:0.2.0")
+    testImplementation("io.github.jotrorox.rift:rift-permissions-test:0.2.0")
 }
 ```
 
@@ -49,7 +49,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly "io.github.jotrorox.rift:rift-permissions-api:0.1.0"
+    compileOnly "io.github.jotrorox.rift:rift-permissions-api:0.2.0"
 }
 ```
 
@@ -64,7 +64,7 @@ Maven:
 <dependency>
   <groupId>io.github.jotrorox.rift</groupId>
   <artifactId>rift-permissions-api</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <scope>provided</scope>
 </dependency>
 ```

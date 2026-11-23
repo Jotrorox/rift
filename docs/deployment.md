@@ -153,17 +153,17 @@ Each release publishes a multi-platform image (`linux/amd64` and
 release's own glibc executables, with a build provenance attestation:
 
 ```sh
-docker pull ghcr.io/jotrorox/rift:0.1.0   # or :latest for the newest release
-gh attestation verify oci://ghcr.io/jotrorox/rift:0.1.0 --repo Jotrorox/rift
+docker pull ghcr.io/jotrorox/rift:0.2.0   # or :latest for the newest release
+gh attestation verify oci://ghcr.io/jotrorox/rift:0.2.0 --repo Jotrorox/rift
 ```
 
 - Release candidates are published under their own version tag
-  (`0.1.0-rc.1`) and never as `latest`.
+  (`0.2.0-rc.1`) and never as `latest`.
 - The image contains Rift only and has no Java. Use it for the proxy and run
   game servers on [nodes](nodes.md) or other hosts, or build your own image on
   top of it for managed servers.
 - To use it with the Compose example, set
-  `RIFT_IMAGE=ghcr.io/jotrorox/rift:0.1.0` and start with
+  `RIFT_IMAGE=ghcr.io/jotrorox/rift:0.2.0` and start with
   `docker compose -f examples/compose.yaml up -d --no-build`.
 
 ### Build and start with Compose

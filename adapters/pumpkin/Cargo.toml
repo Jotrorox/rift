@@ -1,7 +1,7 @@
 [package]
 name = "rift-permissions-pumpkin"
 description = "Rift permissions for Pumpkin: answers permission checks from the proxy's replica"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "BSD-2-Clause"
 publish = false

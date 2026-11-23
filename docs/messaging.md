@@ -228,8 +228,8 @@ Maven repository described under [artifacts](permissions-java.md#artifacts):
 
 ```kotlin
 dependencies {
-    implementation("io.github.jotrorox.rift:rift-messaging:0.1.0")
-    implementation("io.github.jotrorox.rift:rift-control:0.1.0") // RiftControl, RiftEvents
+    implementation("io.github.jotrorox.rift:rift-messaging:0.2.0")
+    implementation("io.github.jotrorox.rift:rift-control:0.2.0") // RiftControl, RiftEvents
 }
 ```
 

@@ -242,10 +242,10 @@ the same Pumpkin revision:
 ```toml
 [dependencies]
 pumpkin = { package = "pumpkin-core", git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "ae36c3a56059a82147cf52ffd55bf6e256f81107" }
-rift-permissions-pumpkin = { git = "https://github.com/Jotrorox/rift", tag = "v0.1.0", default-features = false }
+rift-permissions-pumpkin = { git = "https://github.com/Jotrorox/rift", tag = "v0.2.0", default-features = false }
 
 [dev-dependencies]
-rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0.1.0" }
+rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0.2.0" }
 ```
 
 `player.has_permission(&server, node)` already includes Rift's answer. The

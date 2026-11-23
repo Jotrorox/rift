@@ -29,8 +29,8 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.github.jotrorox.rift:rift-network-api:0.1.0")
-    testImplementation("io.github.jotrorox.rift:rift-network-test:0.1.0")
+    compileOnly("io.github.jotrorox.rift:rift-network-api:0.2.0")
+    testImplementation("io.github.jotrorox.rift:rift-network-test:0.2.0")
 }
 ```
 
